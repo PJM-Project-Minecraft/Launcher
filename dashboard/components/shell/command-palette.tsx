@@ -34,8 +34,8 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       return;
     }
     const timer = setTimeout(() => {
-      api<AdminUser[]>(`/api/admin/users?q=${encodeURIComponent(query.trim())}`)
-        .then((list) => setUsers((list ?? []).slice(0, 6)))
+      api<{ items: AdminUser[] }>(`/api/admin/users?q=${encodeURIComponent(query.trim())}`)
+        .then((res) => setUsers((res.items ?? []).slice(0, 6)))
         .catch(() => setUsers([]));
     }, 250);
     return () => clearTimeout(timer);

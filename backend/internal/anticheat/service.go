@@ -32,6 +32,7 @@ type Service struct {
 	nativeLinux  string
 	nativeWin    string
 	kickSeverity int
+	notifier     Notifier
 	now          func() time.Time
 }
 
@@ -45,6 +46,11 @@ func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifi
 		kickSeverity: 7,
 		now:          time.Now,
 	}
+}
+
+// SetNotifier подключает отправку алертов о детектах (nil — алерты выключены).
+func (s *Service) SetNotifier(n Notifier) {
+	s.notifier = n
 }
 
 // SetKickSeverity задаёт порог серьёзности, с которого игрок кикается из игры.
@@ -206,11 +212,16 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 	if err := s.db.WithContext(ctx).Create(&rec).Error; err != nil {
 		return err
 	}
-	if s.autoBan && d.Severity >= autoBanSeverity {
+	autoBanned := s.autoBan && d.Severity >= autoBanSeverity
+	if autoBanned {
 		_ = s.BanAccount(ctx, userUUID, login, "auto: "+d.Signature, "anticheat")
 		if hwidHash != "" {
 			_ = s.BanHwid(ctx, hwidHash, "auto: "+d.Signature, "anticheat")
 		}
+	}
+	if s.notifier != nil {
+		// Алерт не должен задерживать ответ лаунчеру/агенту.
+		go s.notifier.NotifyDetection(rec, autoBanned)
 	}
 	return nil
 }

@@ -97,6 +97,10 @@ func main() {
 	acService := anticheat.NewService(db, cfg.AnticheatSecret, cfg.AnticheatAutoBan, yggService.Store(), cfg.AnticheatAgentPath)
 	acService.SetNativePaths(cfg.AnticheatNativeLinux, cfg.AnticheatNativeWin)
 	acService.SetKickSeverity(cfg.AnticheatKickSeverity)
+	if notifier := anticheat.NewTelegramNotifier(cfg.AnticheatAlertBotToken, cfg.AnticheatAlertChatID); notifier != nil {
+		acService.SetNotifier(notifier)
+		slog.Info("anticheat: telegram alerts enabled", "chat_id", cfg.AnticheatAlertChatID)
+	}
 	anticheat.NewHandler(acService).RegisterRoutes(app, authService.RequireAuth())
 
 	slog.Info(

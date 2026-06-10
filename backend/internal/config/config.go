@@ -34,6 +34,9 @@ type Config struct {
 	AnticheatKickSeverity int
 	// TokenTTL — срок жизни JWT-сессии (логин в лаунчере и админке).
 	TokenTTL time.Duration
+	// Алерты античита в Telegram: токен бота (например, vps-ops-bot) и chat_id получателя.
+	AnticheatAlertBotToken string
+	AnticheatAlertChatID   string
 }
 
 func Load() Config {
@@ -71,6 +74,8 @@ func Load() Config {
 		AnticheatNativeWin:    env("ANTICHEAT_NATIVE_WIN", filepath.Join("data", "anticheat.dll")),
 		AnticheatKickSeverity: atoiDefault(env("ANTICHEAT_KICK_SEVERITY", "7"), 7),
 		TokenTTL:              time.Duration(atoiDefault(env("TOKEN_TTL_HOURS", "168"), 168)) * time.Hour,
+		AnticheatAlertBotToken: env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
+		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),
 	}
 
 	if cfg.JWTSecret == "dev-only-change-me" {

@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"launcher-backend/internal/models"
@@ -59,8 +60,13 @@ func ListUsersAdmin(ctx context.Context, db *gorm.DB, q string, page int) ([]Adm
 	}
 	base := db.WithContext(ctx).Model(&models.User{})
 	if q != "" {
-		like := "%" + q + "%"
-		base = base.Where("login LIKE ? OR email LIKE ? OR id = ?", like, like, q)
+		// LOWER + CAST: поиск регистронезависимый, а сравнение uuid-колонки с
+		// произвольной строкой не роняет запрос в Postgres (id имеет тип uuid).
+		like := "%" + strings.ToLower(q) + "%"
+		base = base.Where(
+			"LOWER(login) LIKE ? OR LOWER(email) LIKE ? OR CAST(id AS TEXT) = ? OR provider_uuid = ?",
+			like, like, strings.ToLower(q), q,
+		)
 	}
 	var total int64
 	if err := base.Count(&total).Error; err != nil {
