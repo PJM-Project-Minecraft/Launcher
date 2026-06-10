@@ -3,99 +3,143 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { AuthUser, api, getToken, setToken } from '../ui/auth';
+import { Pickaxe } from 'lucide-react';
+import { apiUrl, getToken, setToken } from '../lib/api';
+import type { AuthUser } from '../lib/types';
+import { Card } from '../../components/ui/card';
+import { Field } from '../../components/ui/field';
+import { Input } from '../../components/ui/input';
+import { Button } from '../../components/ui/button';
+import { useToast } from '../../components/ui/toast';
+
+type LoginResponse = {
+  token?: string;
+  user?: AuthUser;
+  message?: string;
+  requiresTwoFactor?: boolean;
+};
 
 export default function LoginPage() {
   const router = useRouter();
-  const [form, setForm] = useState({ login: '', password: '', totp: '' });
-  const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const [login, setLogin] = useState('');
+  const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
+  const [needTotp, setNeedTotp] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  // Если уже авторизованы — сразу внутрь.
+  // Уже авторизованный админ — сразу внутрь. Raw fetch, чтобы 401 не дёргал авто-разлогин.
   useEffect(() => {
-    const t = getToken();
-    if (!t) return;
-    api<AuthUser>('/api/auth/me', { token: t })
+    const token = getToken();
+    if (!token) return;
+    fetch(`${apiUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => (r.ok ? (r.json() as Promise<AuthUser>) : null))
       .then((u) => {
-        if (u.role === 'admin') router.replace('/');
+        if (u?.role === 'admin') router.replace('/');
       })
       .catch(() => {});
   }, [router]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    setBusy(true);
-    setMessage('');
+    setLoading(true);
     try {
-      const res = await api<{ token: string; user: AuthUser }>('/api/auth/login', {
-        method: 'POST',
-        body: { login: form.login, password: form.password, totp: form.totp || undefined }
-      });
-      if (res.user.role !== 'admin') {
-        throw new Error('Аккаунт не имеет прав администратора');
+      // Raw fetch: ApiError не доносит флаг requiresTwoFactor из тела ошибки.
+      let res: Response;
+      try {
+        res = await fetch(`${apiUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ login, password, totp: totp || undefined })
+        });
+      } catch {
+        toast('error', 'Backend недоступен');
+        return;
       }
-      setToken(res.token);
+      const data = (await res.json().catch(() => ({}))) as LoginResponse;
+
+      if (!res.ok) {
+        if (data.requiresTwoFactor) {
+          setNeedTotp(true);
+          toast('info', 'Введите код из приложения 2FA');
+        } else {
+          toast('error', data.message ?? `Ошибка ${res.status}`);
+        }
+        return;
+      }
+      if (!data.token || !data.user) {
+        toast('error', 'Некорректный ответ сервера');
+        return;
+      }
+      if (data.user.role !== 'admin') {
+        toast('error', 'Аккаунт не имеет прав администратора');
+        return;
+      }
+      setToken(data.token);
       router.replace('/');
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Ошибка входа');
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
   return (
-    <main className="login-screen">
-      <motion.form
-        onSubmit={submit}
-        className="admin-panel glass login-card"
-        initial={{ opacity: 0, y: 20 }}
+    <main className="flex min-h-screen items-center justify-center bg-bg px-4">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
+        transition={{ duration: 0.35 }}
+        className="w-full max-w-sm"
       >
-        <div className="brand-lockup" style={{ marginBottom: 8 }}>
-          <div className="brand-mark">LL</div>
-          <div>
-            <strong>Launcher</strong>
-            <span>Admin</span>
+        <Card className="w-full p-6">
+          <div className="mb-6 flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-edge bg-surface-strong">
+              <Pickaxe size={18} className="text-fg" />
+            </div>
+            <div>
+              <h1 className="text-base font-bold text-fg">PJM Admin</h1>
+              <p className="text-xs text-fg-muted">Вход в панель управления</p>
+            </div>
           </div>
-        </div>
-        <p className="eyebrow">Вход в панель</p>
-        <h2 style={{ marginTop: 0 }}>Авторизация</h2>
 
-        <label>
-          <span>Логин</span>
-          <input
-            autoFocus
-            value={form.login}
-            onChange={(e) => setForm({ ...form, login: e.target.value })}
-            placeholder="nickname"
-          />
-        </label>
-        <label>
-          <span>Пароль</span>
-          <input
-            type="password"
-            value={form.password}
-            onChange={(e) => setForm({ ...form, password: e.target.value })}
-            placeholder="••••••••"
-          />
-        </label>
-        <label>
-          <span>2FA (если включён)</span>
-          <input
-            value={form.totp}
-            onChange={(e) => setForm({ ...form, totp: e.target.value })}
-            placeholder="000000"
-            inputMode="numeric"
-          />
-        </label>
-
-        <button type="submit" className="primary-button" disabled={busy} style={{ marginTop: 12 }}>
-          {busy ? 'Вход…' : 'Войти'}
-        </button>
-
-        {message && <p className="panel-message" style={{ color: '#f87171' }}>{message}</p>}
-      </motion.form>
+          <form onSubmit={submit} className="flex flex-col gap-4">
+            <Field label="Логин">
+              <Input
+                autoFocus
+                value={login}
+                onChange={(e) => setLogin(e.target.value)}
+                placeholder="nickname"
+                autoComplete="username"
+              />
+            </Field>
+            <Field label="Пароль">
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                autoComplete="current-password"
+              />
+            </Field>
+            {needTotp && (
+              <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }}>
+                <Field label="Код 2FA" hint="Шестизначный код из приложения-аутентификатора">
+                  <Input
+                    autoFocus
+                    value={totp}
+                    onChange={(e) => setTotp(e.target.value)}
+                    placeholder="000000"
+                    inputMode="numeric"
+                    maxLength={6}
+                  />
+                </Field>
+              </motion.div>
+            )}
+            <Button type="submit" variant="primary" loading={loading} className="mt-1 w-full">
+              Войти
+            </Button>
+          </form>
+        </Card>
+      </motion.div>
     </main>
   );
 }
