@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: launcher
       POSTGRES_USER: launcher
-      POSTGRES_PASSWORD: launcher_dev_password
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-launcher_dev_password}"
     ports:
       # dev: открыт на 5432 (нужно dev.sh). prod задаёт POSTGRES_BIND=127.0.0.1:5432 в .env
       - "${POSTGRES_BIND:-5432}:5432"
@@ -13,58 +13,56 @@ services:
       - postgres_data:/var/lib/postgresql/data
       # Схема БД создаётся приложением через GORM AutoMigrate при старте server/bot.
       # Старые raw-SQL миграции больше не накатываются, чтобы не конфликтовать с моделями.
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: launcher
-      MINIO_ROOT_PASSWORD: launcher_dev_password
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U launcher -d launcher"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   # API-сервер (Fiber). Схема БД создаётся GORM AutoMigrate при старте.
   server:
     build: ./backend
     command: ["/app/server"]
+    restart: unless-stopped
     environment:
       SERVER_ADDR: "0.0.0.0:8080"
-      DATABASE_URL: "postgres://launcher:launcher_dev_password@postgres:5432/launcher?sslmode=disable"
+      DATABASE_URL: "postgres://launcher:${POSTGRES_PASSWORD:-launcher_dev_password}@postgres:5432/launcher?sslmode=disable"
       AUTH_MODE: "${AUTH_MODE:-local}"
       JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
-      ALLOWED_ORIGINS: "http://127.0.0.1:3000,http://localhost:3000"
-      APP_ENV: "production"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}"
+      # prod (.env на VPS): APP_ENV=production — сервер откажется стартовать с дев-секретами.
+      APP_ENV: "${APP_ENV:-development}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       # dev: 0.0.0.0:8080. prod задаёт SERVER_BIND=127.0.0.1:8082 в .env (за nginx)
       - "${SERVER_BIND:-8080}:8080"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
 
   # Telegram-бот. Делит ту же БД, что и server.
   bot:
     build: ./backend
     command: ["/app/bot"]
+    restart: unless-stopped
     environment:
-      DATABASE_URL: "postgres://launcher:launcher_dev_password@postgres:5432/launcher?sslmode=disable"
+      DATABASE_URL: "postgres://launcher:${POSTGRES_PASSWORD:-launcher_dev_password}@postgres:5432/launcher?sslmode=disable"
       AUTH_MODE: "${AUTH_MODE:-local}"
+      APP_ENV: "${APP_ENV:-development}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       ADMIN_TELEGRAM_IDS: "${ADMIN_TELEGRAM_IDS:-}"
       TOTP_ISSUER: "${TOTP_ISSUER:-Launcher Accounts}"
       DONATE_SHOP_URL: "${DONATE_SHOP_URL:-https://shop.likonchik.xyz}"
       LAUNCHER_EXE_PATH: "${LAUNCHER_EXE_PATH:-}"
     depends_on:
-      - postgres
-      - server
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
-  minio_data:
-

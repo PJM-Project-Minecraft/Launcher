@@ -168,8 +168,6 @@ if $HAS_DOCKER; then
   docker compose logs -f --tail=20 2>&1 | while IFS= read -r line; do
     case "$line" in
       *postgres*) echo -e "${COLOR_POSTGRES}${BOLD}[POSTGRES]${RESET} ${line}" ;;
-      *redis*)    echo -e "${COLOR_REDIS}${BOLD}[REDIS]${RESET}    ${line}" ;;
-      *minio*)    echo -e "${COLOR_MINIO}${BOLD}[MINIO]${RESET}    ${line}" ;;
       *)          echo -e "${COLOR_DOCKER}${BOLD}[DOCKER]${RESET}   ${line}" ;;
     esac
   done &
@@ -177,8 +175,6 @@ if $HAS_DOCKER; then
 
   # Wait for services to be ready
   wait_for_port "POSTGRES" "127.0.0.1" 5432 30 "$COLOR_POSTGRES"
-  wait_for_port "REDIS"    "127.0.0.1" 6379 15 "$COLOR_REDIS"
-  wait_for_port "MINIO"    "127.0.0.1" 9000 15 "$COLOR_MINIO"
 
   echo ""
   log "$COLOR_SUCCESS" "DOCKER" "All infrastructure services are up ✓"
@@ -260,8 +256,6 @@ echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_SUCCESS}${BOLD}✓ All servi
 echo -e "${BOLD}${COLOR_SYSTEM}├──────────────────────────────────────────────────────────────┤${RESET}"
 if $HAS_DOCKER; then
   echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_POSTGRES}PostgreSQL${RESET}   →  127.0.0.1:${BOLD}5432${RESET}                          ${BOLD}${COLOR_SYSTEM}│${RESET}"
-  echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_REDIS}Redis${RESET}        →  127.0.0.1:${BOLD}6379${RESET}                          ${BOLD}${COLOR_SYSTEM}│${RESET}"
-  echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_MINIO}MinIO${RESET}        →  127.0.0.1:${BOLD}9000${RESET}  ${DIM}(console :9001)${RESET}        ${BOLD}${COLOR_SYSTEM}│${RESET}"
 else
   echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_WARN}SQLite${RESET}       →  backend/data/launcher.db                  ${BOLD}${COLOR_SYSTEM}│${RESET}"
 fi

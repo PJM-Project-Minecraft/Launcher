@@ -15,7 +15,8 @@ RUN CGO_ENABLED=1 go build -o /out/server ./cmd/server \
 FROM eclipse-temurin:21-jre AS jre
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# wget нужен для docker compose healthcheck (GET /health).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=jre /opt/java/openjdk /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
