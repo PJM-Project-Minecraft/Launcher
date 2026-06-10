@@ -1026,7 +1026,7 @@ fn ensure_authlib_injector(config: &AppConfig) -> Option<PathBuf> {
     if path.exists() {
         return Some(path);
     }
-    let client = http_client().ok()?;
+    let client = download_client().ok()?;
     let url = format!(
         "{}/api/yggdrasil/authlib-injector.jar",
         config.api_url.trim_end_matches('/')
@@ -1052,7 +1052,7 @@ fn ensure_agent_jar(config: &AppConfig) -> Option<PathBuf> {
         "{}/api/anticheat/agent.jar",
         config.api_url.trim_end_matches('/')
     );
-    if let Ok(client) = http_client() {
+    if let Ok(client) = download_client() {
         if let Ok(response) = client.get(&url).send() {
             if response.status().is_success() {
                 if let Ok(bytes) = response.bytes() {
@@ -1098,7 +1098,7 @@ fn ensure_native_agent(config: &AppConfig) -> Option<PathBuf> {
         config.api_url.trim_end_matches('/'),
         os_token
     );
-    if let Ok(client) = http_client() {
+    if let Ok(client) = download_client() {
         if let Ok(response) = client.get(&url).send() {
             if response.status().is_success() {
                 if let Ok(bytes) = response.bytes() {
@@ -1247,7 +1247,7 @@ fn download_files(
         return Ok(());
     }
 
-    let client = http_client()?;
+    let client = download_client()?;
     let total_bytes = files.iter().map(|file| file.size.max(0) as u64).sum::<u64>().max(1);
     let completed_bytes = AtomicU64::new(0);
     let completed_files = AtomicUsize::new(0);
@@ -1384,7 +1384,7 @@ fn ensure_java_runtime(
     let java_root = safe_join(&paths.files_root, &java_root_rel)?;
     ensure_directory(&java_root, "Не удалось создать папку Java runtime.")?;
 
-    let client = http_client()?;
+    let client = download_client()?;
     let index_response = client
         .get(JAVA_RUNTIME_INDEX_URL)
         .send()
@@ -2232,6 +2232,16 @@ fn post_progress(
 fn http_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "Не удалось создать HTTP клиент.".to_string())
+}
+
+/// Клиент для скачивания файлов: без общего таймаута (большие файлы качаются
+/// дольше 30 с), мёртвое соединение обнаруживается connect-таймаутом и TCP keepalive.
+fn download_client() -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(20))
         .build()
         .map_err(|_| "Не удалось создать HTTP клиент.".to_string())
 }
