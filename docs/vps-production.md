@@ -225,3 +225,34 @@ scripts/prod/vps-install-dashboard.sh \
 scripts/prod/build-player-launcher.sh \
   --api-url https://launcher.example.com
 ```
+
+## 8. Бэкапы БД
+
+На VPS дампы снимает `scripts/prod/backup-db.sh` (pg_dump из compose-контейнера, gzip, ротация 14 шт.):
+
+```bash
+# установка cron (раз в сутки в 04:00)
+(crontab -l 2>/dev/null | grep -v backup-db.sh; \
+ echo "0 4 * * * /root/Launcher/scripts/prod/backup-db.sh >> /var/log/launcher-backup.log 2>&1") | crontab -
+
+# ручной запуск / проверка
+/root/Launcher/scripts/prod/backup-db.sh
+ls -lt /root/backups/launcher | head
+```
+
+Восстановление из дампа:
+
+```bash
+cd /root/Launcher
+gunzip -c /root/backups/launcher/launcher-XXXX.sql.gz | docker compose exec -T postgres psql -U launcher -d launcher
+```
+
+Дампы лежат на том же VPS — рекомендуется периодически копировать каталог
+`/root/backups/launcher` за его пределы (rclone в облако или scp на домашнюю машину):
+
+```bash
+scp root@13.140.17.105:/root/backups/launcher/$(ssh root@13.140.17.105 'ls -1t /root/backups/launcher | head -1') ~/backups/
+```
+
+Важно: с введением fail-fast проверки секретов в `/root/Launcher/.env` должны быть
+`APP_ENV=production` и настоящий `JWT_SECRET` — иначе backend откажется стартовать.
