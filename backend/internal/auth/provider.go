@@ -75,7 +75,6 @@ func (p HTTPProvider) SignIn(ctx context.Context, login, password, totp string) 
 		"url", p.url,
 		"login", login,
 		"has_totp", totp != "",
-		"payload", string(payload),
 	)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(payload))
@@ -96,10 +95,7 @@ func (p HTTPProvider) SignIn(ctx context.Context, login, password, totp string) 
 		return ProviderSignInResponse{}, err
 	}
 
-	slog.Info("auth provider response",
-		"status", res.StatusCode,
-		"body", string(body),
-	)
+	slog.Info("auth provider response", "status", res.StatusCode)
 
 	if res.StatusCode == http.StatusOK {
 		response := ProviderSignInResponse{Login: login, Message: "Успешная авторизация"}
