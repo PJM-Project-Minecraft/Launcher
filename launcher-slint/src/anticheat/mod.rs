@@ -41,6 +41,15 @@ pub struct GuardOk {
     pub nonce: String,
 }
 
+/// Ошибки handshake/init, различающие форс-апдейт и сетевые сбои:
+/// UpdateRequired блокирует запуск, Network — fail-open (M1).
+enum InitError {
+    UpdateRequired(String),
+    // Полезная нагрузка — диагностика; в M1 не читается (fail-open игнорирует
+    // причину), но строку несём для будущего логирования и map_err от http_client.
+    Network(#[allow(dead_code)] String),
+}
+
 /// Выполняет pre-launch проверки. Возвращает Err с причиной, если запуск заблокирован
 /// (бан HWID/аккаунта). Сетевые/прочие ошибки в M1 не блокируют запуск (fail-open),
 /// чтобы недоступность бэкенда не ломала игру — enforcement приходит в M2.
@@ -64,8 +73,10 @@ pub fn pre_launch_guard(config: &AppConfig, token: &str) -> Result<GuardOk, Stri
                 nonce: result.nonce,
             })
         }
+        // Форс-апдейт (426): запуск блокируется до обновления лаунчера.
+        Err(InitError::UpdateRequired(message)) => Err(message),
         // fail-open в M1: при сетевой ошибке не блокируем игрока.
-        Err(_) => Ok(GuardOk {
+        Err(InitError::Network(_)) => Ok(GuardOk {
             launch_token: String::new(),
             nonce: String::new(),
         }),
@@ -117,8 +128,8 @@ fn init_handshake(
     token: &str,
     hwid_hash: &str,
     detections: &[scan::Detection],
-) -> Result<InitResult, String> {
-    let client = http_client()?;
+) -> Result<InitResult, InitError> {
+    let client = http_client().map_err(InitError::Network)?;
     let url = format!(
         "{}/api/anticheat/handshake/init",
         config.api_url.trim_end_matches('/')
@@ -130,16 +141,33 @@ fn init_handshake(
     let response = client
         .post(url)
         .bearer_auth(token)
+        // Серверный форс-апдейт: бэкенд отвечает 426, если версия ниже
+        // минимальной обязательной.
+        .header("X-Launcher-Version", env!("CARGO_PKG_VERSION"))
         .json(&body)
         .send()
-        .map_err(|_| "init request failed".to_string())?;
+        .map_err(|_| InitError::Network("init request failed".to_string()))?;
 
     let status = response.status();
+    // 426 = требуется обновление лаунчера: блокируем запуск с сообщением сервера.
+    if status.as_u16() == 426 {
+        let message = response
+            .json::<serde_json::Value>()
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| "Требуется обновление лаунчера.".to_string());
+        return Err(InitError::UpdateRequired(message));
+    }
     // 403 = запуск заблокирован: тело содержит причину (allowed:false).
     if status.as_u16() == 403 || status.is_success() {
         return response
             .json::<InitResult>()
-            .map_err(|_| "init parse failed".to_string());
+            .map_err(|_| InitError::Network("init parse failed".to_string()));
     }
-    Err(format!("init http {}", status.as_u16()))
+    Err(InitError::Network(format!("init http {}", status.as_u16())))
 }

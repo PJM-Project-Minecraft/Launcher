@@ -97,6 +97,7 @@ fn exe_path() -> Result<PathBuf, String> {
 }
 
 /// Временный файл рядом с бинарником: launcher(.exe) -> launcher.update.partial.
+/// На Windows with_extension срезает ".exe" (launcher.exe -> launcher.update.partial) — это намеренно; cleanup_leftovers использует те же with_extension, имена согласованы.
 fn staging_path(exe: &Path) -> PathBuf {
     exe.with_extension("update.partial")
 }

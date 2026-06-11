@@ -3,8 +3,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -43,6 +43,139 @@ struct RuntimeState {
     user: Option<AuthUser>,
     profiles: Vec<ProfileSummary>,
     selected_profile_id: Option<String>,
+}
+
+/// Состояние автообновления. Глобальное (OnceLock): проверка живёт дольше
+/// сессии логина и дёргается из SSE-слушателя, периодики и старта.
+struct UpdateShared {
+    /// Защита от параллельных скачиваний при множественных триггерах.
+    in_progress: AtomicBool,
+    /// Скачанное и проверенное обновление: (инфо, путь к staged-файлу).
+    staged: Mutex<Option<(updater::UpdateInfo, PathBuf)>>,
+}
+
+static UPDATE_SHARED: OnceLock<Arc<UpdateShared>> = OnceLock::new();
+
+fn update_shared() -> Arc<UpdateShared> {
+    UPDATE_SHARED
+        .get_or_init(|| {
+            Arc::new(UpdateShared {
+                in_progress: AtomicBool::new(false),
+                staged: Mutex::new(None),
+            })
+        })
+        .clone()
+}
+
+/// Фоновая проверка обновления: запрос к бэкенду, скачивание и стейджинг.
+/// Все UI-обновления — через invoke_from_event_loop. Повторный вызов во время
+/// активной проверки игнорируется.
+fn spawn_update_check(app_weak: Weak<AppWindow>, config: AppConfig) {
+    let shared = update_shared();
+    if shared.in_progress.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(move || {
+        run_update_check(&app_weak, &config, &shared);
+        shared.in_progress.store(false, Ordering::SeqCst);
+    });
+}
+
+fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc<UpdateShared>) {
+    let info = match updater::check_update(&config.api_url) {
+        Ok(info) => info,
+        // Сервер недоступен — тихо ждём следующего триггера (старт/SSE/30 мин).
+        Err(_) => return,
+    };
+    if !info.update_available {
+        return;
+    }
+
+    // Уже скачали именно эту версию — только освежаем UI.
+    let already_staged = shared
+        .staged
+        .lock()
+        .ok()
+        .and_then(|staged| {
+            staged
+                .as_ref()
+                .map(|(stored, _)| stored.latest_version == info.latest_version)
+        })
+        .unwrap_or(false);
+    if already_staged {
+        set_update_ui(app_weak, &info, true, String::new());
+        return;
+    }
+
+    set_update_ui(
+        app_weak,
+        &info,
+        false,
+        format!("Скачивается обновление {}…", info.latest_version),
+    );
+
+    match updater::download_and_stage(&config.api_url, &info) {
+        Ok(staged_path) => {
+            if let Ok(mut staged) = shared.staged.lock() {
+                *staged = Some((info.clone(), staged_path));
+            }
+            set_update_ui(app_weak, &info, true, String::new());
+        }
+        Err(message) => {
+            // Ошибка остаётся в баннере; повтор — по следующему триггеру.
+            set_update_ui(app_weak, &info, false, message);
+        }
+    }
+}
+
+/// Пробрасывает состояние обновления в UI-свойства (из любого потока).
+fn set_update_ui(app_weak: &Weak<AppWindow>, info: &updater::UpdateInfo, ready: bool, status: String) {
+    let app_weak = app_weak.clone();
+    let version = info.latest_version.clone();
+    let mandatory = info.mandatory;
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = app_weak.upgrade() {
+            app.set_update_ready(ready);
+            app.set_update_mandatory(mandatory);
+            app.set_update_version(version.into());
+            app.set_update_status(status.into());
+        }
+    });
+}
+
+/// Колбэк «Перезапустить»: подменяет бинарник и перезапускает процесс.
+fn register_update_restart_handler(app: &AppWindow) {
+    let app_weak = app.as_weak();
+    app.on_update_restart_requested(move || {
+        let shared = update_shared();
+        let staged = shared
+            .staged
+            .lock()
+            .ok()
+            .and_then(|staged| staged.clone());
+        let Some((info, staged_path)) = staged else {
+            return;
+        };
+        if let Err(message) = updater::apply_and_restart(&staged_path) {
+            // Подмена не удалась: сбрасываем staged (файл мог быть повреждён).
+            if let Ok(mut staged) = shared.staged.lock() {
+                *staged = None;
+            }
+            if let Some(app) = app_weak.upgrade() {
+                app.set_update_ready(false);
+                app.set_update_mandatory(info.mandatory);
+                app.set_update_status(message.into());
+            }
+        }
+    });
+}
+
+/// Страховочный фоновый опрос обновлений раз в 30 минут (SSE — основной канал).
+fn start_periodic_update_check(app_weak: Weak<AppWindow>, config: AppConfig) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(30 * 60));
+        spawn_update_check(app_weak.clone(), config.clone());
+    });
 }
 
 #[derive(Debug, Serialize)]
@@ -273,6 +406,9 @@ fn main() -> Result<(), slint::PlatformError> {
     };
 
     let app = AppWindow::new()?;
+    // Автообновление: подчищаем следы прошлой установки и проверяем новую
+    // версию при старте (до логина — эндпоинт публичный).
+    updater::cleanup_leftovers();
     app.window().set_size(slint::LogicalSize::new(1152.0, 720.0));
     app.set_api_url(config.api_url.clone().into());
     app.set_message("Готов к входу.".into());
@@ -296,6 +432,9 @@ fn main() -> Result<(), slint::PlatformError> {
     register_logout_handler(&app, state.clone(), session_generation.clone());
     register_settings_handler(&app, state.clone());
     register_play_handler(&app, config.clone(), state.clone());
+    register_update_restart_handler(&app);
+    spawn_update_check(app.as_weak(), config.clone());
+    start_periodic_update_check(app.as_weak(), config.clone());
     restore_saved_session(&app, config, state, session_generation);
 
     app.window().on_close_requested(|| {
@@ -830,8 +969,15 @@ fn stream_profile_events(
         };
         // Строки-комментарии (heartbeat ":") и пустые строки игнорируем;
         // событие об изменении профилей несёт строка data:.
-        if line.starts_with("data:") {
-            refresh_profiles_now(config, state, app_weak);
+        if let Some(payload) = line.strip_prefix("data:") {
+            // Брокер общий: профили шлют "profiles", релизы лаунчера —
+            // "launcher-release". Незнакомый payload считаем профилями
+            // (обратная совместимость).
+            if payload.trim() == "launcher-release" {
+                spawn_update_check(app_weak.clone(), config.clone());
+            } else {
+                refresh_profiles_now(config, state, app_weak);
+            }
         }
     }
     StreamOutcome::Disconnected
