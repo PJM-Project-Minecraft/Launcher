@@ -67,6 +67,16 @@ fn update_shared() -> Arc<UpdateShared> {
         .clone()
 }
 
+/// RAII-сброс флага in_progress: срабатывает и при панике в run_update_check,
+/// иначе одна паника навсегда заглушила бы все будущие проверки обновлений.
+struct InProgressGuard(Arc<UpdateShared>);
+
+impl Drop for InProgressGuard {
+    fn drop(&mut self) {
+        self.0.in_progress.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Фоновая проверка обновления: запрос к бэкенду, скачивание и стейджинг.
 /// Все UI-обновления — через invoke_from_event_loop. Повторный вызов во время
 /// активной проверки игнорируется.
@@ -76,8 +86,8 @@ fn spawn_update_check(app_weak: Weak<AppWindow>, config: AppConfig) {
         return;
     }
     thread::spawn(move || {
+        let _guard = InProgressGuard(Arc::clone(&shared));
         run_update_check(&app_weak, &config, &shared);
-        shared.in_progress.store(false, Ordering::SeqCst);
     });
 }
 
