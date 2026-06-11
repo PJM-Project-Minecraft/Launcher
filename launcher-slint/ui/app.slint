@@ -405,6 +405,8 @@ export component AppWindow inherits Window {
     in property <float> download-progress;
     in-out property <bool> settings-visible;
     in property <int> memory-gb;
+    // Максимум слайдера = физическое ОЗУ машины (выставляется из Rust).
+    in property <int> memory-max: 64;
     in property <bool> memory-auto;
     in property <string> memory-label;
     in property <string> install-folder;
@@ -428,6 +430,8 @@ export component AppWindow inherits Window {
     callback memory-auto-requested();
     callback memory-decrease-requested();
     callback memory-increase-requested();
+    // Перетаскивание слайдера памяти: целевое значение в ГБ.
+    callback memory-set-requested(int);
     callback open-install-folder-requested();
     callback open-url(string);
 
@@ -1298,23 +1302,57 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // Слайдер памяти: расширенная хит-зона, перетаскивание и клик по треку.
                 Rectangle {
                     x: 22px;
-                    y: 58px;
+                    y: 50px;
                     width: parent.width - 44px;
-                    height: 6px;
-                    border-radius: 3px;
-                    background: #050505;
-                    border-color: #ffffff0e;
-                    border-width: 1px;
+                    height: 22px;
+                    background: transparent;
 
                     Rectangle {
-                        x: 0px;
-                        width: max(8px, (parent.width * root.memory-gb) / 64);
-                        height: parent.height;
+                        y: (parent.height - 6px) / 2;
+                        width: parent.width;
+                        height: 6px;
                         border-radius: 3px;
-                        background: @linear-gradient(90deg, #868a8f 0%, #d4d7db 100%);
-	                        animate width { duration: 320ms; easing: ease-out-quint; }
+                        background: #050505;
+                        border-color: #ffffff0e;
+                        border-width: 1px;
+
+                        memory-fill := Rectangle {
+                            x: 0px;
+                            width: max(8px, parent.width * (root.memory-gb - 2) / max(1, root.memory-max - 2));
+                            height: parent.height;
+                            border-radius: 3px;
+                            background: @linear-gradient(90deg, #868a8f 0%, #d4d7db 100%);
+                            animate width { duration: 120ms; easing: ease-out-quad; }
+                        }
+                    }
+
+                    // Ручка слайдера.
+                    Rectangle {
+                        x: memory-fill.width - 8px;
+                        y: (parent.height - 16px) / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 8px;
+                        background: memory-slider-touch.has-hover || memory-slider-touch.pressed ? #eceef1 : #d4d7db;
+                        border-width: 1px;
+                        border-color: #00000066;
+                        animate x { duration: 120ms; easing: ease-out-quad; }
+                    }
+
+                    memory-slider-touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        enabled: root.settings-visible && root.is-authenticated;
+                        mouse-cursor: pointer;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down || (event.kind == PointerEventKind.move && self.pressed)) {
+                                root.memory-set-requested(Math.max(2, Math.min(root.memory-max,
+                                    2 + Math.round((self.mouse-x / self.width) * (root.memory-max - 2)))));
+                            }
+                        }
                     }
                 }
 
@@ -1352,7 +1390,7 @@ export component AppWindow inherits Window {
 
                     MiniButton {
                         label: "+";
-                        enabled: root.settings-visible && root.is-authenticated && root.memory-gb < 64;
+                        enabled: root.settings-visible && root.is-authenticated && root.memory-gb < root.memory-max;
                         clicked => { root.memory-increase-requested(); }
                     }
 

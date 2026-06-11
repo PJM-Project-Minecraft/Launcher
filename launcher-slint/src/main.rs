@@ -607,6 +607,15 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
         });
     });
 
+    // Перетаскивание слайдера: UI присылает целевое значение в ГБ.
+    let slider_app = app.as_weak();
+    app.on_memory_set_requested(move |value| {
+        update_memory_settings(&slider_app, move |settings| {
+            settings.memory_auto = false;
+            settings.memory_gb = clamp_memory_gb(value);
+        });
+    });
+
     let folder_app = app.as_weak();
     app.on_open_install_folder_requested(move || {
         if let Some(app) = folder_app.upgrade() {
@@ -2098,7 +2107,9 @@ fn jvm_args_with_memory(input: &str, memory_gb: i32) -> Result<Vec<String>, Stri
     args.retain(|arg| !is_heap_memory_arg(arg));
 
     let mut result = Vec::with_capacity(args.len() + 1);
-    result.push(format!("-Xmx{}G", clamp_memory_gb(memory_gb)));
+    // Абсолютные границы: системный максимум уже применён вызывающим
+    // (effective_memory_gb), здесь только страховка от мусорных значений.
+    result.push(format!("-Xmx{}G", memory_gb.clamp(MIN_MEMORY_GB, MAX_MEMORY_GB)));
     result.extend(args);
     Ok(result)
 }
@@ -2286,6 +2297,7 @@ fn selected_profile(state: &RuntimeState) -> Option<ProfileSummary> {
 fn apply_launcher_settings(app: &AppWindow, settings: &LauncherSettings) {
     let memory_gb = effective_memory_gb(settings);
     app.set_memory_gb(memory_gb);
+    app.set_memory_max(system_max_memory_gb());
     app.set_memory_auto(settings.memory_auto);
     app.set_memory_label(memory_label(settings).into());
 }
@@ -2361,16 +2373,90 @@ fn memory_label(settings: &LauncherSettings) -> String {
 }
 
 fn effective_memory_gb(settings: &LauncherSettings) -> i32 {
+    effective_memory_capped(settings, system_max_memory_gb())
+}
+
+/// Чистая версия для тестов: авто-дефолт + зажим в [MIN_MEMORY_GB, max_gb].
+fn effective_memory_capped(settings: &LauncherSettings, max_gb: i32) -> i32 {
     let memory_gb = if settings.memory_auto {
         DEFAULT_MEMORY_GB
     } else {
         settings.memory_gb
     };
-    clamp_memory_gb(memory_gb)
+    memory_gb.clamp(MIN_MEMORY_GB, max_gb.max(MIN_MEMORY_GB))
 }
 
 fn clamp_memory_gb(value: i32) -> i32 {
-    value.clamp(MIN_MEMORY_GB, MAX_MEMORY_GB)
+    value.clamp(MIN_MEMORY_GB, system_max_memory_gb())
+}
+
+/// Максимум слайдера памяти: физическое ОЗУ машины, зажатое в
+/// [MIN_MEMORY_GB, MAX_MEMORY_GB]. Кешируется на процесс.
+fn system_max_memory_gb() -> i32 {
+    static MAX: OnceLock<i32> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        detect_total_memory_gb()
+            .unwrap_or(MAX_MEMORY_GB)
+            .clamp(MIN_MEMORY_GB, MAX_MEMORY_GB)
+    })
+}
+
+/// Общий объём ОЗУ машины в ГБ (округление к ближайшему гигабайту).
+/// None — определить не удалось (тогда остаётся старый максимум 64 ГБ).
+fn detect_total_memory_gb() -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: i64 = meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix("MemTotal:"))?
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse()
+            .ok()?;
+        // кБ → ГБ с округлением к ближайшему (1 << 19 кБ = 0.5 ГБ).
+        return Some((((kb + (1 << 19)) >> 20) as i32).max(1));
+    }
+    #[cfg(windows)]
+    {
+        // GlobalMemoryStatusEx из kernel32 — без сторонних зависимостей.
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+        }
+        let mut status = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+            return None;
+        }
+        // байты → МБ → ГБ с округлением к ближайшему.
+        let mb = status.total_phys >> 20;
+        return Some((((mb + 512) >> 10) as i32).max(1));
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 fn default_memory_gb() -> i32 {
@@ -3034,8 +3120,24 @@ mod tests {
         let settings = LauncherSettings::default();
 
         assert!(settings.memory_auto);
-        assert_eq!(effective_memory_gb(&settings), 8);
-        assert_eq!(memory_label(&settings), "Авто · 8 ГБ");
+        // Чистая версия с фиксированным максимумом: тест не зависит от ОЗУ хоста.
+        assert_eq!(effective_memory_capped(&settings, 64), 8);
+    }
+
+    #[test]
+    fn memory_is_capped_by_system_total() {
+        // Авто-дефолт (8 ГБ) на машине с 6 ГБ ужимается до 6.
+        let auto = LauncherSettings::default();
+        assert_eq!(effective_memory_capped(&auto, 6), 6);
+
+        // Ручное значение не может превышать ОЗУ машины.
+        let manual = LauncherSettings {
+            memory_auto: false,
+            memory_gb: 64,
+            ..Default::default()
+        };
+        assert_eq!(effective_memory_capped(&manual, 32), 32);
+        assert_eq!(effective_memory_capped(&manual, 64), 64);
     }
 
     #[test]
