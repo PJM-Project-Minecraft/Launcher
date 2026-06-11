@@ -1525,14 +1525,15 @@ export component AppWindow inherits Window {
     }
     }
 
-    // Плавающий баннер автообновления (нижний правый угол, поверх контента).
-    if root.update-status != "" || root.update-ready: Rectangle {
-        width: 380px;
-        height: root.update-mandatory ? 86px : 68px;
+    // Плавающий баннер необязательного автообновления (нижний правый угол).
+    // Обязательное обновление показывается полноэкранным оверлеем ниже.
+    if (root.update-status != "" || root.update-ready) && !root.update-mandatory: Rectangle {
+        width: 450px;
+        height: 76px;
         x: parent.width - self.width - 20px;
         y: parent.height - self.height - 20px;
         background: #14141cf2;
-        border-radius: 14px;
+        border-radius: 16px;
         border-width: 1px;
         border-color: root.update-ready ? #6fdd8b55 : #ffffff22;
         drop-shadow-blur: 24px;
@@ -1544,47 +1545,171 @@ export component AppWindow inherits Window {
 
             VerticalLayout {
                 alignment: center;
-                spacing: 4px;
+                Rectangle {
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 24px;
+                    background: #6fdd8b1f;
+                    border-width: 1px;
+                    border-color: root.update-ready ? #6fdd8b : #6fdd8b55;
+                    Image {
+                        source: @image-url("../assets/update.svg");
+                        colorize: #6fdd8b;
+                        width: 24px;
+                        height: 24px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 3px;
                 Text {
-                    text: root.update-ready
-                        ? "Обновление \{root.update-version} готово"
-                        : root.update-status;
+                    text: root.update-ready ? "Обновление готово" : "Обновление лаунчера";
                     color: #ffffff;
                     font-size: 14px;
-                    font-weight: 700;
+                    font-weight: 800;
                     overflow: elide;
                 }
-                if root.update-mandatory: Text {
-                    text: "Обязательное обновление — игра недоступна до перезапуска";
-                    color: #ffb86b;
-                    font-size: 11px;
+                Text {
+                    text: root.update-ready
+                        ? "Версия \{root.update-version}"
+                        : root.update-status;
+                    color: #989ca2;
+                    font-size: 12px;
+                    font-weight: 700;
                     overflow: elide;
                 }
             }
 
-            if root.update-ready: Rectangle {
-                width: 132px;
-                height: 40px;
-                border-radius: 10px;
-                background: restart-area.has-hover ? #7be89a : #6fdd8b;
-                animate background { duration: 160ms; easing: ease-out-quad; }
-                restart-area := TouchArea {
-                    width: parent.width;
-                    height: parent.height;
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.update-restart-requested();
+            if root.update-ready: VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 138px;
+                    height: 40px;
+                    border-radius: 11px;
+                    background: restart-area.has-hover ? #7be89a : #6fdd8b;
+                    animate background { duration: 160ms; easing: ease-out-quad; }
+                    restart-area := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.update-restart-requested();
+                        }
+                    }
+                    Text {
+                        text: "Перезапустить";
+                        color: #0c0c12;
+                        font-size: 14px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
                     }
                 }
+            }
+        }
+    }
+
+    // Полноэкранное уведомление об обязательном обновлении: блокирует весь
+    // интерфейс до перезапуска (дизайн зеркалит античит-оверлей ниже).
+    if root.update-mandatory && (root.update-status != "" || root.update-ready): Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #08080fee;
+
+        // Перехватываем все клики, чтобы интерфейс под оверлеем был недоступен.
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: min(parent.width - 80px, 540px);
+            height: 380px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #14141c;
+            border-radius: 22px;
+            border-width: 1px;
+            border-color: #6fdd8b55;
+            drop-shadow-blur: 48px;
+            drop-shadow-color: #000000b0;
+
+            VerticalLayout {
+                padding: 38px;
+                spacing: 20px;
+                alignment: center;
+
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 92px;
+                        height: 92px;
+                        border-radius: 46px;
+                        background: #6fdd8b1f;
+                        border-width: 2px;
+                        border-color: #6fdd8b;
+                        Image {
+                            source: @image-url("../assets/update.svg");
+                            colorize: #6fdd8b;
+                            width: 46px;
+                            height: 46px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                }
+
                 Text {
-                    text: "Перезапустить";
-                    color: #0c0c12;
-                    font-size: 14px;
+                    text: "Требуется обновление";
+                    font-size: 24px;
                     font-weight: 800;
+                    color: #ffffff;
                     horizontal-alignment: center;
-                    vertical-alignment: center;
-                    width: parent.width;
-                    height: parent.height;
+                }
+
+                Text {
+                    text: root.update-ready
+                        ? "Версия \{root.update-version} скачана и готова к установке. Игра недоступна, пока лаунчер не перезапустится."
+                        : root.update-status;
+                    font-size: 15px;
+                    color: #c8c8d4;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+
+                if root.update-ready: HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 260px;
+                        height: 52px;
+                        border-radius: 13px;
+                        background: mandatory-restart-area.has-hover ? #7be89a : #6fdd8b;
+                        animate background { duration: 160ms; easing: ease-out-quad; }
+                        mandatory-restart-area := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.update-restart-requested();
+                            }
+                        }
+                        Text {
+                            text: "Перезапустить лаунчер";
+                            color: #0c0c12;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
                 }
             }
         }
