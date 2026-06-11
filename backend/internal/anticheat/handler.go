@@ -1,18 +1,27 @@
 package anticheat
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
 	"launcher-backend/internal/auth"
+	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/models"
 	"launcher-backend/internal/yggdrasil"
 
 	"github.com/gofiber/fiber/v3"
 )
 
+// VersionGate сообщает минимальную обязательную версию лаунчера
+// (реализуется launcherrelease.Service). nil — форс-апдейт выключен.
+type VersionGate interface {
+	MinMandatoryVersion(ctx context.Context) (string, error)
+}
+
 type Handler struct {
-	service *Service
+	service     *Service
+	versionGate VersionGate
 }
 
 type ErrorResponse struct {
@@ -21,6 +30,13 @@ type ErrorResponse struct {
 
 func NewHandler(service *Service) Handler {
 	return Handler{service: service}
+}
+
+// WithVersionGate включает серверный форс-апдейт: клиенты ниже минимальной
+// обязательной версии не получают launch-token (426 Upgrade Required).
+func (h Handler) WithVersionGate(gate VersionGate) Handler {
+	h.versionGate = gate
+	return h
 }
 
 // RegisterRoutes монтирует игровые (JWT/launch-token) и admin-эндпоинты античита.
@@ -62,6 +78,23 @@ type initRequest struct {
 }
 
 func (h Handler) init(c fiber.Ctx) error {
+	// Форс-апдейт: старый лаунчер не получает launch-token, пока не обновится.
+	// Запрос без заголовка — легаси-версия (≤0.1.0), считается "0.0.0".
+	if h.versionGate != nil {
+		minVersion, err := h.versionGate.MinMandatoryVersion(c.Context())
+		if err == nil && minVersion != "" {
+			clientVersion := c.Get("X-Launcher-Version")
+			if clientVersion == "" {
+				clientVersion = "0.0.0"
+			}
+			if launcherrelease.CompareVersions(clientVersion, minVersion) < 0 {
+				return c.Status(http.StatusUpgradeRequired).JSON(ErrorResponse{
+					Message: "Требуется обновление лаунчера до версии " + minVersion,
+				})
+			}
+		}
+	}
+
 	user, ok := auth.CurrentUser(c)
 	if !ok {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Требуется авторизация"})

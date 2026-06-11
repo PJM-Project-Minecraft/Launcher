@@ -107,7 +107,9 @@ func main() {
 		acService.SetNotifier(notifier)
 		slog.Info("anticheat: telegram alerts enabled", "chat_id", cfg.AnticheatAlertChatID)
 	}
-	anticheat.NewHandler(acService).RegisterRoutes(app, authService.RequireAuth())
+	anticheat.NewHandler(acService).
+		WithVersionGate(releaseService).
+		RegisterRoutes(app, authService.RequireAuth())
 
 	slog.Info(
 		"backend listening",
