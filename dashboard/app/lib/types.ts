@@ -144,3 +144,23 @@ export type CheatSignature = {
   note: string;
   enabled: boolean;
 };
+
+export type LauncherReleaseFile = {
+  id: string;
+  releaseId: string;
+  platform: string;
+  fileName: string;
+  hashSha256: string;
+  size: number;
+};
+
+export type LauncherRelease = {
+  id: string;
+  version: string;
+  changelog: string;
+  mandatory: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  files: LauncherReleaseFile[];
+};

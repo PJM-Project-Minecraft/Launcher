@@ -69,3 +69,43 @@ export async function api<T = unknown>(path: string, options: Options = {}): Pro
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : 'Неизвестная ошибка';
 }
+
+/** Multipart-загрузка с прогрессом. XHR: fetch не отдаёт upload-progress. */
+export function apiUpload<T = unknown>(
+  path: string,
+  form: FormData,
+  onProgress?: (fraction: number) => void
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${apiUrl}${path}`);
+    xhr.setRequestHeader('Accept', 'application/json');
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total);
+    };
+    xhr.onerror = () => reject(new ApiError('Backend недоступен', 0));
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        clearToken();
+        window.location.href = '/login';
+        reject(new ApiError('Сессия истекла', 401));
+        return;
+      }
+      let data: { message?: string } = {};
+      try {
+        data = JSON.parse(xhr.responseText) as { message?: string };
+      } catch {
+        // пустой или не-JSON ответ — допустимо для 2xx
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data as T);
+      } else {
+        reject(new ApiError(data.message ?? `Ошибка ${xhr.status}`, xhr.status));
+      }
+    };
+    xhr.send(form);
+  });
+}
