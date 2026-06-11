@@ -411,10 +411,18 @@ export component AppWindow inherits Window {
     in property <[NewsItem]> news-items;
     in property <string> anticheat-alert;
 
+    // Автообновление: статус скачивания, готовность к перезапуску,
+    // обязательность (блокирует кнопку «Играть» до перезапуска).
+    in property <bool> update-ready;
+    in property <bool> update-mandatory;
+    in property <string> update-version;
+    in property <string> update-status;
+
     callback login-requested(string, string, string);
     callback anticheat-alert-dismiss();
     callback logout-requested();
     callback play-requested();
+    callback update-restart-requested();
     callback settings-requested();
     callback settings-close-requested();
     callback memory-auto-requested();
@@ -1081,9 +1089,10 @@ export component AppWindow inherits Window {
                     PlayButton {
                         width: 258px;
                         height: 76px;
-                        label: root.is-syncing ? "ЗАГРУЗКА..." : "ИГРАТЬ";
+                        label: root.update-mandatory ? "ТРЕБУЕТСЯ ОБНОВЛЕНИЕ"
+                            : (root.is-syncing ? "ЗАГРУЗКА..." : "ИГРАТЬ");
                         icon-source: @image-url("../assets/play.svg");
-                        enabled: root.has-profile && !root.is-syncing;
+                        enabled: root.has-profile && !root.is-syncing && !root.update-mandatory;
                         clicked => { root.play-requested(); }
                     }
                 }
@@ -1514,6 +1523,71 @@ export component AppWindow inherits Window {
             }
         }
     }
+    }
+
+    // Плавающий баннер автообновления (нижний правый угол, поверх контента).
+    if root.update-status != "" || root.update-ready: Rectangle {
+        width: 380px;
+        height: root.update-mandatory ? 86px : 68px;
+        x: parent.width - self.width - 20px;
+        y: parent.height - self.height - 20px;
+        background: #14141cf2;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: root.update-ready ? #6fdd8b55 : #ffffff22;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000090;
+
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 12px;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                Text {
+                    text: root.update-ready
+                        ? "Обновление \{root.update-version} готово"
+                        : root.update-status;
+                    color: #ffffff;
+                    font-size: 14px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                if root.update-mandatory: Text {
+                    text: "Обязательное обновление — игра недоступна до перезапуска";
+                    color: #ffb86b;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+            }
+
+            if root.update-ready: Rectangle {
+                width: 132px;
+                height: 40px;
+                border-radius: 10px;
+                background: restart-area.has-hover ? #7be89a : #6fdd8b;
+                animate background { duration: 160ms; easing: ease-out-quad; }
+                restart-area := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.update-restart-requested();
+                    }
+                }
+                Text {
+                    text: "Перезапустить";
+                    color: #0c0c12;
+                    font-size: 14px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+            }
+        }
     }
 
     // Полноэкранное уведомление античита (поверх всего интерфейса).
