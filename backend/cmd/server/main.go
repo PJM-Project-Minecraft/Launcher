@@ -11,6 +11,7 @@ import (
 	"launcher-backend/internal/config"
 	"launcher-backend/internal/database"
 	"launcher-backend/internal/events"
+	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/middleware"
 	"launcher-backend/internal/news"
 	"launcher-backend/internal/profiles"
@@ -46,6 +47,8 @@ func main() {
 		ProxyHeader:      fiber.HeaderXForwardedFor,
 		TrustProxy:       true,
 		TrustProxyConfig: fiber.TrustProxyConfig{Loopback: true, LinkLocal: true, Private: true},
+		// Лимит тела запроса: загрузка бинарников релизов лаунчера через админку.
+		BodyLimit: 512 * 1024 * 1024,
 	})
 	app.Use(middleware.CORS(cfg.AllowedOrigins))
 
@@ -81,6 +84,9 @@ func main() {
 	adminapi.NewHandler(db).RegisterRoutes(app, authService.RequireAuth())
 	profilesBroker := events.NewBroker()
 	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot), profilesBroker).
+		RegisterRoutes(app, authService.RequireAuth())
+	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot)
+	launcherrelease.NewHandler(releaseService, profilesBroker).
 		RegisterRoutes(app, authService.RequireAuth())
 	news.NewHandler(news.NewService(cfg.TelegramChannel)).
 		RegisterRoutes(app, authService.RequireAuth())
