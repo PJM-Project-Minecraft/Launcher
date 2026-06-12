@@ -376,6 +376,7 @@ export component AppWindow inherits Window {
     background: #070707;
 
     property <float> startup-opacity: 0.0;
+    in-out property <int> active-tab: 0;
     
     init => {
         startup-opacity = 1.0;
@@ -626,14 +627,16 @@ export component AppWindow inherits Window {
 
         // Лента новостей проекта в центре главного экрана
         Rectangle {
-            x: 264px;
-            y: root.is-authenticated ? 130px : 146px;
+            x: 264px + (root.active-tab == 1 ? 0px : -40px);
+            y: root.is-authenticated ? (root.active-tab == 1 ? 130px : 150px) : 146px;
             width: parent.width - 296px;
-            height: parent.height - 356px;
+            height: parent.height - 180px;
             background: transparent;
-            opacity: root.is-authenticated ? 1.0 : 0.0;
-            animate y { duration: 520ms; delay: 60ms; easing: ease-out-quint; }
-            animate opacity { duration: 520ms; delay: 60ms; easing: ease-in-out-quint; }
+            opacity: root.is-authenticated && root.active-tab == 1 ? 1.0 : 0.0;
+            visible: self.opacity > 0.01;
+            animate x { duration: 600ms; easing: ease-out-quint; }
+            animate y { duration: 600ms; easing: ease-out-quint; }
+            animate opacity { duration: 400ms; easing: ease-in-out-quint; }
 
             Image {
                 source: @image-url("../assets/news.svg");
@@ -689,6 +692,50 @@ export component AppWindow inherits Window {
                             index: idx;
                         }
                     }
+                }
+            }
+        }
+
+        // Поддержка
+        Rectangle {
+            x: 264px + (root.active-tab == 2 ? 0px : -40px);
+            y: root.is-authenticated ? (root.active-tab == 2 ? 130px : 150px) : 146px;
+            width: parent.width - 296px;
+            height: parent.height - 180px;
+            background: transparent;
+            opacity: root.is-authenticated && root.active-tab == 2 ? 1.0 : 0.0;
+            visible: self.opacity > 0.01;
+            animate x { duration: 600ms; easing: ease-out-quint; }
+            animate y { duration: 600ms; easing: ease-out-quint; }
+            animate opacity { duration: 400ms; easing: ease-in-out-quint; }
+
+            VerticalLayout {
+                spacing: 24px;
+                alignment: start;
+                
+                HorizontalLayout {
+                    spacing: 12px;
+                    Image {
+                        source: @image-url("../assets/support.svg");
+                        width: 20px;
+                        height: 20px;
+                        colorize: #989ca2;
+                    }
+                    Text {
+                        text: "ПОДДЕРЖКА И СООБЩЕСТВО";
+                        color: #989ca2;
+                        font-size: 15px;
+                        font-weight: 900;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: "Возникли проблемы или есть вопросы?\nПрисоединяйтесь к нашим сообществам!\nМы всегда готовы помочь.";
+                    color: #eceef1;
+                    font-size: 20px;
+                    font-weight: 800;
                 }
             }
         }
@@ -812,9 +859,24 @@ export component AppWindow inherits Window {
             animate y { duration: 480ms; delay: 80ms; easing: ease-out-quint; }
             animate opacity { duration: 480ms; delay: 80ms; easing: ease-in-out-quint; }
 
-            NavButton { label: "ИГРА"; active: true; icon-source: @image-url("../assets/game.svg"); }
-            NavButton { label: "НОВОСТИ"; active: false; icon-source: @image-url("../assets/news.svg"); }
-            NavButton { label: "ПОДДЕРЖКА"; active: false; icon-source: @image-url("../assets/support.svg"); }
+            NavButton { 
+                label: "ИГРА"; 
+                active: root.active-tab == 0; 
+                icon-source: @image-url("../assets/game.svg"); 
+                clicked => { root.active-tab = 0; }
+            }
+            NavButton { 
+                label: "НОВОСТИ"; 
+                active: root.active-tab == 1; 
+                icon-source: @image-url("../assets/news.svg"); 
+                clicked => { root.active-tab = 1; }
+            }
+            NavButton { 
+                label: "ПОДДЕРЖКА"; 
+                active: root.active-tab == 2; 
+                icon-source: @image-url("../assets/support.svg"); 
+                clicked => { root.active-tab = 2; }
+            }
         }
 
         HorizontalLayout {
@@ -951,8 +1013,10 @@ export component AppWindow inherits Window {
                 triggered => { play-card.dl-pulse = !play-card.dl-pulse; }
             }
 
-            x: parent.width - self.width - 32px;
-            y: parent.height - self.height - 32px + (root.is-syncing ? -2px : 0px);
+            x: parent.width - self.width - 32px + (root.active-tab == 0 ? 0px : 40px);
+            y: parent.height - self.height - 32px + (root.is-syncing ? -2px : 0px) + (root.active-tab == 0 ? 0px : 40px);
+            opacity: root.is-authenticated && root.active-tab == 0 ? 1.0 : 0.0;
+            visible: self.opacity > 0.01;
             // при загрузке подложка расширяется влево, освобождая место под иконку
             width: root.is-syncing ? 660px : 552px;
             height: 178px;
@@ -965,7 +1029,9 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: root.is-syncing ? 12px : 8px;
             clip: true;
             animate width { duration: 460ms; easing: ease-out-quint; }
-            animate y { duration: 300ms; easing: ease-out-quint; }
+            animate x { duration: 400ms; easing: ease-out-quint; }
+            animate y { duration: 400ms; easing: ease-out-quint; }
+            animate opacity { duration: 300ms; easing: ease-in-out-quint; }
             animate border-color { duration: 300ms; easing: ease-out-quint; }
             animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
             animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-quint; }
