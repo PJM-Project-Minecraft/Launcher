@@ -105,6 +105,7 @@ func main() {
 	acService.SetAuthlibPath(cfg.AuthlibInjectorPath)
 	acService.SetKickSeverity(cfg.AnticheatKickSeverity)
 	acService.SetHeartbeatTimeout(time.Duration(cfg.AnticheatHeartbeatSeconds) * time.Second)
+	acService.SetRequireAttestation(cfg.AnticheatRequireAttestation)
 	acService.StartHeartbeatReaper(30 * time.Second)
 	if notifier := anticheat.NewTelegramNotifier(cfg.AnticheatAlertBotToken, cfg.AnticheatAlertChatID); notifier != nil {
 		acService.SetNotifier(notifier)

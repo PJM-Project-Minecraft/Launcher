@@ -132,7 +132,14 @@ public final class Agent {
     }
 
     private static void confirm(Instrumentation inst, NativeState ns) {
+        // Attestation-proof (P3): эхо challenge из токена, self-hash нашего jar (сверяется
+        // с манифестом), факт присутствия нативного слоя и отсутствие чужих агентов.
+        String challenge = System.getProperty("ac.challenge", "");
         String proof = "{"
+            + "\"challenge\":\"" + escape(challenge) + "\","
+            + "\"agentSha256\":\"" + escape(selfSha256()) + "\","
+            + "\"nativePresent\":" + ns.present + ","
+            + "\"foreignAgents\":" + hasForeignAgents() + ","
             + "\"loadedClasses\":" + inst.getAllLoadedClasses().length + ","
             + "\"javaVersion\":\"" + escape(System.getProperty("java.version", "")) + "\","
             + "\"native\":{\"present\":" + ns.present + ",\"debug\":" + ns.debug
@@ -141,6 +148,25 @@ public final class Agent {
             + "}";
         String body = "{\"launchToken\":\"" + escape(token) + "\",\"proof\":" + proof + "}";
         post("/api/anticheat/handshake/confirm", body);
+    }
+
+    /** SHA-256 собственного jar (через CodeSource) — для сверки с манифестом на сервере. */
+    private static String selfSha256() {
+        try {
+            java.security.CodeSource cs = Agent.class.getProtectionDomain().getCodeSource();
+            if (cs == null || cs.getLocation() == null) {
+                return "";
+            }
+            byte[] data = Files.readAllBytes(Paths.get(cs.getLocation().toURI()));
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+            StringBuilder sb = new StringBuilder(h.length * 2);
+            for (byte b : h) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** Состояние нативного JVMTI-агента, прочитанное из flag-файла. */
@@ -208,6 +234,31 @@ public final class Agent {
     private static final String[] OWN_AGENTS = {
         "authlib-injector", "anticheat-agent", "libanticheat", "anticheat.dll"
     };
+
+    /** true, если в аргументах JVM есть посторонний -javaagent/-agentpath (для proof). */
+    private static boolean hasForeignAgents() {
+        try {
+            for (String arg : ManagementFactory.getRuntimeMXBean().getInputArguments()) {
+                String low = arg.toLowerCase(Locale.ROOT);
+                if (!low.startsWith("-javaagent:") && !low.startsWith("-agentpath:")) {
+                    continue;
+                }
+                boolean own = false;
+                for (String name : OWN_AGENTS) {
+                    if (low.contains(name)) {
+                        own = true;
+                        break;
+                    }
+                }
+                if (!own) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            // best-effort
+        }
+        return false;
+    }
 
     /** Ищет в аргументах JVM посторонние -javaagent/-agentpath (ghost-клиент). */
     private static void scanJvmArgsForForeignAgents() {

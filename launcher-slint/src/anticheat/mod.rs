@@ -30,6 +30,8 @@ struct InitResult {
     launch_token: String,
     #[serde(default)]
     nonce: String,
+    #[serde(default)]
+    challenge: String,
 }
 
 /// Результат успешного pre-launch handshake. nonce связывает игровую сессию с
@@ -39,6 +41,9 @@ struct InitResult {
 pub struct GuardOk {
     pub launch_token: String,
     pub nonce: String,
+    /// Attestation-challenge: лаунчер передаёт его агенту (-Dac.challenge), агент
+    /// возвращает в confirm-proof. Привязывает proof к конкретной сессии.
+    pub challenge: String,
 }
 
 /// Ошибки handshake/init, различающие форс-апдейт и сетевые сбои:
@@ -71,6 +76,7 @@ pub fn pre_launch_guard(config: &AppConfig, token: &str) -> Result<GuardOk, Stri
             Ok(GuardOk {
                 launch_token: result.launch_token,
                 nonce: result.nonce,
+                challenge: result.challenge,
             })
         }
         // Форс-апдейт (426): запуск блокируется до обновления лаунчера.
@@ -79,6 +85,7 @@ pub fn pre_launch_guard(config: &AppConfig, token: &str) -> Result<GuardOk, Stri
         Err(InitError::Network(_)) => Ok(GuardOk {
             launch_token: String::new(),
             nonce: String::new(),
+            challenge: String::new(),
         }),
     }
 }

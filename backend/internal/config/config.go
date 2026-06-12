@@ -35,6 +35,9 @@ type Config struct {
 	AnticheatKickSeverity int
 	// AnticheatHeartbeatSeconds — окно живости агента: без heartbeat дольше → сессия гасится.
 	AnticheatHeartbeatSeconds int
+	// AnticheatRequireAttestation — жёсткая проверка proof в confirm. Включать ТОЛЬКО после
+	// раздачи лаунчера с attestation (mandatory-bump), иначе старые клиенты не пройдут confirm.
+	AnticheatRequireAttestation bool
 	// TokenTTL — срок жизни JWT-сессии (логин в лаунчере и админке).
 	TokenTTL time.Duration
 	// Алерты античита в Telegram: токен бота (например, vps-ops-bot) и chat_id получателя.
@@ -81,6 +84,7 @@ func Load() Config {
 		AnticheatNativeWin:    env("ANTICHEAT_NATIVE_WIN", filepath.Join("data", "anticheat.dll")),
 		AnticheatKickSeverity: atoiDefault(env("ANTICHEAT_KICK_SEVERITY", "7"), 7),
 		AnticheatHeartbeatSeconds: atoiDefault(env("ANTICHEAT_HEARTBEAT_TIMEOUT", "90"), 90),
+		AnticheatRequireAttestation: env("ANTICHEAT_REQUIRE_ATTESTATION", "false") == "true",
 		TokenTTL:              time.Duration(atoiDefault(env("TOKEN_TTL_HOURS", "168"), 168)) * time.Hour,
 		AnticheatAlertBotToken: env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
 		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),

@@ -2088,7 +2088,8 @@ fn launch_profile(
             jvm_args.insert(0, format!("-Dac.token={}", guard.launch_token));
             jvm_args.insert(1, format!("-Dac.url={}", config.api_url.trim_end_matches('/')));
             jvm_args.insert(2, format!("-Dac.kickfile={}", kick.to_string_lossy()));
-            jvm_args.insert(3, format!("-javaagent:{}", agent.to_string_lossy()));
+            jvm_args.insert(3, format!("-Dac.challenge={}", guard.challenge));
+            jvm_args.insert(4, format!("-javaagent:{}", agent.to_string_lossy()));
         }
     }
 

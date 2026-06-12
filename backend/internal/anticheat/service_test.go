@@ -126,21 +126,21 @@ func TestConfirmMarksSessionVerified(t *testing.T) {
 	ctx := context.Background()
 
 	res, _ := svc.InitHandshake(ctx, "uuid-c", "Liko", "hwid-c", nil)
-	if err := svc.Confirm(res.LaunchToken); err != nil {
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	if !verifier.verified[res.Nonce] {
 		t.Fatal("confirm должен пометить сессию по nonce")
 	}
 	// Повторный confirm по тому же токену/nonce не проходит.
-	if err := svc.Confirm(res.LaunchToken); err == nil {
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err == nil {
 		t.Fatal("повторный confirm должен быть отклонён")
 	}
 }
 
 func TestConfirmRejectsBadToken(t *testing.T) {
 	svc := NewService(newTestDB(t), "secret", false, &fakeVerifier{verified: map[string]bool{}}, "")
-	if err := svc.Confirm("garbage.token"); err == nil {
+	if err := svc.Confirm("garbage.token", ConfirmProof{}); err == nil {
 		t.Fatal("невалидный токен не должен подтверждаться")
 	}
 }
@@ -219,7 +219,7 @@ func TestHeartbeatReapsStale(t *testing.T) {
 	svc.SetHeartbeatTimeout(90 * time.Second)
 
 	res, _ := svc.InitHandshake(context.Background(), "uuid-hb", "Liko", "hwid-hb", nil)
-	if err := svc.Confirm(res.LaunchToken); err != nil {
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	if !v.IsActiveByNonce(res.Nonce) {
@@ -243,7 +243,7 @@ func TestHeartbeatKickWhenInactive(t *testing.T) {
 	ctx := context.Background()
 	res, _ := svc.InitHandshake(ctx, "uuid-hk", "Liko", "hwid-hk", nil)
 	claims, _ := svc.VerifyToken(res.LaunchToken)
-	if err := svc.Confirm(res.LaunchToken); err != nil {
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	if kick, _ := svc.Heartbeat(ctx, claims); kick {

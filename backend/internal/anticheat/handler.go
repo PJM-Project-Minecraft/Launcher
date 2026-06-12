@@ -139,8 +139,8 @@ func (h Handler) init(c fiber.Ctx) error {
 }
 
 type confirmRequest struct {
-	LaunchToken string         `json:"launchToken"`
-	Proof       map[string]any `json:"proof"`
+	LaunchToken string       `json:"launchToken"`
+	Proof       ConfirmProof `json:"proof"`
 }
 
 func (h Handler) confirm(c fiber.Ctx) error {
@@ -152,7 +152,7 @@ func (h Handler) confirm(c fiber.Ctx) error {
 	if token == "" {
 		token = c.Get("X-Launch-Token")
 	}
-	if err := h.service.Confirm(token); err != nil {
+	if err := h.service.Confirm(token, req.Proof); err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Не удалось подтвердить защиту"})
 	}
 	return c.SendStatus(http.StatusNoContent)

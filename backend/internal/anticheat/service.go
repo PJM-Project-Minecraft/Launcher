@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +39,8 @@ type Service struct {
 	notifier     Notifier
 	now          func() time.Time
 
-	authlibPath string // путь к authlib-injector.jar (для SHA-манифеста)
+	authlibPath        string // путь к authlib-injector.jar (для SHA-манифеста)
+	requireAttestation bool   // true — confirm без валидного proof отклоняется
 
 	recentMu sync.Mutex
 	recent   map[string]time.Time // дедуп: ключ детекта -> время последней записи
@@ -77,6 +79,12 @@ func (s *Service) SetHeartbeatTimeout(d time.Duration) {
 // SetAuthlibPath задаёт путь к authlib-injector.jar — он тоже инжектится как
 // -javaagent, поэтому его SHA включается в манифест целостности.
 func (s *Service) SetAuthlibPath(p string) { s.authlibPath = p }
+
+// SetRequireAttestation включает жёсткую проверку proof в confirm. Включать ТОЛЬКО
+// после раздачи лаунчера с attestation-proof (mandatory-bump): при true старый клиент
+// без валидного proof не пройдёт confirm → не получит verified-сессию. По умолчанию
+// false (transition): расхождения логируются, но запуск не блокируется.
+func (s *Service) SetRequireAttestation(v bool) { s.requireAttestation = v }
 
 // SetNotifier подключает отправку алертов о детектах (nil — алерты выключены).
 func (s *Service) SetNotifier(n Notifier) {
@@ -131,16 +139,53 @@ func (s *Service) NativePath(os string) string {
 // Confirm завершает античит-handshake: валидирует launch-token и помечает связанную
 // игровую сессию Verified (по nonce). Возвращает ошибку, если токен невалиден или
 // nonce уже использован/неизвестен.
-func (s *Service) Confirm(token string) error {
+// ConfirmProof — доказательство присутствия живого агента, присылаемое в confirm.
+// Агент вычисляет это ВНУТРИ JVM; backend сверяет с challenge из токена и манифестом.
+type ConfirmProof struct {
+	Challenge     string `json:"challenge"`     // эхо challenge из claims (свежесть/привязка к сессии)
+	AgentSha256   string `json:"agentSha256"`   // self-hash jar агента (должен совпасть с манифестом)
+	NativePresent bool   `json:"nativePresent"` // нативный JVMTI-агент реально загрузился
+	ForeignAgents bool   `json:"foreignAgents"` // обнаружен посторонний -javaagent/-agentpath
+}
+
+func (s *Service) Confirm(token string, proof ConfirmProof) error {
 	claims, err := s.VerifyToken(token)
 	if err != nil {
 		return err
+	}
+	if perr := s.verifyProof(claims, proof); perr != nil {
+		if s.requireAttestation {
+			return perr // жёсткий режим: без валидного proof не верифицируем сессию
+		}
+		// Transition: фиксируем будущий отказ, но пускаем (пока не раздан новый лаунчер).
+		slog.Warn("anticheat: attestation would fail (transition mode)", "login", claims.Login, "reason", perr)
 	}
 	if s.verifier == nil || !s.verifier.MarkVerifiedByNonce(claims.Nonce) {
 		return errors.New("session not found or already confirmed")
 	}
 	// Трекинг живости стартует после успешного confirm.
 	s.touchHeartbeat(claims.Nonce)
+	return nil
+}
+
+// verifyProof проверяет доказательство присутствия агента: эхо challenge, наличие
+// нативного слоя, отсутствие посторонних агентов и совпадение self-hash с манифестом.
+// Honest: полностью клиентское доказательство не доказывает исполнение на 100% (см. план,
+// остаточная дыра) — реальный замок это серверный in-game-handshake (P5). Здесь поднимаем
+// планку: confirm обязан предъявить связный, согласованный с challenge и манифестом proof.
+func (s *Service) verifyProof(claims LaunchClaims, p ConfirmProof) error {
+	if claims.Challenge == "" || p.Challenge != claims.Challenge {
+		return errors.New("attestation: challenge mismatch")
+	}
+	if !p.NativePresent {
+		return errors.New("attestation: native agent absent")
+	}
+	if p.ForeignAgents {
+		return errors.New("attestation: foreign agent present")
+	}
+	if want := s.cachedSha(s.agentPath); want != "" && !strings.EqualFold(p.AgentSha256, want) {
+		return errors.New("attestation: agent hash mismatch")
+	}
 	return nil
 }
 
@@ -321,6 +366,7 @@ type InitResult struct {
 	Reason      string `json:"reason,omitempty"`
 	LaunchToken string `json:"launchToken,omitempty"`
 	Nonce       string `json:"nonce,omitempty"`
+	Challenge   string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
 }
 
 // InitHandshake проверяет баны, фиксирует HWID и pre-launch детекты, и при
@@ -348,18 +394,20 @@ func (s *Service) InitHandshake(ctx context.Context, userUUID, login, hwidHash s
 	}
 
 	nonce := randomHex(16)
+	challenge := randomHex(16)
 	token, err := s.signer.Sign(LaunchClaims{
-		UUID:     userUUID,
-		Login:    login,
-		HwidHash: hwidHash,
-		Nonce:    nonce,
-		IssuedAt: now.Unix(),
-		Expires:  now.Add(launchTokenTTL).Unix(),
+		UUID:      userUUID,
+		Login:     login,
+		HwidHash:  hwidHash,
+		Nonce:     nonce,
+		Challenge: challenge,
+		IssuedAt:  now.Unix(),
+		Expires:   now.Add(launchTokenTTL).Unix(),
 	})
 	if err != nil {
 		return InitResult{}, err
 	}
-	return InitResult{Allowed: true, LaunchToken: token, Nonce: nonce}, nil
+	return InitResult{Allowed: true, LaunchToken: token, Nonce: nonce, Challenge: challenge}, nil
 }
 
 // VerifyToken проверяет launch-token (для аутентификации репортов и confirm).

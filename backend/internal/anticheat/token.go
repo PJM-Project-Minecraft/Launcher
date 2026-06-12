@@ -14,12 +14,13 @@ import (
 // и предъявляется агентами на /handshake/confirm и при репортах. Подписан HMAC-SHA256
 // серверным секретом — валидирует только backend, агенты лишь пересылают значение.
 type LaunchClaims struct {
-	UUID     string `json:"uuid"`
-	Login    string `json:"login"`
-	HwidHash string `json:"hwid"`
-	Nonce    string `json:"nonce"`
-	IssuedAt int64  `json:"iat"`
-	Expires  int64  `json:"exp"`
+	UUID      string `json:"uuid"`
+	Login     string `json:"login"`
+	HwidHash  string `json:"hwid"`
+	Nonce     string `json:"nonce"`
+	Challenge string `json:"chal"` // attestation: агент обязан вернуть его в confirm-proof
+	IssuedAt  int64  `json:"iat"`
+	Expires   int64  `json:"exp"`
 }
 
 var (
