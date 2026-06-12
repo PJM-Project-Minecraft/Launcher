@@ -94,9 +94,20 @@ func TestMarkVerifiedByNonce(t *testing.T) {
 	if !got.Verified {
 		t.Fatal("после confirm сессия должна быть Verified")
 	}
-	// Nonce одноразовый — повтор не проходит (анти-replay confirm).
+	// Повтор не проходит: сессия уже Verified (анти-replay confirm). Nonce при этом
+	// сохраняется — он нужен для серверного kick/heartbeat по той же сессии.
 	if svc.Store().MarkVerifiedByNonce("nonce-2") {
-		t.Fatal("повторный confirm по тому же nonce должен быть отклонён")
+		t.Fatal("повторный confirm по уже подтверждённой сессии должен быть отклонён")
+	}
+	// Сессия остаётся активной и гасится серверным kick по тому же nonce.
+	if !svc.Store().IsActiveByNonce("nonce-2") {
+		t.Fatal("после confirm сессия должна считаться активной по nonce")
+	}
+	if !svc.Store().InvalidateByNonce("nonce-2") {
+		t.Fatal("серверный kick по nonce должен найти сессию после confirm")
+	}
+	if svc.Store().IsActiveByNonce("nonce-2") {
+		t.Fatal("после kick сессия не должна быть активной")
 	}
 }
 

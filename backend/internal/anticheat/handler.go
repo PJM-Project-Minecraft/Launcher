@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/launcherrelease"
@@ -23,6 +24,10 @@ type VersionGate interface {
 type Handler struct {
 	service     *Service
 	versionGate VersionGate
+	// Лимитеры (указатели — переживают копирование Handler в WithVersionGate).
+	initLimiter   *rateLimiter
+	detectLimiter *rateLimiter
+	hbLimiter     *rateLimiter
 }
 
 type ErrorResponse struct {
@@ -30,7 +35,12 @@ type ErrorResponse struct {
 }
 
 func NewHandler(service *Service) Handler {
-	return Handler{service: service}
+	return Handler{
+		service:       service,
+		initLimiter:   newRateLimiter(10, time.Minute),
+		detectLimiter: newRateLimiter(40, time.Minute),
+		hbLimiter:     newRateLimiter(6, time.Minute),
+	}
 }
 
 // WithVersionGate включает серверный форс-апдейт: клиенты ниже минимальной
@@ -56,6 +66,8 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Get("/agent.jar", h.agentJar)
 	// Раздача нативной JVMTI-библиотеки по ОС: лаунчер инжектит как -agentpath.
 	group.Get("/native/:os", h.nativeLib)
+	// Манифест целостности (SHA-256 артефактов): лаунчер сверяет скачанное перед инжектом.
+	group.Get("/manifest", h.manifest)
 
 	// Admin: просмотр и управление.
 	admin := app.Group("/api/admin/anticheat")
@@ -103,6 +115,9 @@ func (h Handler) init(c fiber.Ctx) error {
 	user, ok := auth.CurrentUser(c)
 	if !ok {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Требуется авторизация"})
+	}
+	if !h.initLimiter.allow(user.ID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
 	}
 	var req initRequest
 	if err := c.Bind().Body(&req); err != nil {
@@ -162,18 +177,22 @@ func (h Handler) detect(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
+	if !h.detectLimiter.allow(claims.UUID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
+	}
 	input := DetectionInput{
 		Source:    req.Source,
 		Type:      req.Type,
 		Signature: req.Signature,
-		Severity:  req.Severity,
+		Severity:  req.Severity, // игнорируется сервером — severity вычисляется в RecordDetection
 		Details:   req.Details,
 	}
-	if err := h.service.RecordDetection(c.Context(), claims, input); err != nil {
+	severity, err := h.service.RecordDetection(c.Context(), claims, input)
+	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось записать детект"})
 	}
-	// Решаем, кикать ли игрока: ответ читает агент и убивает JVM.
-	if kick, reason := h.service.EvaluateKick(claims, req.Severity, req.Type); kick {
+	// Решаем, кикать ли игрока (по СЕРВЕРНОЙ severity): ответ читает агент и убивает JVM.
+	if kick, reason := h.service.EvaluateKick(claims, severity, input.Type); kick {
 		return c.JSON(fiber.Map{"action": "kick", "reason": reason})
 	}
 	return c.JSON(fiber.Map{"action": "none"})
@@ -190,8 +209,12 @@ func (h Handler) heartbeat(c fiber.Ctx) error {
 	if token == "" {
 		token = c.Get("X-Launch-Token")
 	}
-	if _, err := h.service.VerifyToken(token); err != nil {
+	claims, err := h.service.VerifyToken(token)
+	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	if !h.hbLimiter.allow(claims.UUID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
 	}
 	return c.SendStatus(http.StatusNoContent)
 }
@@ -212,6 +235,10 @@ func (h Handler) nativeLib(c fiber.Ctx) error {
 	}
 	c.Set(fiber.HeaderContentType, "application/octet-stream")
 	return c.SendFile(path)
+}
+
+func (h Handler) manifest(c fiber.Ctx) error {
+	return c.JSON(h.service.Manifest())
 }
 
 func (h Handler) blacklist(c fiber.Ctx) error {

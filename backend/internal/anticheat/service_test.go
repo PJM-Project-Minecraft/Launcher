@@ -138,10 +138,20 @@ func TestAutoBanOnHighSeverity(t *testing.T) {
 	svc := NewService(db, "secret", true, nil, "") // autoBan включён
 	ctx := context.Background()
 
+	// Severity теперь СЕРВЕРНАЯ: заводим сигнатуру блэклиста c severity 9.
+	if _, err := svc.CreateSignature(ctx, models.CheatSignature{Kind: "jar", Pattern: "baritone", Severity: 9, Enabled: true}); err != nil {
+		t.Fatalf("signature: %v", err)
+	}
+
 	res, _ := svc.InitHandshake(ctx, "uuid-5", "Mal", "hwid-5", nil)
 	claims, _ := svc.VerifyToken(res.LaunchToken)
-	if err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone", Severity: 9}); err != nil {
+	// Клиент шлёт заниженную severity=1 — сервер обязан её проигнорировать и взять 9 из блэклиста.
+	sev, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone-1.21.jar", Severity: 1})
+	if err != nil {
 		t.Fatalf("detect: %v", err)
+	}
+	if sev < autoBanSeverity {
+		t.Fatalf("серверная severity должна быть >= %d (из блэклиста), получено %d", autoBanSeverity, sev)
 	}
 
 	var accBans, hwidBans int64
@@ -149,5 +159,55 @@ func TestAutoBanOnHighSeverity(t *testing.T) {
 	db.Model(&models.HwidBan{}).Where("hwid_hash = ?", "hwid-5").Count(&hwidBans)
 	if accBans != 1 || hwidBans != 1 {
 		t.Fatalf("ожидался авто-бан аккаунта и HWID: acc=%d hwid=%d", accBans, hwidBans)
+	}
+	// Первое нарушение — временный бан (эскалация): ExpiresAt должен быть установлен.
+	var accBan models.AccountBan
+	db.Where("user_uuid = ?", "uuid-5").First(&accBan)
+	if accBan.ExpiresAt == nil {
+		t.Fatal("первый авто-бан должен быть временным (ExpiresAt != nil)")
+	}
+}
+
+func TestAutoBanEscalatesToPermanent(t *testing.T) {
+	db := newTestDB(t)
+	svc := NewService(db, "secret", true, nil, "")
+	ctx := context.Background()
+	if _, err := svc.CreateSignature(ctx, models.CheatSignature{Kind: "jar", Pattern: "baritone", Severity: 9, Enabled: true}); err != nil {
+		t.Fatalf("signature: %v", err)
+	}
+	// Одна сессия (claims переиспользуются): RecordDetection не проверяет баны, в отличие
+	// от InitHandshake, поэтому эскалация воспроизводится в рамках одного игрового запуска.
+	res, _ := svc.InitHandshake(ctx, "uuid-esc", "Mal", "hwid-esc", nil)
+	claims, _ := svc.VerifyToken(res.LaunchToken)
+
+	if _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone-a.jar"}); err != nil {
+		t.Fatalf("detect1: %v", err)
+	}
+	var b1 models.AccountBan
+	db.Where("user_uuid = ?", "uuid-esc").First(&b1)
+	if b1.ExpiresAt == nil {
+		t.Fatal("первый авто-бан должен быть временным (ExpiresAt != nil)")
+	}
+
+	if _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone-b.jar"}); err != nil {
+		t.Fatalf("detect2: %v", err)
+	}
+	var b2 models.AccountBan
+	db.Where("user_uuid = ?", "uuid-esc").First(&b2)
+	if b2.ExpiresAt != nil {
+		t.Fatal("повторный авто-бан должен стать перманентным (ExpiresAt == nil)")
+	}
+}
+
+func TestServerSeverityForSystemType(t *testing.T) {
+	svc := NewService(newTestDB(t), "secret", false, nil, "")
+	ctx := context.Background()
+	// Системный тип inject — severity из серверной карты (9), не из клиента.
+	if got := svc.resolveSeverity(ctx, "inject", "anything"); got != 9 {
+		t.Fatalf("inject должен иметь серверную severity 9, получено %d", got)
+	}
+	// Неизвестная сигнатура без блэклиста — дефолт.
+	if got := svc.resolveSeverity(ctx, "process", "unknown.exe"); got != defaultDetectionSeverity {
+		t.Fatalf("несовпавшая сигнатура должна давать дефолт %d, получено %d", defaultDetectionSeverity, got)
 	}
 }

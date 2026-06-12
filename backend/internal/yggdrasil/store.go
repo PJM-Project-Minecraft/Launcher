@@ -151,8 +151,12 @@ func (s *Store) PutSession(sess Session) {
 }
 
 // MarkVerifiedByNonce помечает сессию, связанную с nonce, как прошедшую античит.
-// Nonce одноразовый: после успеха он удаляется (анти-replay confirm). Возвращает
-// false, если nonce неизвестен/использован или сессия истекла.
+//
+// Nonce НЕ удаляется при успехе: он нужен дальше для серверного kick
+// (InvalidateByNonce) и проверки живости (IsActiveByNonce) по той же сессии.
+// Анти-replay обеспечивается тем, что уже подтверждённая (Verified) сессия второй
+// confirm не принимает. Возвращает false, если nonce неизвестен, сессия истекла
+// или уже подтверждена.
 func (s *Store) MarkVerifiedByNonce(nonce string) bool {
 	if nonce == "" {
 		return false
@@ -163,15 +167,37 @@ func (s *Store) MarkVerifiedByNonce(nonce string) bool {
 	if !ok {
 		return false
 	}
-	delete(s.nonces, nonce)
 	sess, ok := s.sessions[token]
 	if !ok || time.Now().After(sess.expiresAt) {
 		return false
+	}
+	if sess.Verified {
+		return false // анти-replay: повторный confirm по уже подтверждённой сессии
 	}
 	sess.Verified = true
 	s.sessions[token] = sess
 	s.persistSession(sess)
 	return true
+}
+
+// IsActiveByNonce сообщает, что сессия по nonce ещё жива и прошла античит (Verified).
+// Используется heartbeat- и in-game-проверками: если сессию погасили (kick через
+// InvalidateByNonce) или она истекла — вернёт false, и агент/сервер кикнут игрока.
+func (s *Store) IsActiveByNonce(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token, ok := s.nonces[nonce]
+	if !ok {
+		return false
+	}
+	sess, ok := s.sessions[token]
+	if !ok || time.Now().After(sess.expiresAt) {
+		return false
+	}
+	return sess.Verified
 }
 
 func (s *Store) Session(accessToken string) (Session, bool) {

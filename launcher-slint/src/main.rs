@@ -1203,58 +1203,178 @@ fn fetch_yggdrasil_session(
 
 // Гарантирует наличие authlib-injector.jar в служебной папке лаунчера (вне
 // files/, чтобы cleanup его не удалял). Качает с бэкенда при отсутствии.
-fn ensure_authlib_injector(config: &AppConfig) -> Option<PathBuf> {
-    let dir = project_dirs().ok()?.data_dir().to_path_buf();
-    let path = dir.join("authlib-injector.jar");
-    if path.exists() {
-        return Some(path);
+// Манифест целостности артефактов античита (SHA-256). Лаунчер сверяет им скачанные
+// agent.jar / нативную библиотеку / authlib-injector ПЕРЕД инжектом в JVM: несовпадение
+// = подмена (MITM или локально) → блок запуска. Закрывает RCE через подменённый агент.
+#[derive(Debug, Default, Deserialize)]
+struct AnticheatManifest {
+    #[serde(rename = "agentSha256", default)]
+    agent_sha256: String,
+    #[serde(rename = "authlibSha256", default)]
+    authlib_sha256: String,
+    #[serde(default)]
+    native: AnticheatNative,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnticheatNative {
+    #[serde(default)]
+    linux: String,
+    #[serde(default)]
+    windows: String,
+}
+
+impl AnticheatManifest {
+    // SHA нативной библиотеки для текущей ОС (пустая строка — нет хэша).
+    fn native_sha(&self) -> &str {
+        if cfg!(target_os = "linux") {
+            &self.native.linux
+        } else if cfg!(target_os = "windows") {
+            &self.native.windows
+        } else {
+            ""
+        }
     }
+}
+
+// Тянет манифест целостности с бэкенда (без auth). None — недоступен (оффлайн/сбой):
+// тогда SHA-сверка не выполняется (fail-open, не ломаем оффлайн-запуск).
+fn fetch_anticheat_manifest(config: &AppConfig) -> Option<AnticheatManifest> {
     let client = download_client().ok()?;
     let url = format!(
-        "{}/api/yggdrasil/authlib-injector.jar",
+        "{}/api/anticheat/manifest",
         config.api_url.trim_end_matches('/')
     );
     let response = client.get(url).send().ok()?;
     if !response.status().is_success() {
         return None;
     }
-    let bytes = response.bytes().ok()?;
-    fs::create_dir_all(&dir).ok()?;
-    let tmp = path.with_extension("jar.part");
-    fs::write(&tmp, &bytes).ok()?;
-    fs::rename(&tmp, &path).ok()?;
-    Some(path)
+    response.json::<AnticheatManifest>().ok()
 }
 
-// Гарантирует наличие agent.jar античита в служебной папке. Всегда пытается
-// скачать свежую версию с бэкенда (jar маленький), при ошибке использует кэш.
-fn ensure_agent_jar(config: &AppConfig) -> Option<PathBuf> {
-    let dir = project_dirs().ok()?.data_dir().to_path_buf();
+// Пустую строку SHA трактуем как «ожидаемого хэша нет» (файла нет на бэкенде).
+fn sha_opt(s: &str) -> Option<&str> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+// Сверяет SHA-256 файла с ожидаемым. Ok(()) — совпал или сверка не требуется;
+// Err — не совпал (подмена); ошибку чтения при наличии sha тоже трактуем как подмену.
+fn verify_sha(path: &Path, expected_sha: Option<&str>) -> Result<(), String> {
+    let Some(sha) = expected_sha else {
+        return Ok(());
+    };
+    match hash_file(path) {
+        Ok(h) if h.eq_ignore_ascii_case(sha) => Ok(()),
+        _ => Err(format!(
+            "Контроль целостности не пройден: {} подменён — запуск заблокирован.",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("файл агента")
+        )),
+    }
+}
+
+// Скачивает url → path (атомарно через .part) и, если задан expected_sha, сверяет хэш.
+// Ok(true) — файл на месте и валиден; Ok(false) — скачать не удалось (сеть/HTTP);
+// Err — файл скачан, но SHA не совпал (подмена).
+fn download_and_verify(
+    client: &Client,
+    url: &str,
+    path: &Path,
+    dir: &Path,
+    expected_sha: Option<&str>,
+) -> Result<bool, String> {
+    if fs::create_dir_all(dir).is_err() {
+        return Ok(false);
+    }
+    let Ok(response) = client.get(url).send() else {
+        return Ok(false);
+    };
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    let Ok(bytes) = response.bytes() else {
+        return Ok(false);
+    };
+    let tmp = path.with_extension("part");
+    if fs::write(&tmp, &bytes).is_err() {
+        return Ok(false);
+    }
+    if fs::rename(&tmp, path).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    verify_sha(path, expected_sha).map(|_| true)
+}
+
+// Скачивает артефакт с SHA-сверкой (до 2 попыток при подмене/битой загрузке), с
+// откатом на кэш. Ok(Some) — готов и валиден; Ok(None) — недоступен (оффлайн без кэша,
+// fail-open); Err — подмена (блок запуска).
+fn ensure_artifact(
+    config: &AppConfig,
+    url: &str,
+    path: &Path,
+    dir: &Path,
+    expected_sha: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let _ = config;
+    if let Ok(client) = download_client() {
+        let mut tamper: Option<String> = None;
+        for _ in 0..2 {
+            match download_and_verify(&client, url, path, dir, expected_sha) {
+                Ok(true) => return Ok(Some(path.to_path_buf())),
+                Ok(false) => {
+                    tamper = None;
+                    break;
+                }
+                Err(e) => tamper = Some(e), // подмена — повторяем, затем блок
+            }
+        }
+        if let Some(e) = tamper {
+            return Err(e);
+        }
+    }
+    // Сеть недоступна — кэш, но только если проходит сверку.
+    if path.exists() {
+        verify_sha(path, expected_sha)?;
+        return Ok(Some(path.to_path_buf()));
+    }
+    Ok(None)
+}
+
+fn ensure_authlib_injector(
+    config: &AppConfig,
+    expected_sha: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(dir) = project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
+        return Ok(None);
+    };
+    let path = dir.join("authlib-injector.jar");
+    let url = format!(
+        "{}/api/yggdrasil/authlib-injector.jar",
+        config.api_url.trim_end_matches('/')
+    );
+    ensure_artifact(config, &url, &path, &dir, expected_sha)
+}
+
+// Гарантирует наличие agent.jar античита в служебной папке со сверкой SHA-256 из
+// манифеста. Всегда пытается скачать свежую версию (jar маленький), при ошибке — кэш.
+// Err — подмена (блок запуска); Ok(None) — недоступен (fail-open оффлайн).
+fn ensure_agent_jar(
+    config: &AppConfig,
+    expected_sha: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(dir) = project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
+        return Ok(None);
+    };
     let path = dir.join("anticheat-agent.jar");
     let url = format!(
         "{}/api/anticheat/agent.jar",
         config.api_url.trim_end_matches('/')
     );
-    if let Ok(client) = download_client() {
-        if let Ok(response) = client.get(&url).send() {
-            if response.status().is_success() {
-                if let Ok(bytes) = response.bytes() {
-                    if fs::create_dir_all(&dir).is_ok() {
-                        let tmp = path.with_extension("jar.part");
-                        if fs::write(&tmp, &bytes).is_ok() && fs::rename(&tmp, &path).is_ok() {
-                            return Some(path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Сеть недоступна — используем ранее скачанный jar, если он есть.
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    ensure_artifact(config, &url, &path, &dir, expected_sha)
 }
 
 // Имя нативной JVMTI-библиотеки и токен ОС для эндпоинта раздачи. None — ОС без
@@ -1271,35 +1391,25 @@ fn native_agent_target() -> Option<(&'static str, &'static str)> {
 }
 
 // Гарантирует наличие нативной библиотеки античита в служебной папке (качает с
-// бэкенда по текущей ОС). Возвращает путь к ней.
-fn ensure_native_agent(config: &AppConfig) -> Option<PathBuf> {
-    let (os_token, file_name) = native_agent_target()?;
-    let dir = project_dirs().ok()?.data_dir().to_path_buf();
+// бэкенда по текущей ОС) со сверкой SHA-256. Err — подмена (блок); Ok(None) — нет
+// нативной части для этой ОС или недоступна (fail-open).
+fn ensure_native_agent(
+    config: &AppConfig,
+    expected_sha: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some((os_token, file_name)) = native_agent_target() else {
+        return Ok(None);
+    };
+    let Some(dir) = project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
+        return Ok(None);
+    };
     let path = dir.join(file_name);
     let url = format!(
         "{}/api/anticheat/native/{}",
         config.api_url.trim_end_matches('/'),
         os_token
     );
-    if let Ok(client) = download_client() {
-        if let Ok(response) = client.get(&url).send() {
-            if response.status().is_success() {
-                if let Ok(bytes) = response.bytes() {
-                    if fs::create_dir_all(&dir).is_ok() {
-                        let tmp = path.with_extension("part");
-                        if fs::write(&tmp, &bytes).is_ok() && fs::rename(&tmp, &path).is_ok() {
-                            return Some(path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    ensure_artifact(config, &url, &path, &dir, expected_sha)
 }
 
 // После закрытия игры гасим accessToken, чтобы скопированную команду запуска
@@ -1925,11 +2035,16 @@ fn launch_profile(
     let settings = load_settings().unwrap_or_default();
     let mut jvm_args = jvm_args_with_memory(&manifest.profile.jvm_args, effective_memory_gb(&settings))?;
 
+    // Манифест целостности (SHA-256) тянем один раз: им сверяем все инжектируемые
+    // артефакты перед запуском. Недоступен → сверки нет (fail-open, оффлайн не ломаем).
+    let ac_manifest = fetch_anticheat_manifest(config);
+
     // Подключаем authlib-injector как javaagent, указывая на наш Yggdrasil-сервер.
     // Jar — launcher-managed (качается с бэкенда), лежит вне files/, поэтому
     // cleanup его не трогает. Клиент и игровой сервер должны указывать на один
     // и тот же базовый URL (GML-совместимый путь).
-    if let Some(injector) = ensure_authlib_injector(config) {
+    let authlib_sha = ac_manifest.as_ref().and_then(|m| sha_opt(&m.authlib_sha256));
+    if let Some(injector) = ensure_authlib_injector(config, authlib_sha)? {
         let ygg_url = format!(
             "{}/api/v1/integrations/authlib/minecraft",
             config.api_url.trim_end_matches('/')
@@ -1949,7 +2064,8 @@ fn launch_profile(
     if !guard.launch_token.is_empty() {
         // Нативный JVMTI-агент (M4): anti-inject/anti-debug + flag-файл для Java-агента.
         // Также запрещаем поздний attach к JVM (anti late-injection).
-        if let Some(native) = ensure_native_agent(config) {
+        let native_sha = ac_manifest.as_ref().and_then(|m| sha_opt(m.native_sha()));
+        if let Some(native) = ensure_native_agent(config, native_sha)? {
             let flag = native.with_file_name("ac_native.flag");
             let _ = fs::remove_file(&flag); // свежий старт: убираем прошлый флаг
             // КРИТИЧНО: чистим и файл событий, иначе Java-поллер при новом запуске
@@ -1964,7 +2080,8 @@ fn launch_profile(
         }
 
         // Java-агент (M3): confirm + рантайм-скан классов/модов + heartbeat.
-        if let Some(agent) = ensure_agent_jar(config) {
+        let agent_sha = ac_manifest.as_ref().and_then(|m| sha_opt(&m.agent_sha256));
+        if let Some(agent) = ensure_agent_jar(config, agent_sha)? {
             let kick = agent.with_file_name("ac_kick.flag");
             let _ = fs::remove_file(&kick); // свежий старт
             kick_file = Some(kick.clone());

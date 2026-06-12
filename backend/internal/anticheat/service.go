@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
+	"sync"
 	"time"
 
 	"launcher-backend/internal/models"
@@ -34,6 +36,14 @@ type Service struct {
 	kickSeverity int
 	notifier     Notifier
 	now          func() time.Time
+
+	authlibPath string // путь к authlib-injector.jar (для SHA-манифеста)
+
+	recentMu sync.Mutex
+	recent   map[string]time.Time // дедуп: ключ детекта -> время последней записи
+
+	shaMu      sync.Mutex
+	shaEntries map[string]shaEntry // кэш SHA-256 артефактов по пути (инвалидация по mtime+size)
 }
 
 func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifier, agentPath string) *Service {
@@ -45,8 +55,14 @@ func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifi
 		agentPath:    agentPath,
 		kickSeverity: 7,
 		now:          time.Now,
+		recent:       make(map[string]time.Time),
+		shaEntries:   make(map[string]shaEntry),
 	}
 }
+
+// SetAuthlibPath задаёт путь к authlib-injector.jar — он тоже инжектится как
+// -javaagent, поэтому его SHA включается в манифест целостности.
+func (s *Service) SetAuthlibPath(p string) { s.authlibPath = p }
 
 // SetNotifier подключает отправку алертов о детектах (nil — алерты выключены).
 func (s *Service) SetNotifier(n Notifier) {
@@ -117,7 +133,71 @@ const (
 	launchTokenTTL = 120 * time.Second
 	// autoBanSeverity — порог серьёзности для авто-бана (если включён).
 	autoBanSeverity = 8
+	// defaultDetectionSeverity — severity сигнатурного детекта, не совпавшего с блэклистом.
+	defaultDetectionSeverity = 5
+	// tempBanDuration — длительность первого (временного) авто-бана до эскалации в перманент.
+	tempBanDuration = 7 * 24 * time.Hour
+	// detectDedupWindow — окно, в котором повторный идентичный детект не пишется снова.
+	detectDedupWindow = 30 * time.Second
 )
+
+// systemSeverity — СЕРВЕРНАЯ (не клиентская) серьёзность для системных типов детекта.
+// Клиент не может занизить severity реальной инъекции/тампера: значение берётся отсюда,
+// а не из тела запроса. Сигнатурные типы (process|class|jar|file) — из блэклиста.
+var systemSeverity = map[string]int{
+	"inject":   9,
+	"attach":   9,
+	"tamper":   8,
+	"debugger": 6,
+}
+
+// normalizeSource валидирует источник детекта по whitelist (анти-спуф source).
+// Пустой источник трактуется как "launcher" (pre-launch скан лаунчера), невалидный —
+// как "unknown" (запись сохраняется, но не выдаёт себя за доверенный слой).
+func normalizeSource(src string) string {
+	switch src {
+	case "launcher", "java", "native":
+		return src
+	case "":
+		return "launcher"
+	default:
+		return "unknown"
+	}
+}
+
+// resolveSeverity вычисляет серьёзность детекта НА СЕРВЕРЕ, игнорируя клиентское
+// значение. Системные типы — из systemSeverity; сигнатурные — максимальная severity
+// совпавшей записи блэклиста; иначе — defaultDetectionSeverity.
+func (s *Service) resolveSeverity(ctx context.Context, dtype, signature string) int {
+	if sv, ok := systemSeverity[dtype]; ok {
+		return sv
+	}
+	if sv := s.signatureSeverity(ctx, dtype, signature); sv > 0 {
+		return sv
+	}
+	return defaultDetectionSeverity
+}
+
+// signatureSeverity ищет в блэклисте включённые сигнатуры заданного kind, чей Pattern
+// является подстрокой signature, и возвращает максимальную их severity (0 — не найдено).
+func (s *Service) signatureSeverity(ctx context.Context, kind, signature string) int {
+	if signature == "" {
+		return 0
+	}
+	sig := strings.ToLower(signature)
+	var rows []models.CheatSignature
+	if err := s.db.WithContext(ctx).Where("enabled = ? AND kind = ?", true, kind).Find(&rows).Error; err != nil {
+		return 0
+	}
+	best := 0
+	for _, r := range rows {
+		p := strings.ToLower(r.Pattern)
+		if p != "" && strings.Contains(sig, p) && r.Severity > best {
+			best = r.Severity
+		}
+	}
+	return best
+}
 
 // DetectionInput — единичное обнаружение, присланное лаунчером или агентом.
 type DetectionInput struct {
@@ -155,7 +235,7 @@ func (s *Service) InitHandshake(ctx context.Context, userUUID, login, hwidHash s
 
 	// Фиксируем pre-launch детекты от лаунчера (скан процессов/файлов).
 	for _, d := range detections {
-		if err := s.recordDetection(ctx, userUUID, login, hwidHash, "", d, now); err != nil {
+		if _, err := s.recordDetection(ctx, userUUID, login, hwidHash, "", d, now); err != nil {
 			return InitResult{}, err
 		}
 	}
@@ -180,21 +260,25 @@ func (s *Service) VerifyToken(token string) (LaunchClaims, error) {
 	return s.signer.Verify(token, s.now())
 }
 
-// RecordDetection пишет обнаружение, аутентифицированное launch-token.
-func (s *Service) RecordDetection(ctx context.Context, claims LaunchClaims, d DetectionInput) error {
+// RecordDetection пишет обнаружение, аутентифицированное launch-token, и возвращает
+// СЕРВЕРНУЮ серьёзность детекта (используется для решения о kick). Клиентская
+// severity из запроса игнорируется — её нельзя занизить.
+func (s *Service) RecordDetection(ctx context.Context, claims LaunchClaims, d DetectionInput) (int, error) {
 	return s.recordDetection(ctx, claims.UUID, claims.Login, claims.HwidHash, claims.Nonce, d, s.now())
 }
 
-func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash, sessionID string, d DetectionInput, now time.Time) error {
+func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash, sessionID string, d DetectionInput, now time.Time) (int, error) {
+	severity := s.resolveSeverity(ctx, d.Type, d.Signature)
+	// Дедуп: одинаковый детект в пределах окна не пишем повторно, но severity всё равно
+	// возвращаем — kick-решение должно срабатывать и на «застрявшем»/спамящем агенте.
+	if s.isDuplicate(userUUID, sessionID, d.Type, d.Signature, now) {
+		return severity, nil
+	}
 	raw := ""
 	if d.Details != nil {
 		if b, err := json.Marshal(d.Details); err == nil {
 			raw = string(b)
 		}
-	}
-	source := d.Source
-	if source == "" {
-		source = "launcher"
 	}
 	rec := models.Detection{
 		ID:        uuid.NewString(),
@@ -202,28 +286,76 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 		Login:     login,
 		HwidHash:  hwidHash,
 		SessionID: sessionID,
-		Source:    source,
+		Source:    normalizeSource(d.Source),
 		Type:      d.Type,
 		Signature: d.Signature,
-		Severity:  d.Severity,
+		Severity:  severity,
 		Raw:       raw,
 		CreatedAt: now,
 	}
 	if err := s.db.WithContext(ctx).Create(&rec).Error; err != nil {
-		return err
+		return severity, err
 	}
-	autoBanned := s.autoBan && d.Severity >= autoBanSeverity
+	autoBanned := s.autoBan && severity >= autoBanSeverity
 	if autoBanned {
-		_ = s.BanAccount(ctx, userUUID, login, "auto: "+d.Signature, "anticheat")
-		if hwidHash != "" {
-			_ = s.BanHwid(ctx, hwidHash, "auto: "+d.Signature, "anticheat")
-		}
+		s.autoBanEscalated(ctx, userUUID, login, hwidHash, d.Signature, now)
 	}
 	if s.notifier != nil {
 		// Алерт не должен задерживать ответ лаунчеру/агенту.
 		go s.notifier.NotifyDetection(rec, autoBanned)
 	}
-	return nil
+	return severity, nil
+}
+
+// isDuplicate возвращает true, если идентичный детект уже писался в пределах
+// detectDedupWindow (защита от флуда «застрявшего» агента). Заодно чистит протухшие
+// записи, чтобы карта не росла бесконечно.
+func (s *Service) isDuplicate(userUUID, sessionID, dtype, signature string, now time.Time) bool {
+	key := userUUID + "|" + sessionID + "|" + dtype + "|" + signature
+	s.recentMu.Lock()
+	defer s.recentMu.Unlock()
+	for k, t := range s.recent {
+		if now.Sub(t) > detectDedupWindow {
+			delete(s.recent, k)
+		}
+	}
+	if t, ok := s.recent[key]; ok && now.Sub(t) <= detectDedupWindow {
+		return true
+	}
+	s.recent[key] = now
+	return false
+}
+
+// autoBanEscalated применяет эскалацию авто-бана: первое нарушение — временный бан
+// (tempBanDuration), повторное (для аккаунта/HWID уже есть бан-запись) — перманентный.
+func (s *Service) autoBanEscalated(ctx context.Context, userUUID, login, hwidHash, signature string, now time.Time) {
+	var expiry *time.Time
+	if !s.hasPriorBan(ctx, userUUID, hwidHash) {
+		t := now.Add(tempBanDuration)
+		expiry = &t
+	}
+	reason := "auto: " + signature
+	_ = s.banAccount(ctx, userUUID, login, reason, "anticheat", expiry)
+	if hwidHash != "" {
+		_ = s.banHwid(ctx, hwidHash, reason, "anticheat", expiry)
+	}
+}
+
+// hasPriorBan сообщает, банился ли уже этот аккаунт или HWID (запись существует,
+// даже если истекла) — сигнал для эскалации в перманентный бан.
+func (s *Service) hasPriorBan(ctx context.Context, userUUID, hwidHash string) bool {
+	var n int64
+	s.db.WithContext(ctx).Model(&models.AccountBan{}).Where("user_uuid = ?", userUUID).Count(&n)
+	if n > 0 {
+		return true
+	}
+	if hwidHash != "" {
+		s.db.WithContext(ctx).Model(&models.HwidBan{}).Where("hwid_hash = ?", hwidHash).Count(&n)
+		if n > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Blacklist возвращает включённые сигнатуры читов (для лаунчера и агентов).
@@ -288,17 +420,26 @@ func (s *Service) touchHwid(ctx context.Context, hwidHash, userUUID, login strin
 }
 
 func (s *Service) BanAccount(ctx context.Context, userUUID, login, reason, by string) error {
-	ban := models.AccountBan{
-		ID:        uuid.NewString(),
-		UserUUID:  userUUID,
-		Login:     login,
-		Reason:    reason,
-		BannedBy:  by,
-		CreatedAt: s.now(),
+	return s.banAccount(ctx, userUUID, login, reason, by, nil)
+}
+
+// banAccount апсертит бан аккаунта. expiresAt=nil — перманентный, иначе временный.
+// Select(...) форсит запись expires_at даже при nil (эскалация temp→perm обнуляет срок).
+func (s *Service) banAccount(ctx context.Context, userUUID, login, reason, by string, expiresAt *time.Time) error {
+	var existing models.AccountBan
+	err := s.db.WithContext(ctx).Where("user_uuid = ?", userUUID).First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return s.db.WithContext(ctx).Create(&models.AccountBan{
+			ID: uuid.NewString(), UserUUID: userUUID, Login: login,
+			Reason: reason, BannedBy: by, CreatedAt: s.now(), ExpiresAt: expiresAt,
+		}).Error
 	}
-	return s.db.WithContext(ctx).Where("user_uuid = ?", userUUID).
-		Assign(map[string]any{"reason": reason, "banned_by": by, "login": login}).
-		FirstOrCreate(&ban).Error
+	if err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Model(&existing).
+		Select("reason", "banned_by", "login", "expires_at").
+		Updates(map[string]any{"reason": reason, "banned_by": by, "login": login, "expires_at": expiresAt}).Error
 }
 
 func (s *Service) UnbanAccount(ctx context.Context, userUUID string) error {
@@ -306,16 +447,25 @@ func (s *Service) UnbanAccount(ctx context.Context, userUUID string) error {
 }
 
 func (s *Service) BanHwid(ctx context.Context, hwidHash, reason, by string) error {
-	ban := models.HwidBan{
-		ID:        uuid.NewString(),
-		HwidHash:  hwidHash,
-		Reason:    reason,
-		BannedBy:  by,
-		CreatedAt: s.now(),
+	return s.banHwid(ctx, hwidHash, reason, by, nil)
+}
+
+// banHwid апсертит аппаратный бан. expiresAt=nil — перманентный, иначе временный.
+func (s *Service) banHwid(ctx context.Context, hwidHash, reason, by string, expiresAt *time.Time) error {
+	var existing models.HwidBan
+	err := s.db.WithContext(ctx).Where("hwid_hash = ?", hwidHash).First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return s.db.WithContext(ctx).Create(&models.HwidBan{
+			ID: uuid.NewString(), HwidHash: hwidHash,
+			Reason: reason, BannedBy: by, CreatedAt: s.now(), ExpiresAt: expiresAt,
+		}).Error
 	}
-	return s.db.WithContext(ctx).Where("hwid_hash = ?", hwidHash).
-		Assign(map[string]any{"reason": reason, "banned_by": by}).
-		FirstOrCreate(&ban).Error
+	if err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Model(&existing).
+		Select("reason", "banned_by", "expires_at").
+		Updates(map[string]any{"reason": reason, "banned_by": by, "expires_at": expiresAt}).Error
 }
 
 func (s *Service) UnbanHwid(ctx context.Context, hwidHash string) error {

@@ -102,6 +102,7 @@ func main() {
 	// Античит связан с yggdrasil-store: confirm помечает игровую сессию Verified.
 	acService := anticheat.NewService(db, cfg.AnticheatSecret, cfg.AnticheatAutoBan, yggService.Store(), cfg.AnticheatAgentPath)
 	acService.SetNativePaths(cfg.AnticheatNativeLinux, cfg.AnticheatNativeWin)
+	acService.SetAuthlibPath(cfg.AuthlibInjectorPath)
 	acService.SetKickSeverity(cfg.AnticheatKickSeverity)
 	if notifier := anticheat.NewTelegramNotifier(cfg.AnticheatAlertBotToken, cfg.AnticheatAlertChatID); notifier != nil {
 		acService.SetNotifier(notifier)
