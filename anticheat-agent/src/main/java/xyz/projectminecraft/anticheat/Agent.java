@@ -29,12 +29,15 @@ public final class Agent {
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final long HEARTBEAT_PERIOD_MS = 30_000L;
 
-    // Эвристический набор маркеров известных чит-клиентов/модов. Серверный матч по
-    // полному блэклисту приедет в M5; здесь — быстрый локальный фильтр.
-    private static final String[] SUSPECT_MARKERS = {
+    // Дефолтный seed маркеров известных чит-клиентов/модов (на случай недоступности
+    // бэкенда). Актуальный набор тянется с сервера через /rules и атомарно заменяет
+    // markers; ре-фетч — при изменении версии блэклиста (сигнал из heartbeat).
+    private static final java.util.Set<String> DEFAULT_MARKERS = java.util.Set.of(
         "wurst", "meteorclient", "baritone", "xray", "killaura",
         "aimbot", "liquidbounce", "impactclient", "sigmaclient", "huzuni"
-    };
+    );
+    private static volatile java.util.Set<String> markers = DEFAULT_MARKERS;
+    private static volatile long blacklistVersion = -1;
 
     private static volatile String token = "";
     private static volatile String baseUrl = "";
@@ -69,6 +72,10 @@ public final class Agent {
 
         // 1. Подтверждаем защиту: отправляем proof о том, что агент реально загружен.
         confirm(inst, nativeState);
+
+        // 1.5. Тянем актуальный блэклист с сервера (по launch-token) до скана, чтобы
+        //      сканировать уже по полному набору сигнатур, а не только по seed.
+        fetchRules();
 
         // 2. Сканируем уже загруженные классы и моды на маркеры читов.
         scanLoadedClasses(inst);
@@ -196,7 +203,7 @@ public final class Agent {
     /** Сверяет имя с маркерами и, при совпадении, шлёт детект (без дублей). */
     private static void checkAndReport(String kind, String name) {
         String lower = name.toLowerCase(Locale.ROOT);
-        for (String marker : SUSPECT_MARKERS) {
+        for (String marker : markers) {
             if (lower.contains(marker)) {
                 String key = kind + ":" + marker;
                 if (reported.contains(key)) {
@@ -299,11 +306,113 @@ public final class Agent {
                 } catch (InterruptedException e) {
                     return;
                 }
-                post("/api/anticheat/heartbeat", "{\"launchToken\":\"" + escape(token) + "\"}");
+                String resp = postRead("/api/anticheat/heartbeat",
+                    "{\"launchToken\":\"" + escape(token) + "\"}");
+                if (resp == null) {
+                    continue; // сеть нестабильна — не убиваем игру (enforcement даёт сервер)
+                }
+                // Сервер погасил сессию (detect в другой сессии/reaper) → закрываем игру.
+                if (resp.contains("\"action\":\"kick\"")) {
+                    kickGame("session-revoked");
+                    return;
+                }
+                // Версия блэклиста изменилась → подтягиваем свежие правила.
+                long v = parseLongField(resp, "blacklistVersion");
+                if (v >= 0 && v != blacklistVersion) {
+                    fetchRules();
+                }
             }
         }, "anticheat-heartbeat");
         t.setDaemon(true);
         t.start();
+    }
+
+    /** Тянет блэклист с сервера (/rules по launch-token) и атомарно обновляет markers. */
+    private static void fetchRules() {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/anticheat/rules"))
+                .timeout(TIMEOUT)
+                .header("X-Launch-Token", token)
+                .GET()
+                .build();
+            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                return;
+            }
+            String body = resp.body();
+            java.util.Set<String> patterns = parsePatterns(body);
+            if (!patterns.isEmpty()) {
+                // Объединяем с дефолтным seed, чтобы усечённый/частичный блэклист не ослаблял детект.
+                java.util.Set<String> merged = new java.util.HashSet<>(DEFAULT_MARKERS);
+                merged.addAll(patterns);
+                markers = merged;
+            }
+            long v = parseLongField(body, "version");
+            if (v >= 0) {
+                blacklistVersion = v;
+            }
+        } catch (Exception ignored) {
+            // best-effort: при ошибке остаёмся на текущем наборе markers
+        }
+    }
+
+    // Минимальный парсинг контролируемого JSON-ответа сервера (без сторонних библиотек).
+
+    /** Читает целочисленное поле "field": N. -1, если не найдено/не число. */
+    private static long parseLongField(String body, String field) {
+        String key = "\"" + field + "\":";
+        int i = body.indexOf(key);
+        if (i < 0) {
+            return -1;
+        }
+        i += key.length();
+        while (i < body.length() && Character.isWhitespace(body.charAt(i))) {
+            i++;
+        }
+        int j = i;
+        if (j < body.length() && body.charAt(j) == '-') {
+            j++;
+        }
+        while (j < body.length() && Character.isDigit(body.charAt(j))) {
+            j++;
+        }
+        try {
+            return Long.parseLong(body.substring(i, j));
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** Извлекает все значения "pattern":"..." из ответа /rules (lowercase). */
+    private static java.util.Set<String> parsePatterns(String body) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        String key = "\"pattern\":\"";
+        int idx = 0;
+        while ((idx = body.indexOf(key, idx)) >= 0) {
+            idx += key.length();
+            StringBuilder sb = new StringBuilder();
+            int end = idx;
+            while (end < body.length()) {
+                char c = body.charAt(end);
+                if (c == '\\' && end + 1 < body.length()) {
+                    sb.append(body.charAt(end + 1));
+                    end += 2;
+                    continue;
+                }
+                if (c == '"') {
+                    break;
+                }
+                sb.append(c);
+                end++;
+            }
+            String pat = sb.toString().trim().toLowerCase(Locale.ROOT);
+            if (!pat.isEmpty()) {
+                out.add(pat);
+            }
+            idx = end;
+        }
+        return out;
     }
 
     private static void post(String path, String json) {

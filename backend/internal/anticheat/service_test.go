@@ -3,6 +3,7 @@ package anticheat
 import (
 	"context"
 	"testing"
+	"time"
 
 	"launcher-backend/internal/models"
 
@@ -96,6 +97,7 @@ func TestInitRecordsHwidAndDetections(t *testing.T) {
 
 type fakeVerifier struct {
 	verified map[string]bool
+	invalid  map[string]bool
 }
 
 func (f *fakeVerifier) MarkVerifiedByNonce(nonce string) bool {
@@ -106,7 +108,17 @@ func (f *fakeVerifier) MarkVerifiedByNonce(nonce string) bool {
 	return nonce != ""
 }
 
-func (f *fakeVerifier) InvalidateByNonce(nonce string) bool { return nonce != "" }
+func (f *fakeVerifier) InvalidateByNonce(nonce string) bool {
+	if f.invalid == nil {
+		f.invalid = map[string]bool{}
+	}
+	f.invalid[nonce] = true
+	return nonce != ""
+}
+
+func (f *fakeVerifier) IsActiveByNonce(nonce string) bool {
+	return f.verified[nonce] && !f.invalid[nonce]
+}
 
 func TestConfirmMarksSessionVerified(t *testing.T) {
 	verifier := &fakeVerifier{verified: map[string]bool{}}
@@ -196,6 +208,80 @@ func TestAutoBanEscalatesToPermanent(t *testing.T) {
 	db.Where("user_uuid = ?", "uuid-esc").First(&b2)
 	if b2.ExpiresAt != nil {
 		t.Fatal("повторный авто-бан должен стать перманентным (ExpiresAt == nil)")
+	}
+}
+
+func TestHeartbeatReapsStale(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	base := time.Unix(1_700_000_000, 0)
+	svc.now = func() time.Time { return base }
+	svc.SetHeartbeatTimeout(90 * time.Second)
+
+	res, _ := svc.InitHandshake(context.Background(), "uuid-hb", "Liko", "hwid-hb", nil)
+	if err := svc.Confirm(res.LaunchToken); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if !v.IsActiveByNonce(res.Nonce) {
+		t.Fatal("после confirm сессия должна быть активна")
+	}
+	// В пределах таймаута — не гасим.
+	svc.reapStale(base.Add(60 * time.Second))
+	if !v.IsActiveByNonce(res.Nonce) {
+		t.Fatal("в пределах таймаута сессия не должна гаситься")
+	}
+	// Свыше таймаута — reaper гасит протухшую сессию (агент умер).
+	svc.reapStale(base.Add(120 * time.Second))
+	if v.IsActiveByNonce(res.Nonce) {
+		t.Fatal("протухшая сессия должна быть погашена reaper'ом")
+	}
+}
+
+func TestHeartbeatKickWhenInactive(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	ctx := context.Background()
+	res, _ := svc.InitHandshake(ctx, "uuid-hk", "Liko", "hwid-hk", nil)
+	claims, _ := svc.VerifyToken(res.LaunchToken)
+	if err := svc.Confirm(res.LaunchToken); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if kick, _ := svc.Heartbeat(ctx, claims); kick {
+		t.Fatal("активная сессия не должна давать kick")
+	}
+	v.InvalidateByNonce(res.Nonce) // detect погасил сессию
+	if kick, _ := svc.Heartbeat(ctx, claims); !kick {
+		t.Fatal("после погашения сессии heartbeat должен вернуть kick")
+	}
+}
+
+func TestBlacklistVersionAndRules(t *testing.T) {
+	// Изолированная in-memory БД (общий newTestDB шарит кэш между тестами пакета,
+	// и сигнатуры из других тестов протекли бы сюда, ломая "пустой блэклист → 0").
+	db, err := gorm.Open(sqlite.Open("file:bl_version_test?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.AutoMigrate(&models.CheatSignature{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc := NewService(db, "secret", false, nil, "")
+	ctx := context.Background()
+	if v := svc.BlacklistVersion(ctx); v != 0 {
+		t.Fatalf("пустой блэклист → версия 0, got %d", v)
+	}
+	if _, err := svc.CreateSignature(ctx, models.CheatSignature{Kind: "jar", Pattern: "wurst", Severity: 8, Enabled: true}); err != nil {
+		t.Fatalf("signature: %v", err)
+	}
+	if v := svc.BlacklistVersion(ctx); v == 0 {
+		t.Fatal("после добавления сигнатуры версия должна быть > 0")
+	}
+	rules, err := svc.Rules(ctx)
+	if err != nil {
+		t.Fatalf("rules: %v", err)
+	}
+	if rules.Version == 0 || len(rules.Signatures) != 1 || rules.Signatures[0].Pattern != "wurst" {
+		t.Fatalf("Rules вернул некорректно: %+v", rules)
 	}
 }
 

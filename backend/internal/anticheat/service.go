@@ -21,6 +21,7 @@ import (
 type SessionVerifier interface {
 	MarkVerifiedByNonce(nonce string) bool
 	InvalidateByNonce(nonce string) bool
+	IsActiveByNonce(nonce string) bool
 }
 
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
@@ -44,6 +45,10 @@ type Service struct {
 
 	shaMu      sync.Mutex
 	shaEntries map[string]shaEntry // кэш SHA-256 артефактов по пути (инвалидация по mtime+size)
+
+	hbMu       sync.Mutex
+	heartbeats map[string]time.Time // nonce -> последний heartbeat (живость агента)
+	hbTimeout  time.Duration        // без heartbeat дольше hbTimeout → сессия гасится reaper'ом
 }
 
 func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifier, agentPath string) *Service {
@@ -57,6 +62,15 @@ func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifi
 		now:          time.Now,
 		recent:       make(map[string]time.Time),
 		shaEntries:   make(map[string]shaEntry),
+		heartbeats:   make(map[string]time.Time),
+		hbTimeout:    90 * time.Second,
+	}
+}
+
+// SetHeartbeatTimeout задаёт окно живости агента (без heartbeat дольше — kick через reaper).
+func (s *Service) SetHeartbeatTimeout(d time.Duration) {
+	if d > 0 {
+		s.hbTimeout = d
 	}
 }
 
@@ -125,7 +139,100 @@ func (s *Service) Confirm(token string) error {
 	if s.verifier == nil || !s.verifier.MarkVerifiedByNonce(claims.Nonce) {
 		return errors.New("session not found or already confirmed")
 	}
+	// Трекинг живости стартует после успешного confirm.
+	s.touchHeartbeat(claims.Nonce)
 	return nil
+}
+
+// touchHeartbeat фиксирует время живости агента по nonce.
+func (s *Service) touchHeartbeat(nonce string) {
+	if nonce == "" {
+		return
+	}
+	s.hbMu.Lock()
+	s.heartbeats[nonce] = s.now()
+	s.hbMu.Unlock()
+}
+
+// Heartbeat обрабатывает пинг агента: обновляет живость и сообщает, нужно ли кикнуть
+// (сессия погашена detect'ом → IsActiveByNonce=false) и текущую версию блэклиста
+// (агент по её изменению ре-фетчит правила).
+func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool, blacklistVersion int64) {
+	s.touchHeartbeat(claims.Nonce)
+	active := s.verifier == nil || s.verifier.IsActiveByNonce(claims.Nonce)
+	return !active, s.BlacklistVersion(ctx)
+}
+
+// reapStale гасит сессии, по которым давно (дольше hbTimeout) не было heartbeat —
+// агент умер/отвалился. Время инъектируется для детерминированных тестов.
+func (s *Service) reapStale(now time.Time) {
+	s.hbMu.Lock()
+	var stale []string
+	for nonce, last := range s.heartbeats {
+		if now.Sub(last) > s.hbTimeout {
+			stale = append(stale, nonce)
+			delete(s.heartbeats, nonce)
+		}
+	}
+	s.hbMu.Unlock()
+	for _, nonce := range stale {
+		if s.verifier != nil {
+			s.verifier.InvalidateByNonce(nonce)
+		}
+	}
+}
+
+// StartHeartbeatReaper запускает фоновый reaper (вызывать один раз из main.go).
+func (s *Service) StartHeartbeatReaper(interval time.Duration) {
+	go func() {
+		for range time.Tick(interval) {
+			s.reapStale(s.now())
+		}
+	}()
+}
+
+// BlacklistVersion — версия блэклиста (max updated_at включённых сигнатур, Unix-сек).
+// 0 — блэклист пуст. Агент/лаунчер сравнивают её, чтобы понять, надо ли ре-фетчить.
+// Считаем в Go (а не SQL max): GORM надёжно мапит колонку в time.Time на SQLite и Postgres,
+// тогда как скан max(updated_at) в sql.NullTime на SQLite-тексте ненадёжен.
+func (s *Service) BlacklistVersion(ctx context.Context) int64 {
+	var sigs []models.CheatSignature
+	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Select("updated_at").Find(&sigs).Error; err != nil {
+		return 0
+	}
+	var max int64
+	for _, sig := range sigs {
+		if u := sig.UpdatedAt.Unix(); u > max {
+			max = u
+		}
+	}
+	return max
+}
+
+// RuleSignature — облегчённая запись блэклиста для агента (без id/служебных полей).
+type RuleSignature struct {
+	Kind     string `json:"kind"`
+	Pattern  string `json:"pattern"`
+	Severity int    `json:"severity"`
+}
+
+// RulesResponse — ответ /rules: версия + включённые сигнатуры для рантайм-скана агентом.
+type RulesResponse struct {
+	Version    int64           `json:"version"`
+	Signatures []RuleSignature `json:"signatures"`
+}
+
+// Rules отдаёт текущий блэклист агенту (по launch-token, без JWT).
+func (s *Service) Rules(ctx context.Context) (RulesResponse, error) {
+	sigs, err := s.Blacklist(ctx)
+	if err != nil {
+		return RulesResponse{}, err
+	}
+	out := RulesResponse{Version: s.BlacklistVersion(ctx), Signatures: make([]RuleSignature, 0, len(sigs))}
+	for _, sig := range sigs {
+		out.Signatures = append(out.Signatures, RuleSignature{Kind: sig.Kind, Pattern: sig.Pattern, Severity: sig.Severity})
+	}
+	return out, nil
 }
 
 const (

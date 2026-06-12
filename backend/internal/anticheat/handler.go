@@ -2,6 +2,7 @@ package anticheat
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -62,6 +63,8 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Post("/handshake/confirm", h.confirm)
 	group.Post("/detect", h.detect)
 	group.Post("/heartbeat", h.heartbeat)
+	// Блэклист для агента (без JWT, по launch-token): версия + сигнатуры для рантайм-скана.
+	group.Get("/rules", h.rules)
 	// Раздача agent.jar: лаунчер качает его и инжектит как -javaagent.
 	group.Get("/agent.jar", h.agentJar)
 	// Раздача нативной JVMTI-библиотеки по ОС: лаунчер инжектит как -agentpath.
@@ -216,7 +219,28 @@ func (h Handler) heartbeat(c fiber.Ctx) error {
 	if !h.hbLimiter.allow(claims.UUID) {
 		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
 	}
-	return c.SendStatus(http.StatusNoContent)
+	// kick=true, если сессию погасил detect; blacklistVersion — для ре-фетча правил агентом.
+	kick, version := h.service.Heartbeat(c.Context(), claims)
+	action := "none"
+	if kick {
+		action = "kick"
+	}
+	return c.JSON(fiber.Map{"action": action, "blacklistVersion": version})
+}
+
+func (h Handler) rules(c fiber.Ctx) error {
+	token := c.Get("X-Launch-Token")
+	if token == "" {
+		token = c.Query("launchToken")
+	}
+	if _, err := h.service.VerifyToken(token); err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	rules, err := h.service.Rules(c.Context())
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось получить правила"})
+	}
+	return c.JSON(rules)
 }
 
 func (h Handler) agentJar(c fiber.Ctx) error {
@@ -242,10 +266,16 @@ func (h Handler) manifest(c fiber.Ctx) error {
 }
 
 func (h Handler) blacklist(c fiber.Ctx) error {
+	// ETag по версии блэклиста: лаунчер с If-None-Match получит 304, если ничего не менялось.
+	etag := fmt.Sprintf(`"ac-v%d"`, h.service.BlacklistVersion(c.Context()))
+	if c.Get("If-None-Match") == etag {
+		return c.SendStatus(http.StatusNotModified)
+	}
 	sigs, err := h.service.Blacklist(c.Context())
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось получить блэклист"})
 	}
+	c.Set("ETag", etag)
 	return c.JSON(sigs)
 }
 

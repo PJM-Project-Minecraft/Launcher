@@ -155,6 +155,69 @@ func TestServerKickRevokesSession(t *testing.T) {
 	}
 }
 
+// TestBlacklistETagAndRulesHTTP проверяет ETag/304 на /blacklist (JWT) и /rules (launch-token).
+func TestBlacklistETagAndRulesHTTP(t *testing.T) {
+	const jwtSecret = "test-jwt"
+	const acSecret = "test-ac"
+
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&models.User{}); err != nil {
+		t.Fatalf("migrate user: %v", err)
+	}
+	user := models.User{ID: uuid.NewString(), Login: "LikoRules", ProviderUUID: "77777777-2222-3333-4444-555555555555", Role: "user"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	keys, _ := yggdrasil.LoadOrCreateKey("/tmp/ac_rules_key.pem")
+	ygg := yggdrasil.NewService(db, keys, "http://example.com", "Test", "")
+
+	app := fiber.New()
+	authSvc := auth.NewService(db, auth.NewHTTPProvider(""), jwtSecret, nil, "test", 0)
+	svc := NewService(db, acSecret, false, ygg.Store(), "")
+	NewHandler(svc).RegisterRoutes(app, authSvc.RequireAuth())
+	jwtToken := mintJWT(t, jwtSecret, user.ID)
+
+	// /blacklist отдаёт ETag; повтор с If-None-Match → 304.
+	req := httptest.NewRequest("GET", "/api/anticheat/blacklist", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	resp, _ := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	etag := resp.Header.Get("ETag")
+	resp.Body.Close()
+	if etag == "" {
+		t.Fatal("blacklist должен вернуть ETag")
+	}
+	req2 := httptest.NewRequest("GET", "/api/anticheat/blacklist", nil)
+	req2.Header.Set("Authorization", "Bearer "+jwtToken)
+	req2.Header.Set("If-None-Match", etag)
+	resp2, _ := app.Test(req2, fiber.TestConfig{Timeout: 5 * time.Second})
+	status2 := resp2.StatusCode
+	resp2.Body.Close()
+	if status2 != http.StatusNotModified {
+		t.Fatalf("повтор с If-None-Match должен дать 304, получено %d", status2)
+	}
+
+	// /rules по launch-token → 200.
+	var initRes struct {
+		LaunchToken string `json:"launchToken"`
+	}
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"hw-r"}`, http.StatusOK, &initRes)
+	reqR := httptest.NewRequest("GET", "/api/anticheat/rules", nil)
+	reqR.Header.Set("X-Launch-Token", initRes.LaunchToken)
+	respR, _ := app.Test(reqR, fiber.TestConfig{Timeout: 5 * time.Second})
+	statusR := respR.StatusCode
+	respR.Body.Close()
+	if statusR != http.StatusOK {
+		t.Fatalf("/rules по launch-token должен дать 200, получено %d", statusR)
+	}
+	// Без токена — 401.
+	respN, _ := app.Test(httptest.NewRequest("GET", "/api/anticheat/rules", nil), fiber.TestConfig{Timeout: 5 * time.Second})
+	statusN := respN.StatusCode
+	respN.Body.Close()
+	if statusN != http.StatusUnauthorized {
+		t.Fatalf("/rules без токена должен дать 401, получено %d", statusN)
+	}
+}
+
 func mintJWT(t *testing.T, secret, sub string) string {
 	t.Helper()
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{

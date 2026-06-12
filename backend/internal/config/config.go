@@ -33,6 +33,8 @@ type Config struct {
 	AnticheatNativeLinux  string
 	AnticheatNativeWin    string
 	AnticheatKickSeverity int
+	// AnticheatHeartbeatSeconds — окно живости агента: без heartbeat дольше → сессия гасится.
+	AnticheatHeartbeatSeconds int
 	// TokenTTL — срок жизни JWT-сессии (логин в лаунчере и админке).
 	TokenTTL time.Duration
 	// Алерты античита в Telegram: токен бота (например, vps-ops-bot) и chat_id получателя.
@@ -78,6 +80,7 @@ func Load() Config {
 		AnticheatNativeLinux:  env("ANTICHEAT_NATIVE_LINUX", filepath.Join("data", "libanticheat.so")),
 		AnticheatNativeWin:    env("ANTICHEAT_NATIVE_WIN", filepath.Join("data", "anticheat.dll")),
 		AnticheatKickSeverity: atoiDefault(env("ANTICHEAT_KICK_SEVERITY", "7"), 7),
+		AnticheatHeartbeatSeconds: atoiDefault(env("ANTICHEAT_HEARTBEAT_TIMEOUT", "90"), 90),
 		TokenTTL:              time.Duration(atoiDefault(env("TOKEN_TTL_HOURS", "168"), 168)) * time.Hour,
 		AnticheatAlertBotToken: env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
 		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),
