@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+#include "agent.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -67,7 +69,7 @@ static int g_event_count = 0;
 /* Дописывает событие "<type>\t<name>" в файл для Java-агента. Имя САНИТИЗИРУЕТСЯ:
  * имена инъектированных классов содержат control-символы (вкл. \t и \n), которые
  * иначе ломают строковый протокол. Оставляем только печатные ASCII, прочее → '.'. */
-static void append_event(const char *type, const char *name) {
+void ac_append_event(const char *type, const char *name) {
     if (!g_events_path[0] || g_event_count >= MAX_EVENTS) {
         return;
     }
@@ -209,7 +211,7 @@ static void JNICALL on_class_file_load(
     if (is_illegal_class_name(cls)) {
         fprintf(stderr, "[anticheat-native] illegal class name (inject?): %s\n", cls);
         fflush(stderr);
-        append_event("illegal-class-name", cls);
+        ac_append_event("illegal-class-name", cls);
         return;
     }
     char lower[512];
@@ -218,7 +220,7 @@ static void JNICALL on_class_file_load(
         if (strstr(lower, SUSPECT_MARKERS[i]) != NULL) {
             fprintf(stderr, "[anticheat-native] suspect class: %s (%s)\n", cls, SUSPECT_MARKERS[i]);
             fflush(stderr);
-            append_event(SUSPECT_MARKERS[i], cls);
+            ac_append_event(SUSPECT_MARKERS[i], cls);
             return;
         }
     }
@@ -265,6 +267,10 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
 
     fprintf(stderr, "[anticheat-native] loaded (debug=%d classhook=%d)\n", debug, classhook);
     fflush(stderr);
+
+    /* Фоновый guard: поллинг загруженных модулей (анти-инжект DLL/.so) + непрерывный
+     * anti-debug. Реализация в guard.c, кроссплатформенно. */
+    ac_guard_start();
     return JNI_OK;
 }
 

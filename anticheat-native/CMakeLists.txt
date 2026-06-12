@@ -21,8 +21,16 @@ else()
     find_package(JNI REQUIRED)
 endif()
 
-add_library(anticheat SHARED src/agent.c)
+add_library(anticheat SHARED src/agent.c src/guard.c)
 target_include_directories(anticheat PRIVATE ${JNI_INCLUDE_DIRS})
+
+# guard.c: на Windows нужен psapi (EnumProcessModules), на Linux — pthread.
+if(WIN32)
+    target_link_libraries(anticheat PRIVATE psapi)
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(anticheat PRIVATE Threads::Threads)
+endif()
 
 # Имя выходного файла: libanticheat.so / anticheat.dll / libanticheat.dylib.
 set_target_properties(anticheat PROPERTIES PREFIX "" OUTPUT_NAME "anticheat")

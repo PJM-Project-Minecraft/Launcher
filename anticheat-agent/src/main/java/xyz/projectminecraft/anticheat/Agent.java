@@ -80,6 +80,9 @@ public final class Agent {
         // 2. Сканируем уже загруженные классы и моды на маркеры читов.
         scanLoadedClasses(inst);
         scanModsDirectory();
+        // 2.1. Чужой -javaagent/-agentpath в командной строке — ghost-клиент (его не ставил
+        //      лаунчер: он сам собирает JVM-команду из серверного манифеста).
+        scanJvmArgsForForeignAgents();
 
         // 3. Ловим классы, загружаемые позже (читы часто грузятся лениво).
         inst.addTransformer(new SuspectTransformer(), false);
@@ -200,6 +203,36 @@ public final class Agent {
         }
     }
 
+    // Имена наших легитимных агентов в командной строке (всё остальное -javaagent/-agentpath
+    // = посторонняя инъекция, т.к. JVM-команду собирает лаунчер из серверного манифеста).
+    private static final String[] OWN_AGENTS = {
+        "authlib-injector", "anticheat-agent", "libanticheat", "anticheat.dll"
+    };
+
+    /** Ищет в аргументах JVM посторонние -javaagent/-agentpath (ghost-клиент). */
+    private static void scanJvmArgsForForeignAgents() {
+        try {
+            for (String arg : ManagementFactory.getRuntimeMXBean().getInputArguments()) {
+                String low = arg.toLowerCase(Locale.ROOT);
+                if (!low.startsWith("-javaagent:") && !low.startsWith("-agentpath:")) {
+                    continue;
+                }
+                boolean own = false;
+                for (String name : OWN_AGENTS) {
+                    if (low.contains(name)) {
+                        own = true;
+                        break;
+                    }
+                }
+                if (!own) {
+                    detect("inject", "foreign-agent", arg); // server severity inject=9 → kick
+                }
+            }
+        } catch (Exception ignored) {
+            // best-effort
+        }
+    }
+
     /** Сверяет имя с маркерами и, при совпадении, шлёт детект (без дублей). */
     private static void checkAndReport(String kind, String name) {
         String lower = name.toLowerCase(Locale.ROOT);
@@ -283,10 +316,16 @@ public final class Agent {
                         int tab = line.indexOf('\t');
                         String type = tab > 0 ? line.substring(0, tab) : "inject";
                         String name = tab > 0 ? line.substring(tab + 1) : line;
-                        if ("illegal-class-name".equals(type)) {
-                            reportIllegalName(name, "native");
-                        } else {
-                            detect("inject", type, "native:" + name, 9);
+                        // Точные сигналы (нелегальные имена, маркеры классов) → kick;
+                        // эвристики guard-потока (новый модуль, ld-preload, late-debug) —
+                        // report-only (обкатка против ложных срабатываний). Severity всё равно
+                        // назначает сервер по detect-type: inject=9(kick), debugger=6, прочее=5.
+                        switch (type) {
+                            case "illegal-class-name" -> reportIllegalName(name, "native");
+                            case "debugger-runtime" -> detect("debugger", "debugger-runtime", "native:" + name);
+                            case "module-unknown" -> detect("module-unknown", "module-unknown", "native:" + name);
+                            case "ld-preload" -> detect("ld-preload", "ld-preload", "native:" + name);
+                            default -> detect("inject", type, "native:" + name); // маркеры читов в именах классов
                         }
                     }
                 } catch (Exception ignored) {

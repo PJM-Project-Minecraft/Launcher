@@ -22,9 +22,9 @@ fi
 echo "[anticheat-native] JAVA_HOME=$JH"
 
 mkdir -p "$OUT_DIR"
-gcc -O2 -fPIC -shared \
+gcc -O2 -fPIC -shared -pthread \
   -I"$JH/include" -I"$JH/include/linux" \
-  -o "$OUT_DIR/$LIB_NAME" "$HERE/src/agent.c"
+  -o "$OUT_DIR/$LIB_NAME" "$HERE/src/agent.c" "$HERE/src/guard.c"
 
 mkdir -p "$(dirname "$DEST")"
 cp "$OUT_DIR/$LIB_NAME" "$DEST"
