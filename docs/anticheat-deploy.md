@@ -86,6 +86,12 @@
 
 Сгенерировать секрет: `openssl rand -hex 32`.
 
+> **ВАЖНО (грабли деплоя 2026-06-12):** мало дописать `ANTICHEAT_SECRET` в `.env` —
+> `.env` используется лишь для интерполяции `${VAR}` в compose. Переменная попадёт в
+> контейнер, только если есть строка в `environment:` сервиса. В `docker-compose.yml`
+> теперь есть `ANTICHEAT_SECRET: "${ANTICHEAT_SECRET:-}"` у `server` и `bot` (commit
+> fix(deploy)). Без неё `server`/`bot` уходят в crash-loop на `Validate()` в проде.
+
 ---
 
 ## 4. Сборка артефактов (на дев-машине)
