@@ -627,16 +627,14 @@ export component AppWindow inherits Window {
 
         // Лента новостей проекта в центре главного экрана
         Rectangle {
-            x: 264px + (root.active-tab == 1 ? 0px : -40px);
-            y: root.is-authenticated ? (root.active-tab == 1 ? 130px : 150px) : 146px;
+            x: 264px;
+            y: root.is-authenticated ? 130px : 146px;
             width: parent.width - 296px;
             height: parent.height - 180px;
             background: transparent;
             opacity: root.is-authenticated && root.active-tab == 1 ? 1.0 : 0.0;
             visible: self.opacity > 0.01;
-            animate x { duration: 600ms; easing: ease-out-quint; }
-            animate y { duration: 600ms; easing: ease-out-quint; }
-            animate opacity { duration: 400ms; easing: ease-in-out-quint; }
+            animate opacity { duration: 300ms; easing: ease-in-out; }
 
             Image {
                 source: @image-url("../assets/news.svg");
@@ -698,16 +696,14 @@ export component AppWindow inherits Window {
 
         // Поддержка
         Rectangle {
-            x: 264px + (root.active-tab == 2 ? 0px : -40px);
-            y: root.is-authenticated ? (root.active-tab == 2 ? 130px : 150px) : 146px;
+            x: 264px;
+            y: root.is-authenticated ? 130px : 146px;
             width: parent.width - 296px;
             height: parent.height - 180px;
             background: transparent;
             opacity: root.is-authenticated && root.active-tab == 2 ? 1.0 : 0.0;
             visible: self.opacity > 0.01;
-            animate x { duration: 600ms; easing: ease-out-quint; }
-            animate y { duration: 600ms; easing: ease-out-quint; }
-            animate opacity { duration: 400ms; easing: ease-in-out-quint; }
+            animate opacity { duration: 300ms; easing: ease-in-out; }
 
             VerticalLayout {
                 spacing: 24px;
@@ -1013,8 +1009,8 @@ export component AppWindow inherits Window {
                 triggered => { play-card.dl-pulse = !play-card.dl-pulse; }
             }
 
-            x: parent.width - self.width - 32px + (root.active-tab == 0 ? 0px : 40px);
-            y: parent.height - self.height - 32px + (root.is-syncing ? -2px : 0px) + (root.active-tab == 0 ? 0px : 40px);
+            x: parent.width - self.width - 32px;
+            y: parent.height - self.height - 32px + (root.is-syncing ? -2px : 0px);
             opacity: root.is-authenticated && root.active-tab == 0 ? 1.0 : 0.0;
             visible: self.opacity > 0.01;
             // при загрузке подложка расширяется влево, освобождая место под иконку
@@ -1029,9 +1025,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: root.is-syncing ? 12px : 8px;
             clip: true;
             animate width { duration: 460ms; easing: ease-out-quint; }
-            animate x { duration: 400ms; easing: ease-out-quint; }
-            animate y { duration: 400ms; easing: ease-out-quint; }
-            animate opacity { duration: 300ms; easing: ease-in-out-quint; }
+            animate opacity { duration: 300ms; easing: ease-in-out; }
             animate border-color { duration: 300ms; easing: ease-out-quint; }
             animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
             animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-quint; }
