@@ -32,6 +32,11 @@ else()
     target_link_libraries(anticheat PRIVATE Threads::Threads)
 endif()
 
+# Strip символов (анти-RE): убираем имена внутренних функций. MSVC использует иной механизм.
+if(NOT MSVC)
+    target_link_options(anticheat PRIVATE -s)
+endif()
+
 # Имя выходного файла: libanticheat.so / anticheat.dll / libanticheat.dylib.
 set_target_properties(anticheat PROPERTIES PREFIX "" OUTPUT_NAME "anticheat")
 if(NOT WIN32)

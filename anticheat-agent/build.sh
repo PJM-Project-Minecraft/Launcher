@@ -15,7 +15,8 @@ mkdir -p "$CLASSES_DIR"
 
 echo "[anticheat-agent] компиляция (JDK $(javac -version 2>&1))"
 find "$HERE/src" -name '*.java' > "$OUT_DIR/sources.txt"
-javac --release 17 -d "$CLASSES_DIR" @"$OUT_DIR/sources.txt"
+# -g:none — без отладочной информации (имён переменных/номеров строк): анти-RE.
+javac -g:none --release 17 -d "$CLASSES_DIR" @"$OUT_DIR/sources.txt"
 
 echo "[anticheat-agent] упаковка jar"
 jar --create --file "$OUT_DIR/$JAR_NAME" --manifest "$HERE/MANIFEST.MF" -C "$CLASSES_DIR" .

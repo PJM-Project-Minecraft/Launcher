@@ -22,7 +22,8 @@ fi
 echo "[anticheat-native] JAVA_HOME=$JH"
 
 mkdir -p "$OUT_DIR"
-gcc -O2 -fPIC -shared -pthread \
+# -s: strip символов (убирает имена внутренних функций из бинаря — анти-RE).
+gcc -O2 -fPIC -shared -pthread -s \
   -I"$JH/include" -I"$JH/include/linux" \
   -o "$OUT_DIR/$LIB_NAME" "$HERE/src/agent.c" "$HERE/src/guard.c"
 

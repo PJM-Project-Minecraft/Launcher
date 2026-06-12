@@ -34,7 +34,8 @@ cp "$JH/include/jni.h" "$JH/include/jvmti.h" "$INC_WIN/"
 cp "$HERE/include/win32/jni_md.h" "$INC_WIN/"
 
 # -static/-static-libgcc — чтобы DLL не зависела от libgcc_s_seh-1.dll на машине игрока.
-"$CC" -O2 -shared -static -static-libgcc \
+# -s — strip символов (анти-RE: убирает имена внутренних функций).
+"$CC" -O2 -shared -static -static-libgcc -s \
   -I "$INC_WIN" \
   -o "$OUT_DIR/$DLL" "$HERE/src/agent.c" "$HERE/src/guard.c" -lpsapi
 

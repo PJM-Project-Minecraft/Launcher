@@ -21,8 +21,30 @@ func TestValidateAllowsDevSecretsInDevelopment(t *testing.T) {
 }
 
 func TestValidateAllowsRealSecretInProduction(t *testing.T) {
-	cfg := Config{AppEnv: "production", JWTSecret: "a-real-32-char-random-secret-value"}
+	cfg := Config{
+		AppEnv:          "production",
+		JWTSecret:       "a-real-32-char-random-secret-value",
+		AnticheatSecret: "a-distinct-anticheat-secret-value",
+	}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("production с нормальным секретом должен проходить: %v", err)
+		t.Fatalf("production с нормальными секретами должен проходить: %v", err)
+	}
+}
+
+func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
+	jwt := "a-real-32-char-random-secret-value"
+	base := Config{AppEnv: "production", JWTSecret: jwt}
+
+	cases := map[string]string{
+		"деривированный из JWT": "anticheat:" + jwt,
+		"равен JWT":             jwt,
+		"дев-заглушка":          "dev-only-change-me",
+	}
+	for name, secret := range cases {
+		cfg := base
+		cfg.AnticheatSecret = secret
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("ANTICHEAT_SECRET (%s) должен отклоняться в проде", name)
+		}
 	}
 }

@@ -118,6 +118,17 @@ func (c Config) Validate() error {
 	if devSecrets[c.JWTSecret] {
 		return errors.New("APP_ENV=production требует настоящий JWT_SECRET (сейчас дев-заглушка)")
 	}
+	// Античит-секрет (подпись launch-token) в проде должен быть задан ЯВНО и отличаться
+	// от JWT: иначе компрометация одного раскрывает второй, а деривация предсказуема.
+	if c.AnticheatSecret == "anticheat:"+c.JWTSecret {
+		return errors.New("APP_ENV=production требует явный ANTICHEAT_SECRET (сейчас деривируется из JWT_SECRET)")
+	}
+	if c.AnticheatSecret == c.JWTSecret {
+		return errors.New("ANTICHEAT_SECRET должен отличаться от JWT_SECRET")
+	}
+	if devSecrets[c.AnticheatSecret] {
+		return errors.New("APP_ENV=production требует настоящий ANTICHEAT_SECRET (сейчас дев-заглушка)")
+	}
 	return nil
 }
 

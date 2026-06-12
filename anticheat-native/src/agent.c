@@ -24,6 +24,15 @@
 
 #include "agent.h"
 
+/* Диагностические логи только в отладочной сборке (-DAC_DEBUG). В релизе раскрывающие
+ * строки ("[anticheat-native] suspect class: ... (wurst)") в бинарь не попадают —
+ * простейшая обфускация удалением: strings/RE не видят детект-логику. */
+#ifdef AC_DEBUG
+#define AC_LOG(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while (0)
+#else
+#define AC_LOG(...) do { } while (0)
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -209,8 +218,7 @@ static void JNICALL on_class_file_load(
 
     /* Нелегальное имя класса — сильнейший признак инъекции (Naming: Illegal). */
     if (is_illegal_class_name(cls)) {
-        fprintf(stderr, "[anticheat-native] illegal class name (inject?): %s\n", cls);
-        fflush(stderr);
+        AC_LOG("[anticheat-native] illegal class name (inject?): %s\n", cls);
         ac_append_event("illegal-class-name", cls);
         return;
     }
@@ -218,8 +226,7 @@ static void JNICALL on_class_file_load(
     to_lower_copy(cls, lower, sizeof(lower));
     for (int i = 0; i < SUSPECT_COUNT; i++) {
         if (strstr(lower, SUSPECT_MARKERS[i]) != NULL) {
-            fprintf(stderr, "[anticheat-native] suspect class: %s (%s)\n", cls, SUSPECT_MARKERS[i]);
-            fflush(stderr);
+            AC_LOG("[anticheat-native] suspect class: %s (%s)\n", cls, SUSPECT_MARKERS[i]);
             ac_append_event(SUSPECT_MARKERS[i], cls);
             return;
         }
@@ -244,7 +251,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
 
     jvmtiEnv *jvmti = NULL;
     if ((*vm)->GetEnv(vm, (void **)&jvmti, JVMTI_VERSION_1_2) != JNI_OK || jvmti == NULL) {
-        fprintf(stderr, "[anticheat-native] failed to get JVMTI env\n");
+        AC_LOG("[anticheat-native] failed to get JVMTI env\n");
         write_flag_file(flag_path, debug, 0);
         return JNI_OK; /* не роняем JVM — enforcement обеспечивает сервер */
     }
@@ -265,8 +272,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
     /* Канал с Java-агентом: present/debug/classhook → flag-файл. */
     write_flag_file(flag_path, debug, classhook);
 
-    fprintf(stderr, "[anticheat-native] loaded (debug=%d classhook=%d)\n", debug, classhook);
-    fflush(stderr);
+    AC_LOG("[anticheat-native] loaded (debug=%d classhook=%d)\n", debug, classhook);
 
     /* Фоновый guard: поллинг загруженных модулей (анти-инжект DLL/.so) + непрерывный
      * anti-debug. Реализация в guard.c, кроссплатформенно. */
