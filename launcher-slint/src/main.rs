@@ -2801,11 +2801,23 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(root)))
         .map_err(|_| "Не удалось проверить путь профиля.".to_string())?;
-    let parent = path.parent().unwrap_or(root);
-    let parent_abs = parent
+    // Сверяем по ближайшему СУЩЕСТВУЮЩЕМУ предку (минимум — сам root). На Windows
+    // `canonicalize` несуществующего пути падает, а fallback даёт путь без verbatim
+    // префикса `\\?\`, тогда как root_abs — с ним; их `starts_with` всегда давал
+    // false и ронял скачивание любого вложенного файла. Канонизация существующего
+    // предка приводит обе стороны к одному виду. Лексический выход за root уже
+    // исключён циклом выше (только Normal/CurDir), это защита от symlink-escape.
+    let mut existing = path.as_path();
+    while !existing.exists() {
+        match existing.parent() {
+            Some(parent) => existing = parent,
+            None => break,
+        }
+    }
+    let existing_abs = existing
         .canonicalize()
-        .unwrap_or_else(|_| parent.to_path_buf());
-    if parent_abs != root_abs && !parent_abs.starts_with(&root_abs) {
+        .unwrap_or_else(|_| existing.to_path_buf());
+    if existing_abs != root_abs && !existing_abs.starts_with(&root_abs) {
         return Err(format!("Путь выходит за папку профиля: {}", rel));
     }
     Ok(path)
@@ -3335,6 +3347,29 @@ mod tests {
             .is_symlink());
 
         let _ = fs::remove_dir_all(profile_root);
+    }
+
+    #[test]
+    fn safe_join_allows_nested_path_with_missing_parents() {
+        // Регресс на Windows-баг: вложенный файл, чьи родительские папки ещё не
+        // созданы, должен резолвиться, а не ронять синк «Путь выходит за папку».
+        let root = test_root("safe_join_allows_nested_path_with_missing_parents");
+
+        let joined = safe_join(&root, "mods/sub/example.jar").unwrap();
+        assert!(joined.starts_with(&root));
+        assert!(joined.ends_with("mods/sub/example.jar"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn safe_join_rejects_traversal() {
+        let root = test_root("safe_join_rejects_traversal");
+
+        assert!(safe_join(&root, "../escape.jar").is_err());
+        assert!(safe_join(&root, "mods/../../escape.jar").is_err());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn test_root(name: &str) -> PathBuf {
