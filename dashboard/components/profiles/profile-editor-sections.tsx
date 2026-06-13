@@ -187,6 +187,33 @@ export function JavaSection({ form, setForm }: { form: ProfileForm; setForm: Set
 }
 
 export function LaunchSection({ form, setForm }: { form: ProfileForm; setForm: SetForm }) {
+  const loader = form.loader.trim().toLowerCase();
+  // Для модовых загрузчиков (NeoForge/Forge/Fabric и т.п.) команду генерирует
+  // «Собрать клиент» во вкладке «Сборка». Ручной ванильный шаблон (-jar client.jar)
+  // для них нерабочий, поэтому поля только для чтения, а сохранение профиля
+  // не затирает сгенерированную команду на бэкенде.
+  const modded = loader !== '' && loader !== 'vanilla';
+
+  if (modded) {
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="rounded-lg border border-edge bg-surface px-3 py-2.5 text-sm text-fg-muted">
+          Загрузчик <span className="font-medium text-fg">{form.loader}</span> запускается сгенерированной
+          командой. Она создаётся кнопкой «Собрать клиент» во вкладке «Сборка» — менять её вручную не нужно.
+        </p>
+        <Field label="Команда Windows">
+          <TextArea value={form.launchCommandWindows} rows={3} readOnly className="opacity-70" />
+        </Field>
+        <Field label="Команда Linux">
+          <TextArea value={form.launchCommandLinux} rows={3} readOnly className="opacity-70" />
+        </Field>
+        <Field label="Команда macOS">
+          <TextArea value={form.launchCommandMacos} rows={3} readOnly className="opacity-70" />
+        </Field>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Field label="Команда Windows">

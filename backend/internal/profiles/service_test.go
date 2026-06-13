@@ -198,6 +198,86 @@ func TestClientPreparedAcceptsInstalledNeoForgeVersionJSON(t *testing.T) {
 	}
 }
 
+func TestUpdatePreservesGeneratedLaunchCommandForModdedLoader(t *testing.T) {
+	service := newTestService(t)
+	created, err := service.Create(context.Background(), ProfileRequest{
+		Name:        "Project Test",
+		Slug:        "project-test",
+		Loader:      "neoforge",
+		GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Имитируем результат «Подготовить клиент»: сгенерированная команда в БД.
+	const generated = `"{java}" {jvm_args} -cp libraries/net/neoforged/loader.jar net.neoforged.Main`
+	if err := service.db.Model(&models.Profile{}).Where("id = ?", created.ID).
+		Updates(map[string]any{
+			"launch_command_windows": generated,
+			"launch_command_linux":   generated,
+			"launch_command_mac_os":  generated,
+		}).Error; err != nil {
+		t.Fatalf("seed launch command: %v", err)
+	}
+
+	// Дашборд сохраняет профиль с ванильным плейсхолдером команды — он не должен затереть сгенерированную.
+	if _, err := service.Update(context.Background(), created.ID, ProfileRequest{
+		Name:                 "Project Test",
+		Slug:                 "project-test",
+		Loader:               "neoforge",
+		GameVersion:          "1.21.1",
+		LaunchCommandWindows: "{java} {jvm_args} -jar client.jar",
+		LaunchCommandLinux:   "{java} {jvm_args} -jar client.jar",
+		LaunchCommandMacOS:   "{java} {jvm_args} -jar client.jar",
+	}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	var profile models.Profile
+	if err := service.db.First(&profile, "id = ?", created.ID).Error; err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if profile.LaunchCommandLinux != generated {
+		t.Fatalf("LaunchCommandLinux = %q, want generated command preserved", profile.LaunchCommandLinux)
+	}
+	if profile.LaunchCommandWindows != generated || profile.LaunchCommandMacOS != generated {
+		t.Fatalf("modded launch commands were overwritten: win=%q mac=%q", profile.LaunchCommandWindows, profile.LaunchCommandMacOS)
+	}
+}
+
+func TestUpdateHonorsLaunchCommandForVanillaLoader(t *testing.T) {
+	service := newTestService(t)
+	created, err := service.Create(context.Background(), ProfileRequest{
+		Name:        "Vanilla Test",
+		Slug:        "vanilla-test",
+		Loader:      "vanilla",
+		GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	const custom = `{java} {jvm_args} -jar client.jar --custom`
+	if _, err := service.Update(context.Background(), created.ID, ProfileRequest{
+		Name:               "Vanilla Test",
+		Slug:               "vanilla-test",
+		Loader:             "vanilla",
+		GameVersion:        "1.21.1",
+		LaunchCommandLinux: custom,
+	}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	var profile models.Profile
+	if err := service.db.First(&profile, "id = ?", created.ID).Error; err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if profile.LaunchCommandLinux != custom {
+		t.Fatalf("LaunchCommandLinux = %q, want custom command honored for vanilla", profile.LaunchCommandLinux)
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
