@@ -98,6 +98,7 @@ func TestInitRecordsHwidAndDetections(t *testing.T) {
 type fakeVerifier struct {
 	verified map[string]bool
 	invalid  map[string]bool
+	touched  map[string]int
 }
 
 func (f *fakeVerifier) MarkVerifiedByNonce(nonce string) bool {
@@ -118,6 +119,17 @@ func (f *fakeVerifier) InvalidateByNonce(nonce string) bool {
 
 func (f *fakeVerifier) IsActiveByNonce(nonce string) bool {
 	return f.verified[nonce] && !f.invalid[nonce]
+}
+
+func (f *fakeVerifier) TouchByNonce(nonce string) bool {
+	if f.touched == nil {
+		f.touched = map[string]int{}
+	}
+	if !f.verified[nonce] || f.invalid[nonce] {
+		return false
+	}
+	f.touched[nonce]++
+	return true
 }
 
 func TestConfirmMarksSessionVerified(t *testing.T) {
@@ -208,6 +220,28 @@ func TestAutoBanEscalatesToPermanent(t *testing.T) {
 	db.Where("user_uuid = ?", "uuid-esc").First(&b2)
 	if b2.ExpiresAt != nil {
 		t.Fatal("повторный авто-бан должен стать перманентным (ExpiresAt == nil)")
+	}
+}
+
+// Регрессия: heartbeat — единственный сигнал «игра жива» во время сессии. Он обязан
+// продлевать игровую сессию (TouchByNonce), иначе её 15-мин TTL истекает на лету и
+// реконнект ловит «Недействительная сессия».
+func TestHeartbeatExtendsGameSession(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	ctx := context.Background()
+
+	res, _ := svc.InitHandshake(ctx, "uuid-hb-ext", "Liko", "hwid-hb-ext", nil)
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	claims, _ := svc.VerifyToken(res.LaunchToken)
+
+	if kick, _ := svc.Heartbeat(ctx, claims); kick {
+		t.Fatal("активная сессия не должна кикаться")
+	}
+	if v.touched[res.Nonce] == 0 {
+		t.Fatal("heartbeat должен продлевать игровую сессию по nonce (TouchByNonce)")
 	}
 }
 

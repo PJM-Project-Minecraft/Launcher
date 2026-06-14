@@ -2,6 +2,7 @@ package yggdrasil
 
 import (
 	"testing"
+	"time"
 
 	"launcher-backend/internal/models"
 )
@@ -115,5 +116,51 @@ func TestMarkVerifiedUnknownNonce(t *testing.T) {
 	svc := newTestService()
 	if svc.Store().MarkVerifiedByNonce("never-issued") {
 		t.Fatal("confirm по неизвестному nonce не должен проходить")
+	}
+}
+
+// Регрессия: игровая сессия истекала через 15 мин, пока игра ещё запущена, потому что
+// heartbeat античита её не продлевал. Реконнект/рестарт сервера после этого ловил
+// «Недействительная сессия». TouchByNonce продлевает сессию по nonce из heartbeat.
+func TestTouchByNonceExtendsSession(t *testing.T) {
+	svc := newTestService()
+	sess := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-touch")
+	store := svc.Store()
+
+	// Симулируем сессию на грани истечения (15-мин TTL почти вышел).
+	store.mu.Lock()
+	s := store.sessions[sess.AccessToken]
+	s.expiresAt = time.Now().Add(time.Second)
+	store.sessions[sess.AccessToken] = s
+	store.mu.Unlock()
+
+	if !store.TouchByNonce("nonce-touch") {
+		t.Fatal("TouchByNonce должен найти живую сессию по nonce и продлить её")
+	}
+	got, ok := store.Session(sess.AccessToken)
+	if !ok {
+		t.Fatal("сессия должна остаться валидной после продления")
+	}
+	if time.Until(got.expiresAt) < 14*time.Minute {
+		t.Fatalf("TTL не продлён: осталось %v", time.Until(got.expiresAt))
+	}
+}
+
+func TestTouchByNonceUnknownOrExpired(t *testing.T) {
+	svc := newTestService()
+	if svc.Store().TouchByNonce("never-issued") {
+		t.Fatal("TouchByNonce по неизвестному nonce должен вернуть false")
+	}
+
+	// Уже истёкшую сессию TouchByNonce не должен воскрешать.
+	sess := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-exp")
+	store := svc.Store()
+	store.mu.Lock()
+	s := store.sessions[sess.AccessToken]
+	s.expiresAt = time.Now().Add(-time.Second)
+	store.sessions[sess.AccessToken] = s
+	store.mu.Unlock()
+	if store.TouchByNonce("nonce-exp") {
+		t.Fatal("истёкшую сессию TouchByNonce не должен оживлять")
 	}
 }
