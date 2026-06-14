@@ -71,6 +71,13 @@ type argToken struct {
 	values []string
 }
 
+// isModdedLoader сообщает, требует ли загрузчик сгенерированной команды запуска
+// (classpath модлоадера), а не ванильного «-jar client.jar». Пусто/vanilla — ваниль.
+func isModdedLoader(loader string) bool {
+	l := strings.ToLower(strings.TrimSpace(loader))
+	return l != "" && l != "vanilla"
+}
+
 // buildAndSaveLaunchCommands собирает корректную команду запуска для всех трёх
 // ОС из version JSON (с учётом inheritsFrom для загрузчиков) и сохраняет их в
 // профиль. Это заменяет ручные шаблоны вроде «-jar client.jar».
@@ -98,7 +105,7 @@ func (s Service) buildAndSaveLaunchCommands(profile *models.Profile) error {
 	// который загрузчик собирает из пропатченного клиента. Вместо него нужен
 	// client-extra (только ресурсы), а классы клиента предоставляет сам загрузчик.
 	clientEntry := "versions/" + profile.GameVersion + "/" + profile.GameVersion + ".jar"
-	if l := strings.ToLower(strings.TrimSpace(profile.Loader)); l != "" && l != "vanilla" {
+	if isModdedLoader(profile.Loader) {
 		extra, err := locateClientExtra(root)
 		if err != nil {
 			return err

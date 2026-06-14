@@ -471,9 +471,17 @@ func profileFromRequest(profile models.Profile, req ProfileRequest) (models.Prof
 	profile.JavaPathWindows = strings.TrimSpace(req.JavaPathWindows)
 	profile.JavaPathLinux = strings.TrimSpace(req.JavaPathLinux)
 	profile.JavaPathMacOS = strings.TrimSpace(req.JavaPathMacOS)
-	profile.LaunchCommandWindows = strings.TrimSpace(req.LaunchCommandWindows)
-	profile.LaunchCommandLinux = strings.TrimSpace(req.LaunchCommandLinux)
-	profile.LaunchCommandMacOS = strings.TrimSpace(req.LaunchCommandMacOS)
+	// Для модовых загрузчиков команду запуска генерирует buildAndSaveLaunchCommands
+	// («Подготовить клиент»). Ванильный плейсхолдер из формы дашборда (-jar client.jar)
+	// для NeoForge/Forge нерабочий, поэтому при сохранении НЕ затираем им уже
+	// сгенерированную команду — сохраняем существующую. Для ванили берём из запроса.
+	if isModdedLoader(strings.TrimSpace(req.Loader)) {
+		// profile.LaunchCommand* уже содержат значения из БД (Update) или пусты (Create).
+	} else {
+		profile.LaunchCommandWindows = strings.TrimSpace(req.LaunchCommandWindows)
+		profile.LaunchCommandLinux = strings.TrimSpace(req.LaunchCommandLinux)
+		profile.LaunchCommandMacOS = strings.TrimSpace(req.LaunchCommandMacOS)
+	}
 	preservePaths, err := normalizePreservePaths(req.PreservePaths)
 	if err != nil {
 		return models.Profile{}, err

@@ -23,6 +23,9 @@ type SessionVerifier interface {
 	MarkVerifiedByNonce(nonce string) bool
 	InvalidateByNonce(nonce string) bool
 	IsActiveByNonce(nonce string) bool
+	// TouchByNonce продлевает игровую сессию (sliding TTL): heartbeat — сигнал живости
+	// игры, без которого 15-мин TTL сессии истекает прямо во время игры.
+	TouchByNonce(nonce string) bool
 }
 
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
@@ -204,6 +207,12 @@ func (s *Service) touchHeartbeat(nonce string) {
 // (агент по её изменению ре-фетчит правила).
 func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool, blacklistVersion int64) {
 	s.touchHeartbeat(claims.Nonce)
+	// Продлеваем игровую сессию: heartbeat доказывает, что игра ещё запущена, и держит
+	// yggdrasil-токен живым на весь сеанс (иначе реконнект после 15 мин → invalid session).
+	// No-op, если сессию уже погасили (detect-kick) — IsActiveByNonce ниже вернёт kick.
+	if s.verifier != nil {
+		s.verifier.TouchByNonce(claims.Nonce)
+	}
 	active := s.verifier == nil || s.verifier.IsActiveByNonce(claims.Nonce)
 	return !active, s.BlacklistVersion(ctx)
 }

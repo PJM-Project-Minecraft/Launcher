@@ -200,6 +200,32 @@ func (s *Store) IsActiveByNonce(nonce string) bool {
 	return sess.Verified
 }
 
+// TouchByNonce продлевает срок жизни игровой сессии по nonce (sliding TTL из
+// heartbeat античита). Heartbeat — единственный регулярный сигнал «игра запущена»
+// во время сессии, поэтому он держит токен живым: без этого 15-мин TTL истекал бы
+// на лету, и реконнект/рестарт сервера ловил бы «Недействительная сессия».
+// No-op для неизвестного nonce или истёкшей сессии — воскрешать её нельзя
+// (kick через InvalidateByNonce должен оставаться окончательным).
+func (s *Store) TouchByNonce(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token, ok := s.nonces[nonce]
+	if !ok {
+		return false
+	}
+	sess, ok := s.sessions[token]
+	if !ok || time.Now().After(sess.expiresAt) {
+		return false
+	}
+	sess.expiresAt = time.Now().Add(sessionTTL)
+	s.sessions[token] = sess
+	s.persistSession(sess)
+	return true
+}
+
 func (s *Store) Session(accessToken string) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
