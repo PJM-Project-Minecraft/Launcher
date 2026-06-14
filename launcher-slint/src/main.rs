@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
 mod anticheat;
+mod gpu;
 mod updater;
 
 slint::include_modules!();
@@ -373,6 +374,8 @@ struct LauncherSettings {
     memory_gb: i32,
     #[serde(default = "default_memory_auto")]
     memory_auto: bool,
+    #[serde(default = "default_use_discrete_gpu")]
+    use_discrete_gpu: bool,
 }
 
 impl Default for LauncherSettings {
@@ -383,6 +386,7 @@ impl Default for LauncherSettings {
             selected_profiles: HashMap::new(),
             memory_gb: DEFAULT_MEMORY_GB,
             memory_auto: true,
+            use_discrete_gpu: true,
         }
     }
 }
@@ -614,6 +618,28 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
             settings.memory_auto = false;
             settings.memory_gb = clamp_memory_gb(value);
         });
+    });
+
+    let gpu_app = app.as_weak();
+    app.on_discrete_gpu_requested(move |enabled| {
+        if let Some(app) = gpu_app.upgrade() {
+            let mut settings = load_settings().unwrap_or_default();
+            settings.use_discrete_gpu = enabled;
+            match save_settings(&settings) {
+                Ok(()) => {
+                    apply_launcher_settings(&app, &settings);
+                    app.set_message(
+                        if enabled {
+                            "Игра будет запускаться на дискретной видеокарте."
+                        } else {
+                            "Игра будет запускаться на встроенной видеокарте."
+                        }
+                        .into(),
+                    );
+                }
+                Err(message) => app.set_message(message.into()),
+            }
+        }
     });
 
     let folder_app = app.as_weak();
@@ -2117,6 +2143,17 @@ fn launch_profile(
         process.args(&command[1..]);
     }
     process.current_dir(&paths.files_root);
+
+    // Гибридная графика (Linux): по умолчанию рендерим на дискретной GPU.
+    // detect_offload возвращает что-то только на гибридных системах с применимым
+    // offload (NVIDIA с проприетарным драйвером или AMD/Intel через DRI_PRIME).
+    if settings.use_discrete_gpu {
+        if let Some(offload) = gpu::detect_offload() {
+            for (key, value) in &offload.env {
+                process.env(key, value);
+            }
+        }
+    }
     // Иначе java.exe открыл бы собственное консольное окно рядом с игрой.
     hide_console_window(&mut process);
     let mut child = process
@@ -2418,6 +2455,17 @@ fn apply_launcher_settings(app: &AppWindow, settings: &LauncherSettings) {
     app.set_memory_max(system_max_memory_gb());
     app.set_memory_auto(settings.memory_auto);
     app.set_memory_label(memory_label(settings).into());
+
+    // Дискретная видеокарта: секция видна только если на этой системе доступен
+    // offload (гибридная графика с применимым драйвером). detect_offload — Linux-only.
+    match gpu::detect_offload() {
+        Some(offload) => {
+            app.set_discrete_gpu_available(true);
+            app.set_discrete_gpu_label(offload.vendor_label.into());
+        }
+        None => app.set_discrete_gpu_available(false),
+    }
+    app.set_use_discrete_gpu(settings.use_discrete_gpu);
 }
 
 fn apply_install_folder_label(app: &AppWindow, state: &Arc<Mutex<RuntimeState>>) {
@@ -2582,6 +2630,10 @@ fn default_memory_gb() -> i32 {
 }
 
 fn default_memory_auto() -> bool {
+    true
+}
+
+fn default_use_discrete_gpu() -> bool {
     true
 }
 

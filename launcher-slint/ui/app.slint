@@ -410,6 +410,11 @@ export component AppWindow inherits Window {
     in property <int> memory-max: 64;
     in property <bool> memory-auto;
     in property <string> memory-label;
+    // Дискретная видеокарта (гибридная графика). Секция видна только когда
+    // discrete-gpu-available = true (выставляется из Rust по детекту).
+    in property <bool> discrete-gpu-available;
+    in property <string> discrete-gpu-label;
+    in property <bool> use-discrete-gpu;
     in property <string> install-folder;
     in property <[NewsItem]> news-items;
     in property <string> anticheat-alert;
@@ -433,6 +438,8 @@ export component AppWindow inherits Window {
     callback memory-increase-requested();
     // Перетаскивание слайдера памяти: целевое значение в ГБ.
     callback memory-set-requested(int);
+    // Переключатель дискретной видеокарты: передаёт новое состояние.
+    callback discrete-gpu-requested(bool);
     callback open-install-folder-requested();
     callback open-url(string);
 
@@ -1215,7 +1222,8 @@ export component AppWindow inherits Window {
 
         settings-card := Rectangle {
             width: 560px;
-            height: 470px;
+            // Секция дискретной GPU добавляет высоту только когда она доступна.
+            height: root.discrete-gpu-available ? 574px : 470px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2 + (root.settings-visible ? 0px : 28px);
             border-radius: 20px;
@@ -1466,9 +1474,75 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // Секция дискретной видеокарты (только гибридная графика).
             Rectangle {
+                visible: root.discrete-gpu-available;
                 x: 28px;
                 y: 288px;
+                width: parent.width - 56px;
+                height: 88px;
+                border-radius: 14px;
+                background: #131313;
+                border-color: #ffffff12;
+                border-width: 1px;
+
+                Text {
+                    text: "Дискретная видеокарта";
+                    x: 22px;
+                    y: 18px;
+                    width: parent.width - 130px;
+                    height: 24px;
+                    color: #e0e2e5;
+                    font-size: 18px;
+                    font-weight: 800;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.discrete-gpu-label + " · рендер игры на дискретной GPU";
+                    x: 22px;
+                    y: 46px;
+                    width: parent.width - 130px;
+                    height: 20px;
+                    color: #8c8f95;
+                    font-size: 13px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+
+                // Переключатель ВКЛ/ВЫКЛ.
+                Rectangle {
+                    x: parent.width - 92px;
+                    y: (parent.height - 34px) / 2;
+                    width: 70px;
+                    height: 34px;
+                    border-radius: 17px;
+                    background: root.use-discrete-gpu ? #2f6f3a : #1a1a1a;
+                    border-color: root.use-discrete-gpu ? #4ea35e88 : #ffffff1a;
+                    border-width: 1px;
+                    animate background, border-color { duration: 200ms; easing: ease-out-quad; }
+
+                    Text {
+                        text: root.use-discrete-gpu ? "ВКЛ" : "ВЫКЛ";
+                        color: root.use-discrete-gpu ? #eafaee : #989ca2;
+                        font-size: 12px;
+                        font-weight: 900;
+                        letter-spacing: 0.6px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    discrete-gpu-touch := TouchArea {
+                        enabled: root.settings-visible && root.is-authenticated;
+                        mouse-cursor: pointer;
+                        clicked => { root.discrete-gpu-requested(!root.use-discrete-gpu); }
+                    }
+                }
+            }
+
+            Rectangle {
+                x: 28px;
+                y: root.discrete-gpu-available ? 392px : 288px;
                 width: parent.width - 56px;
                 height: 150px;
                 border-radius: 14px;
