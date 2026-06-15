@@ -308,6 +308,30 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 	}
 }
 
+// Ложный алерт: игрок закрыл игру → лаунчер погасил сессию → агент перестал слать
+// heartbeat. reaper НЕ должен слать «агент молчит во время игры» по уже мёртвой сессии.
+func TestSilentDetectSkipsClosedSession(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	n := &fakeNotifier{}
+	svc.SetNotifier(n)
+	base := time.Unix(1_700_000_000, 0)
+	svc.now = func() time.Time { return base }
+	svc.SetHeartbeatTimeout(90 * time.Second)
+
+	res, _ := svc.InitHandshake(context.Background(), "uuid-c", "Liko", "hwid-c", nil)
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	// Игрок закрыл игру → лаунчер инвалидировал сессию.
+	v.InvalidateByNonce(res.Nonce)
+	// reaper видит молчащий nonce, но сессия уже погашена → ложного алерта быть не должно.
+	svc.reapStale(base.Add(120 * time.Second))
+	if n.silentCount() != 0 {
+		t.Fatalf("по закрытой сессии алерта быть не должно, получено %d", n.silentCount())
+	}
+}
+
 // Detect-kick по-прежнему гасит сессию, несмотря на смягчённый reaper.
 func TestDetectKickStillInvalidates(t *testing.T) {
 	v := &fakeVerifier{verified: map[string]bool{}}

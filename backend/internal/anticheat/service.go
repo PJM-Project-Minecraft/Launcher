@@ -236,6 +236,13 @@ func (s *Service) reapStale(now time.Time) {
 	}
 	s.hbMu.Unlock()
 	for _, nonce := range silent {
+		// Алертим, только если сессия ещё активна (игра предположительно идёт, а агент
+		// замолк — вот это подозрительно). Если сессия уже погашена (игрок закрыл игру →
+		// лаунчер invalidate, или detect-kick), молчание агента ожидаемо → тихо снимаем
+		// с трекинга без ложного алерта.
+		if s.verifier == nil || !s.verifier.IsActiveByNonce(nonce) {
+			continue
+		}
 		slog.Warn("anticheat: agent heartbeat silent (мягкий детект, сессию не гасим)",
 			"nonce", nonce, "timeout", s.hbTimeout)
 		if s.notifier != nil {
