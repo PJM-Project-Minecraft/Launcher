@@ -353,83 +353,139 @@ public final class Agent {
     // и пересылает как детекты. Нативный hook видит инъекции, недоступные Java (hidden,
     // Unsafe), и его сложнее снять, чем Java-трансформер.
     private static void startEventPoller(String eventsPath) {
-        Thread t = new Thread(() -> {
-            long offset = 0;
-            Path path = Paths.get(eventsPath);
-            while (true) {
-                try {
-                    Thread.sleep(2000);
-                } catch (InterruptedException e) {
-                    return;
+        final Path path = Paths.get(eventsPath);
+        final long[] offset = {0}; // переживает итерации (тело — Runnable без своего состояния)
+        runResilient("anticheat-native-events", 2000, () -> pollNativeEvents(path, offset));
+    }
+
+    /** Один проход поллера: дочитывает новые строки <flag>.events и шлёт как детекты. */
+    private static void pollNativeEvents(Path path, long[] offset) {
+        try {
+            if (!Files.exists(path)) {
+                return;
+            }
+            byte[] all = Files.readAllBytes(path);
+            if (all.length <= offset[0]) {
+                return;
+            }
+            String chunk = new String(all, (int) offset[0], (int) (all.length - offset[0]),
+                java.nio.charset.StandardCharsets.UTF_8);
+            offset[0] = all.length;
+            for (String line : chunk.split("\n")) {
+                line = line.trim();
+                if (line.isEmpty()) {
+                    continue;
                 }
-                try {
-                    if (!Files.exists(path)) {
-                        continue;
-                    }
-                    byte[] all = Files.readAllBytes(path);
-                    if (all.length <= offset) {
-                        continue;
-                    }
-                    String chunk = new String(all, (int) offset, (int) (all.length - offset),
-                        java.nio.charset.StandardCharsets.UTF_8);
-                    offset = all.length;
-                    for (String line : chunk.split("\n")) {
-                        line = line.trim();
-                        if (line.isEmpty()) {
-                            continue;
-                        }
-                        // Формат строки: "<type>\t<name>".
-                        int tab = line.indexOf('\t');
-                        String type = tab > 0 ? line.substring(0, tab) : "inject";
-                        String name = tab > 0 ? line.substring(tab + 1) : line;
-                        // Точные сигналы (нелегальные имена, маркеры классов) → kick;
-                        // эвристики guard-потока (новый модуль, ld-preload, late-debug) —
-                        // report-only (обкатка против ложных срабатываний). Severity всё равно
-                        // назначает сервер по detect-type: inject=9(kick), debugger=6, прочее=5.
-                        switch (type) {
-                            case "illegal-class-name" -> reportIllegalName(name, "native");
-                            case "debugger-runtime" -> detect("debugger", "debugger-runtime", "native:" + name);
-                            case "module-unknown" -> detect("module-unknown", "module-unknown", "native:" + name);
-                            case "ld-preload" -> detect("ld-preload", "ld-preload", "native:" + name);
-                            default -> detect("inject", type, "native:" + name); // маркеры читов в именах классов
-                        }
-                    }
-                } catch (Exception ignored) {
-                    // best-effort
+                // Формат строки: "<type>\t<name>".
+                int tab = line.indexOf('\t');
+                String type = tab > 0 ? line.substring(0, tab) : "inject";
+                String name = tab > 0 ? line.substring(tab + 1) : line;
+                // Точные сигналы (нелегальные имена, маркеры классов) → kick;
+                // эвристики guard-потока (новый модуль, ld-preload, late-debug) —
+                // report-only (обкатка против ложных срабатываний). Severity всё равно
+                // назначает сервер по detect-type: inject=9(kick), debugger=6, прочее=5.
+                switch (type) {
+                    case "illegal-class-name" -> reportIllegalName(name, "native");
+                    case "debugger-runtime" -> detect("debugger", "debugger-runtime", "native:" + name);
+                    case "module-unknown" -> detect("module-unknown", "module-unknown", "native:" + name);
+                    case "ld-preload" -> detect("ld-preload", "ld-preload", "native:" + name);
+                    default -> detect("inject", type, "native:" + name); // маркеры читов в именах классов
                 }
             }
-        }, "anticheat-native-events");
+        } catch (Exception ignored) {
+            // best-effort: ошибка чтения каталога не должна ронять поллер
+        }
+    }
+
+    private static void startHeartbeat() {
+        runResilient("anticheat-heartbeat", HEARTBEAT_PERIOD_MS, Agent::heartbeatOnce);
+    }
+
+    /** Один цикл heartbeat: пингует сервер, реагирует на kick и смену версии блэклиста. */
+    private static void heartbeatOnce() {
+        String resp = postRead("/api/anticheat/heartbeat",
+            "{\"launchToken\":\"" + escape(token) + "\"}");
+        if (resp == null) {
+            return; // сеть нестабильна — не убиваем игру (enforcement даёт сервер)
+        }
+        // Сервер погасил сессию (detect в другой сессии) → закрываем игру.
+        if (resp.contains("\"action\":\"kick\"")) {
+            kickGame("session-revoked");
+            return;
+        }
+        // Версия блэклиста изменилась → подтягиваем свежие правила.
+        long v = parseLongField(resp, "blacklistVersion");
+        if (v >= 0 && v != blacklistVersion) {
+            fetchRules();
+        }
+    }
+
+    /**
+     * Запускает неубиваемый daemon-цикл: тело выполняется каждые periodMs снова и снова,
+     * а ЛЮБОЙ Throwable (включая Error и interrupt) поглощается и НЕ убивает цикл.
+     *
+     * Зачем: в тяжёлом модовом окружении (Sinytra Connector мостит Fabric→NeoForge и
+     * дёргает класслоадеры/модули) наш фоновый тред получал тихий interrupt и умирал
+     * через ~90с. Смерть heartbeat → сессия гасла reaper'ом → честного игрока выкидывало
+     * «Недействительной сессией» при реконнекте. Теперь тред переживает это и один раз
+     * репортит причину на backend (diag) — чтобы механизм был виден в логах.
+     */
+    private static void runResilient(String name, long periodMs, Runnable body) {
+        Thread t = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(periodMs);
+                } catch (InterruptedException e) {
+                    // Нас прервали (модлоадер дёрнул тред). НЕ выходим: флаг прерывания уже
+                    // сброшен sleep'ом, продолжаем цикл.
+                    reportRecovered(name, "interrupted");
+                    continue;
+                }
+                if (guardedIteration(body, (cls, err) -> reportRecovered(name, cls))) {
+                    // тело упало с Throwable — уже поглощено и сообщено, цикл живёт дальше
+                }
+            }
+        }, name);
         t.setDaemon(true);
         t.start();
     }
 
-    private static void startHeartbeat() {
-        Thread t = new Thread(() -> {
-            while (true) {
-                try {
-                    Thread.sleep(HEARTBEAT_PERIOD_MS);
-                } catch (InterruptedException e) {
-                    return;
-                }
-                String resp = postRead("/api/anticheat/heartbeat",
-                    "{\"launchToken\":\"" + escape(token) + "\"}");
-                if (resp == null) {
-                    continue; // сеть нестабильна — не убиваем игру (enforcement даёт сервер)
-                }
-                // Сервер погасил сессию (detect в другой сессии/reaper) → закрываем игру.
-                if (resp.contains("\"action\":\"kick\"")) {
-                    kickGame("session-revoked");
-                    return;
-                }
-                // Версия блэклиста изменилась → подтягиваем свежие правила.
-                long v = parseLongField(resp, "blacklistVersion");
-                if (v >= 0 && v != blacklistVersion) {
-                    fetchRules();
-                }
+    /**
+     * Выполняет одну итерацию тела, поглощая любой Throwable. Возвращает true, если тело
+     * упало (для тестов и логики восстановления). Вынесено отдельно, чтобы устойчивость
+     * можно было проверить без тредов и сети.
+     */
+    static boolean guardedIteration(Runnable body, java.util.function.BiConsumer<String, Throwable> onError) {
+        try {
+            body.run();
+            return false;
+        } catch (Throwable t) {
+            try {
+                onError.accept(t.getClass().getSimpleName(), t);
+            } catch (Throwable ignored) {
+                // отчёт об ошибке сам не должен ронять цикл
             }
-        }, "anticheat-heartbeat");
-        t.setDaemon(true);
-        t.start();
+            return true;
+        }
+    }
+
+    // Дедуп diag-репортов: каждый тред сообщает о самовосстановлении один раз.
+    private static final java.util.Set<String> recoveredReported =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Один раз на тред сообщает backend, что фоновый тред пережил interrupt/Throwable. */
+    private static void reportRecovered(String name, String cause) {
+        if (!recoveredReported.add(name)) {
+            return;
+        }
+        postDiag("thread-recovered", name + ":" + cause);
+    }
+
+    /** Лёгкая телеметрия на backend (только лог на сервере, без бизнес-логики). */
+    private static void postDiag(String event, String detail) {
+        postRead("/api/anticheat/diag",
+            "{\"launchToken\":\"" + escape(token) + "\",\"event\":\"" + escape(event)
+                + "\",\"detail\":\"" + escape(detail) + "\"}");
     }
 
     /** Тянет блэклист с сервера (/rules по launch-token) и атомарно обновляет markers. */

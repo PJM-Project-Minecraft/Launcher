@@ -63,6 +63,10 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Post("/handshake/confirm", h.confirm)
 	group.Post("/detect", h.detect)
 	group.Post("/heartbeat", h.heartbeat)
+	// Лёгкая телеметрия агента (по launch-token): агент сообщает о самовосстановлении
+	// своих фоновых тредов (heartbeat/event-poller пережили interrupt/Throwable).
+	// Только лог — ни БД, ни бана, ни алерта.
+	group.Post("/diag", h.diag)
 	// Блэклист для агента (без JWT, по launch-token): версия + сигнатуры для рантайм-скана.
 	group.Get("/rules", h.rules)
 	// Раздача agent.jar: лаунчер качает его и инжектит как -javaagent.
@@ -226,6 +230,42 @@ func (h Handler) heartbeat(c fiber.Ctx) error {
 		action = "kick"
 	}
 	return c.JSON(fiber.Map{"action": action, "blacklistVersion": version})
+}
+
+// diag принимает телеметрию самовосстановления тредов агента. Назначение —
+// диагностика: увидеть в логах прода, ЧТО прерывает фоновые треды агента в модовом
+// окружении (механизм «Недействительной сессии»). Никакой бизнес-логики: только лог.
+func (h Handler) diag(c fiber.Ctx) error {
+	var req struct {
+		LaunchToken string `json:"launchToken"`
+		Event       string `json:"event"`
+		Detail      string `json:"detail"`
+	}
+	_ = c.Bind().Body(&req)
+	token := req.LaunchToken
+	if token == "" {
+		token = c.Get("X-Launch-Token")
+	}
+	claims, err := h.service.VerifyToken(token)
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	if !h.hbLimiter.allow(claims.UUID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
+	}
+	// Обрезаем поля, чтобы агент не мог залить логи произвольным объёмом.
+	event, detail := truncate(req.Event, 64), truncate(req.Detail, 256)
+	slog.Info("anticheat agent diag", "login", claims.Login, "uuid", claims.UUID,
+		"event", event, "detail", detail)
+	return c.SendStatus(http.StatusNoContent)
+}
+
+// truncate ограничивает длину строки телеметрии (защита логов от флуда).
+func truncate(s string, max int) string {
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 func (h Handler) rules(c fiber.Ctx) error {

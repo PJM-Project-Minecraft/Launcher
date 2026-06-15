@@ -30,3 +30,6 @@ dashboard/.env.local
 # Прод-only оверрайд compose (живёт только на VPS, деплой его не трогает)
 docker-compose.override.yml
 .superpowers/
+
+# Сторонний authlib-injector пользователя (отдельный репозиторий, не часть монорепо)
+/Gml.Authlib.Injector/
