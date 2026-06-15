@@ -2,6 +2,7 @@ package anticheat
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,9 +246,40 @@ func TestHeartbeatExtendsGameSession(t *testing.T) {
 	}
 }
 
-func TestHeartbeatReapsStale(t *testing.T) {
+// fakeNotifier считает алерты для проверки мягкого детекта молчания агента.
+type fakeNotifier struct {
+	mu        sync.Mutex
+	detection int
+	silent    int
+}
+
+func (n *fakeNotifier) NotifyDetection(d models.Detection, autoBanned bool) {
+	n.mu.Lock()
+	n.detection++
+	n.mu.Unlock()
+}
+
+func (n *fakeNotifier) NotifyAgentSilent(nonce string) {
+	n.mu.Lock()
+	n.silent++
+	n.mu.Unlock()
+}
+
+func (n *fakeNotifier) silentCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.silent
+}
+
+// Регрессия «Недействительная сессия»: heartbeat-тред агента тихо умирал через ~90с в
+// модовом окружении, reaper гасил сессию → реконнект ловил отказ. Теперь живость сессии
+// держит keepalive от лаунчера, а reaper при молчании агента лишь шлёт мягкий детект
+// (алерт), НЕ гася сессию. Реальный чит гасит сессию отдельно (detect-kick).
+func TestHeartbeatSilentSoftDetect(t *testing.T) {
 	v := &fakeVerifier{verified: map[string]bool{}}
 	svc := NewService(newTestDB(t), "secret", false, v, "")
+	n := &fakeNotifier{}
+	svc.SetNotifier(n)
 	base := time.Unix(1_700_000_000, 0)
 	svc.now = func() time.Time { return base }
 	svc.SetHeartbeatTimeout(90 * time.Second)
@@ -256,18 +288,43 @@ func TestHeartbeatReapsStale(t *testing.T) {
 	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
-	if !v.IsActiveByNonce(res.Nonce) {
-		t.Fatal("после confirm сессия должна быть активна")
-	}
-	// В пределах таймаута — не гасим.
+	// В пределах таймаута — тихо, без алертов.
 	svc.reapStale(base.Add(60 * time.Second))
-	if !v.IsActiveByNonce(res.Nonce) {
-		t.Fatal("в пределах таймаута сессия не должна гаситься")
+	if n.silentCount() != 0 {
+		t.Fatal("в пределах таймаута алерта быть не должно")
 	}
-	// Свыше таймаута — reaper гасит протухшую сессию (агент умер).
+	// Свыше таймаута — мягкий детект: алерт есть, но сессия ЖИВА (её держит keepalive лаунчера).
 	svc.reapStale(base.Add(120 * time.Second))
+	if !v.IsActiveByNonce(res.Nonce) {
+		t.Fatal("reaper больше НЕ должен гасить сессию — её держит keepalive лаунчера")
+	}
+	if n.silentCount() != 1 {
+		t.Fatalf("ожидался ровно один алерт о молчании агента, получено %d", n.silentCount())
+	}
+	// Повторный проход не должен слать дубль (nonce уже снят с трекинга живости).
+	svc.reapStale(base.Add(200 * time.Second))
+	if n.silentCount() != 1 {
+		t.Fatalf("дедуп: повторного алерта быть не должно, получено %d", n.silentCount())
+	}
+}
+
+// Detect-kick по-прежнему гасит сессию, несмотря на смягчённый reaper.
+func TestDetectKickStillInvalidates(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	res, _ := svc.InitHandshake(context.Background(), "uuid-k", "Liko", "hwid-k", nil)
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	claims, err := svc.VerifyToken(res.LaunchToken)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if kick, _ := svc.EvaluateKick(claims, 9, "inject"); !kick {
+		t.Fatal("inject severity 9 должен кикать")
+	}
 	if v.IsActiveByNonce(res.Nonce) {
-		t.Fatal("протухшая сессия должна быть погашена reaper'ом")
+		t.Fatal("detect-kick обязан погасить сессию (InvalidateByNonce)")
 	}
 }
 

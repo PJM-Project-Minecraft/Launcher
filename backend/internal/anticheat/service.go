@@ -217,21 +217,29 @@ func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool
 	return !active, s.BlacklistVersion(ctx)
 }
 
-// reapStale гасит сессии, по которым давно (дольше hbTimeout) не было heartbeat —
-// агент умер/отвалился. Время инъектируется для детерминированных тестов.
+// reapStale ловит сессии, по которым давно (дольше hbTimeout) не было heartbeat от
+// агента, и шлёт по ним МЯГКИЙ детект (алерт), НЕ гася сессию. Раньше reaper гасил
+// сессию (InvalidateByNonce), но heartbeat-тред агента мог тихо умереть в модовом
+// окружении → честного игрока выкидывало «Недействительной сессией» при реконнекте.
+// Живость игровой сессии теперь держит keepalive от лаунчера; молчание агента —
+// лишь повод присмотреться. Реальный чит гасит сессию отдельно (detect-kick).
+// Дедуп: nonce снимается с трекинга живости, так что алерт уходит один раз.
+// Время инъектируется для детерминированных тестов.
 func (s *Service) reapStale(now time.Time) {
 	s.hbMu.Lock()
-	var stale []string
+	var silent []string
 	for nonce, last := range s.heartbeats {
 		if now.Sub(last) > s.hbTimeout {
-			stale = append(stale, nonce)
+			silent = append(silent, nonce)
 			delete(s.heartbeats, nonce)
 		}
 	}
 	s.hbMu.Unlock()
-	for _, nonce := range stale {
-		if s.verifier != nil {
-			s.verifier.InvalidateByNonce(nonce)
+	for _, nonce := range silent {
+		slog.Warn("anticheat: agent heartbeat silent (мягкий детект, сессию не гасим)",
+			"nonce", nonce, "timeout", s.hbTimeout)
+		if s.notifier != nil {
+			s.notifier.NotifyAgentSilent(nonce)
 		}
 	}
 }

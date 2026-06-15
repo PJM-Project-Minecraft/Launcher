@@ -48,6 +48,11 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// Защищённый: лаунчер обменивает свой JWT на игровую сессию (Minecraft accessToken).
 	app.Post("/api/yggdrasil/launcher-session", authMiddleware, h.launcherSession)
 
+	// Защищённый keepalive: лаунчер продлевает сессию по nonce, пока процесс игры жив.
+	// Надёжный сигнал живости вместо хрупкого heartbeat-треда агента (тот мог тихо
+	// умереть в модовом окружении → сессия гасла reaper'ом → «Недействительная сессия»).
+	app.Post("/api/yggdrasil/launcher-session/keepalive", authMiddleware, h.launcherSessionKeepalive)
+
 	// Раздача самого agent-jar: лаунчер качает его в служебную папку и инжектит.
 	app.Get("/api/yggdrasil/authlib-injector.jar", h.injectorJar)
 }
@@ -103,6 +108,25 @@ func (h Handler) launcherSession(c fiber.Ctx) error {
 		"uuid":        sess.UUID,
 		"name":        sess.Name,
 	})
+}
+
+type keepaliveRequest struct {
+	Nonce string `json:"nonce"`
+}
+
+// launcherSessionKeepalive продлевает игровую сессию по nonce (sliding TTL). Лаунчер
+// пингует, пока процесс игры жив; по nonce, а не accessToken, чтобы продление пережило
+// /authserver/refresh (authlib-injector может сменить токен). No-op на неизвестной/
+// истёкшей сессии (404) — истёкшую/погашенную не воскрешаем, kick остаётся окончательным.
+func (h Handler) launcherSessionKeepalive(c fiber.Ctx) error {
+	var req keepaliveRequest
+	if err := c.Bind().Body(&req); err != nil || req.Nonce == "" {
+		return c.Status(http.StatusBadRequest).JSON(yggError{Error: "IllegalArgumentException", ErrorMessage: "Не указан nonce"})
+	}
+	if !h.service.Store().TouchByNonce(req.Nonce) {
+		return c.SendStatus(http.StatusNotFound)
+	}
+	return c.SendStatus(http.StatusNoContent)
 }
 
 func (h Handler) authenticate(c fiber.Ctx) error {

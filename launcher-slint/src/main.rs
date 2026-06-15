@@ -1227,6 +1227,44 @@ fn fetch_yggdrasil_session(
         .map_err(|_| "Некорректный ответ игровой сессии.".to_string())
 }
 
+// Интервал keepalive-пинга игровой сессии: с большим запасом под 15-мин TTL сессии,
+// переживает несколько пропущенных пингов (сетевые сбои).
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+
+// Пока процесс игры жив (stop не взведён), периодически продлевает игровую сессию по
+// nonce. По nonce, а не accessToken, чтобы продление пережило /authserver/refresh
+// (authlib-injector может сменить токен). Спим короткими квантами для отзывчивого
+// завершения на закрытии игры. Сетевой сбой не фатален: сессия живёт по TTL, следующий
+// пинг наверстает.
+fn session_keepalive_loop(api_url: &str, token: &str, nonce: &str, stop: &AtomicBool) {
+    let client = match http_client() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let url = format!(
+        "{}/api/yggdrasil/launcher-session/keepalive",
+        api_url.trim_end_matches('/')
+    );
+    let quantum = Duration::from_secs(2);
+    let mut elapsed = Duration::ZERO;
+    loop {
+        thread::sleep(quantum);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        elapsed += quantum;
+        if elapsed < KEEPALIVE_INTERVAL {
+            continue;
+        }
+        elapsed = Duration::ZERO;
+        let _ = client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "nonce": nonce }))
+            .send();
+    }
+}
+
 // Гарантирует наличие authlib-injector.jar в служебной папке лаунчера (вне
 // files/, чтобы cleanup его не удалял). Качает с бэкенда при отсутствии.
 // Манифест целостности артефактов античита (SHA-256). Лаунчер сверяет им скачанные
@@ -2161,9 +2199,27 @@ fn launch_profile(
         .map_err(|err| format!("Не удалось запустить Minecraft: {}", err))?;
 
     post_game_started(app);
+
+    // Keepalive: пока игра запущена, держим yggdrasil-сессию живой по nonce. Стабильный
+    // Rust-процесс лаунчера — надёжный сигнал живости, в отличие от heartbeat-треда агента,
+    // который в модовом окружении мог тихо умереть → сессия гасла reaper'ом → честного
+    // игрока выкидывало «Недействительной сессией» при реконнекте.
+    let keepalive_stop = Arc::new(AtomicBool::new(false));
+    let keepalive_handle = {
+        let api_url = config.api_url.clone();
+        let token = token.to_string();
+        let nonce = guard.nonce.clone();
+        let stop = keepalive_stop.clone();
+        thread::spawn(move || session_keepalive_loop(&api_url, &token, &nonce, &stop))
+    };
+
     let status = child
         .wait()
         .map_err(|err| format!("Не удалось дождаться закрытия Minecraft: {}", err))?;
+
+    // Останавливаем keepalive до инвалидации, чтобы он не продлил уже погашенную сессию.
+    keepalive_stop.store(true, Ordering::Relaxed);
+    let _ = keepalive_handle.join();
     invalidate_yggdrasil_session(config, &session.access_token);
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о

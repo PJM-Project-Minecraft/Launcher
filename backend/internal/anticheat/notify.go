@@ -14,6 +14,9 @@ import (
 // Notifier отправляет алерт о детекте во внешний канал (Telegram и т.п.).
 type Notifier interface {
 	NotifyDetection(d models.Detection, autoBanned bool)
+	// NotifyAgentSilent — мягкий детект: агент перестал слать heartbeat во время игры.
+	// Сессию это НЕ гасит (её держит keepalive лаунчера) — лишь сигнал для оператора.
+	NotifyAgentSilent(nonce string)
 }
 
 // TelegramNotifier шлёт алерты в Telegram напрямую через Bot API.
@@ -48,6 +51,22 @@ func (n *TelegramNotifier) NotifyDetection(d models.Detection, autoBanned bool) 
 		text += "\n\n⛔️ Выдан автоматический бан (аккаунт + HWID)."
 	}
 
+	n.send(text)
+}
+
+// NotifyAgentSilent шлёт мягкий алерт: heartbeat агента пропал во время игры. Это не
+// kill (вход держит keepalive лаунчера) — повод присмотреться к игроку, а не бан.
+func (n *TelegramNotifier) NotifyAgentSilent(nonce string) {
+	short := nonce
+	if len(short) > 12 {
+		short = short[:12] + "…"
+	}
+	n.send("⚠️ Античит: агент перестал слать heartbeat во время игры (nonce " + short +
+		"). Сессия не погашена (её держит лаунчер) — присмотритесь к игроку.")
+}
+
+// send отправляет произвольный текст в Telegram-чат алертов.
+func (n *TelegramNotifier) send(text string) {
 	payload, _ := json.Marshal(map[string]any{
 		"chat_id": n.chatID,
 		"text":    text,
