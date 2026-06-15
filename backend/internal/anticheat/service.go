@@ -26,6 +26,10 @@ type SessionVerifier interface {
 	// TouchByNonce продлевает игровую сессию (sliding TTL): heartbeat — сигнал живости
 	// игры, без которого 15-мин TTL сессии истекает прямо во время игры.
 	TouchByNonce(nonce string) bool
+	// LauncherActive — лаунчер недавно слал keepalive по nonce (игра точно запущена).
+	// Это надёжный сигнал «игра идёт» от стабильного лаунчера: по нему reaper отличает
+	// убийство агента в живой игре (алерт) от обычного закрытия игры (тишина).
+	LauncherActive(nonce string) bool
 }
 
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
@@ -236,11 +240,13 @@ func (s *Service) reapStale(now time.Time) {
 	}
 	s.hbMu.Unlock()
 	for _, nonce := range silent {
-		// Алертим, только если сессия ещё активна (игра предположительно идёт, а агент
-		// замолк — вот это подозрительно). Если сессия уже погашена (игрок закрыл игру →
-		// лаунчер invalidate, или detect-kick), молчание агента ожидаемо → тихо снимаем
-		// с трекинга без ложного алерта.
-		if s.verifier == nil || !s.verifier.IsActiveByNonce(nonce) {
+		// Алертим, только если игра ТОЧНО идёт (лаунчер свежо keepalive'ит), а агент при
+		// этом замолк — его убили в живой игре. Если keepalive лаунчера тоже пропал, игра
+		// просто закрыта → молчание агента ожидаемо → тихо снимаем с трекинга без ложного
+		// алерта. Сессию проверяем заодно (detect-kick мог её уже погасить).
+		// У лаунчеров без keepalive (старые версии) LauncherActive всегда false → тишина:
+		// без сигнала живости лаунчера закрытие игры неотличимо от убийства агента.
+		if s.verifier == nil || !s.verifier.IsActiveByNonce(nonce) || !s.verifier.LauncherActive(nonce) {
 			continue
 		}
 		slog.Warn("anticheat: agent heartbeat silent (мягкий детект, сессию не гасим)",

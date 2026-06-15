@@ -126,6 +126,9 @@ func (h Handler) launcherSessionKeepalive(c fiber.Ctx) error {
 	if !h.service.Store().TouchByNonce(req.Nonce) {
 		return c.SendStatus(http.StatusNotFound)
 	}
+	// Фиксируем живость лаунчера: по ней anticheat-reaper отличает убийство агента в
+	// живой игре (алерт) от обычного закрытия игры (тишина).
+	h.service.Store().RecordLauncherKeepalive(req.Nonce)
 	return c.SendStatus(http.StatusNoContent)
 }
 

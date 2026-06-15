@@ -32,8 +32,15 @@ func TestKeepaliveEndpoint(t *testing.T) {
 		return resp.StatusCode
 	}
 
+	if svc.Store().LauncherActive("nonce-ka") {
+		t.Fatal("до keepalive лаунчер не должен считаться активным")
+	}
 	if code := post(`{"nonce":"nonce-ka"}`); code != http.StatusNoContent {
 		t.Fatalf("живой nonce: ожидался 204, получен %d", code)
+	}
+	// keepalive должен зафиксировать живость лаунчера (сигнал «игра идёт» для reaper).
+	if !svc.Store().LauncherActive("nonce-ka") {
+		t.Fatal("после keepalive лаунчер должен считаться активным")
 	}
 	if code := post(`{"nonce":"never-issued"}`); code != http.StatusNotFound {
 		t.Fatalf("неизвестный nonce: ожидался 404, получен %d", code)

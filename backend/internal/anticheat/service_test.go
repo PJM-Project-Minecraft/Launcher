@@ -100,6 +100,11 @@ type fakeVerifier struct {
 	verified map[string]bool
 	invalid  map[string]bool
 	touched  map[string]int
+	launcher map[string]bool // nonce -> лаунчер свежо keepalive'ит (игра идёт)
+}
+
+func (f *fakeVerifier) LauncherActive(nonce string) bool {
+	return f.launcher[nonce]
 }
 
 func (f *fakeVerifier) MarkVerifiedByNonce(nonce string) bool {
@@ -276,7 +281,7 @@ func (n *fakeNotifier) silentCount() int {
 // держит keepalive от лаунчера, а reaper при молчании агента лишь шлёт мягкий детект
 // (алерт), НЕ гася сессию. Реальный чит гасит сессию отдельно (detect-kick).
 func TestHeartbeatSilentSoftDetect(t *testing.T) {
-	v := &fakeVerifier{verified: map[string]bool{}}
+	v := &fakeVerifier{verified: map[string]bool{}, launcher: map[string]bool{}}
 	svc := NewService(newTestDB(t), "secret", false, v, "")
 	n := &fakeNotifier{}
 	svc.SetNotifier(n)
@@ -288,6 +293,8 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
+	// Игра ТОЧНО идёт — лаунчер свежо keepalive'ит, но агент замолк (его убили).
+	v.launcher[res.Nonce] = true
 	// В пределах таймаута — тихо, без алертов.
 	svc.reapStale(base.Add(60 * time.Second))
 	if n.silentCount() != 0 {
@@ -305,6 +312,32 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 	svc.reapStale(base.Add(200 * time.Second))
 	if n.silentCount() != 1 {
 		t.Fatalf("дедуп: повторного алерта быть не должно, получено %d", n.silentCount())
+	}
+}
+
+// Корень повторных ложных алертов: при закрытии игры агент молкнет, а сессия ещё активна
+// (TTL/инвалидация ненадёжны). Без keepalive лаунчера (старые версии или закрытая игра)
+// алерта быть НЕ должно — закрытие неотличимо от убийства агента только по молчанию.
+func TestSilentDetectSkipsWhenLauncherGone(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}, launcher: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	n := &fakeNotifier{}
+	svc.SetNotifier(n)
+	base := time.Unix(1_700_000_000, 0)
+	svc.now = func() time.Time { return base }
+	svc.SetHeartbeatTimeout(90 * time.Second)
+
+	res, _ := svc.InitHandshake(context.Background(), "uuid-lg", "Liko", "hwid-lg", nil)
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	// Сессия активна, но лаунчер НЕ keepalive'ит (v.launcher пуст) — игра закрыта.
+	svc.reapStale(base.Add(120 * time.Second))
+	if !v.IsActiveByNonce(res.Nonce) {
+		t.Fatal("сессия не должна гаситься reaper'ом")
+	}
+	if n.silentCount() != 0 {
+		t.Fatalf("без keepalive лаунчера алерта быть не должно, получено %d", n.silentCount())
 	}
 }
 

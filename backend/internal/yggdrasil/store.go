@@ -13,6 +13,9 @@ import (
 const (
 	sessionTTL = 15 * time.Minute
 	joinTTL    = 60 * time.Second
+	// launcherKeepaliveTTL — окно, в течение которого keepalive от лаунчера считается
+	// «свежим» (игра идёт). Лаунчер пингует каждые ~120с; берём с запасом на пропуски.
+	launcherKeepaliveTTL = 5 * time.Minute
 )
 
 // Session — выданная лаунчеру игровая сессия (Minecraft accessToken).
@@ -45,17 +48,19 @@ type JoinRecord struct {
 type Store struct {
 	mu       sync.Mutex
 	db       *gorm.DB              // nil — без персиста (тесты, отдельные сценарии)
-	sessions map[string]Session    // accessToken -> session
-	joins    map[string]JoinRecord // serverId -> join
-	nonces   map[string]string     // nonce -> accessToken (для confirm от агентов)
+	sessions     map[string]Session    // accessToken -> session
+	joins        map[string]JoinRecord // serverId -> join
+	nonces       map[string]string     // nonce -> accessToken (для confirm от агентов)
+	launcherSeen map[string]time.Time  // nonce -> время последнего keepalive от лаунчера
 }
 
 func NewStore(db *gorm.DB) *Store {
 	s := &Store{
-		db:       db,
-		sessions: make(map[string]Session),
-		joins:    make(map[string]JoinRecord),
-		nonces:   make(map[string]string),
+		db:           db,
+		sessions:     make(map[string]Session),
+		joins:        make(map[string]JoinRecord),
+		nonces:       make(map[string]string),
+		launcherSeen: make(map[string]time.Time),
 	}
 	s.restore()
 	go s.collectGarbage()
@@ -226,6 +231,29 @@ func (s *Store) TouchByNonce(nonce string) bool {
 	return true
 }
 
+// RecordLauncherKeepalive фиксирует время последнего keepalive от лаунчера по nonce —
+// надёжный сигнал «игра запущена» от стабильного процесса лаунчера.
+func (s *Store) RecordLauncherKeepalive(nonce string) {
+	if nonce == "" {
+		return
+	}
+	s.mu.Lock()
+	s.launcherSeen[nonce] = time.Now()
+	s.mu.Unlock()
+}
+
+// LauncherActive сообщает, слал ли лаунчер keepalive по nonce недавно (игра ещё идёт).
+// По нему reaper отличает убийство агента в живой игре от обычного закрытия игры.
+func (s *Store) LauncherActive(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, ok := s.launcherSeen[nonce]
+	return ok && time.Since(last) < launcherKeepaliveTTL
+}
+
 func (s *Store) Session(accessToken string) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,6 +299,7 @@ func (s *Store) InvalidateByNonce(nonce string) bool {
 		return false
 	}
 	delete(s.nonces, nonce)
+	delete(s.launcherSeen, nonce)
 	if _, ok := s.sessions[token]; ok {
 		delete(s.sessions, token)
 		s.deleteSession(token)
@@ -284,6 +313,7 @@ func (s *Store) Invalidate(accessToken string) {
 	defer s.mu.Unlock()
 	if sess, ok := s.sessions[accessToken]; ok && sess.Nonce != "" {
 		delete(s.nonces, sess.Nonce)
+		delete(s.launcherSeen, sess.Nonce)
 	}
 	delete(s.sessions, accessToken)
 	s.deleteSession(accessToken)
@@ -332,7 +362,14 @@ func (s *Store) collectGarbage() {
 				delete(s.sessions, token)
 				if sess.Nonce != "" {
 					delete(s.nonces, sess.Nonce)
+					delete(s.launcherSeen, sess.Nonce)
 				}
+			}
+		}
+		// Подчищаем зависшие keepalive-метки (нет сессии или давно протухли).
+		for nonce, last := range s.launcherSeen {
+			if now.Sub(last) >= launcherKeepaliveTTL {
+				delete(s.launcherSeen, nonce)
 			}
 		}
 		for serverID, record := range s.joins {
