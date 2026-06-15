@@ -36,7 +36,10 @@ static const char *ALLOW_FRAGMENTS[] = {
     "rtss", "rivatuner", "overlay", "obs", "fraps", "afterburner", "bandicam",
     "vulkan", "openal", "lwjgl", "glfw", "jemalloc", "mesa", "dri/", "libgl", "nvml",
     "fontconfig", "freetype", "harfbuzz", "libx11", "libxcb", "libwayland", "pulse",
-    "discord_game_sdk", "nahimic", "wallpaper engine"
+    "discord_game_sdk", "nahimic", "wallpaper engine",
+    /* Нативки легитимных модов, распаковываемые JNI во временные папки (/tmp и т.п.):
+     * Axiom (imgui от moulberry), Simple Voice Chat (opus/rnnoise через javacpp). */
+    "imgui", "moulberry", "opus", "rnnoise", "javacpp"
 };
 static const int ALLOW_COUNT = (int)(sizeof(ALLOW_FRAGMENTS) / sizeof(ALLOW_FRAGMENTS[0]));
 
