@@ -439,6 +439,12 @@ fn main() -> Result<(), slint::PlatformError> {
         api_url: std::env::var("LAUNCHER_API_URL").unwrap_or(default_api_url),
     };
 
+    // Discord Rich Presence (опционально). Client ID — из env при сборке или
+    // константы-плейсхолдера; при "0" rpc_init — no-op.
+    let discord_client_id = option_env!("DISCORD_CLIENT_ID")
+        .unwrap_or(discord_rpc::DEFAULT_DISCORD_CLIENT_ID);
+    discord_rpc::rpc_init(discord_client_id);
+
     let app = AppWindow::new()?;
     // Автообновление: подчищаем следы прошлой установки и проверяем новую
     // версию при старте (до логина — эндпоинт публичный).
@@ -460,6 +466,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // фоновый SSE-слушатель предыдущей сессии (см. start_profile_event_listener).
     let session_generation = Arc::new(AtomicU64::new(0));
     apply_launcher_settings(&app, &load_settings().unwrap_or_default());
+    {
+        let settings = load_settings().unwrap_or_default();
+        discord_rpc::rpc_set_enabled(settings.discord_rpc_enabled);
+        discord_rpc::rpc_set(discord_rpc::Presence::Idle);
+    }
     apply_install_folder_label(&app, &state);
 
     register_login_handler(&app, config.clone(), state.clone(), session_generation.clone());
@@ -543,6 +554,7 @@ fn register_logout_handler(
     let logout_app = app.as_weak();
     app.on_logout_requested(move || {
         let _ = delete_token();
+        discord_rpc::rpc_set(discord_rpc::Presence::Idle);
         // Останавливаем фоновый SSE-слушатель текущей сессии.
         generation.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut state) = state.lock() {
@@ -637,6 +649,29 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
                             "Игра будет запускаться на дискретной видеокарте."
                         } else {
                             "Игра будет запускаться на встроенной видеокарте."
+                        }
+                        .into(),
+                    );
+                }
+                Err(message) => app.set_message(message.into()),
+            }
+        }
+    });
+
+    let discord_app = app.as_weak();
+    app.on_discord_rpc_requested(move |enabled| {
+        if let Some(app) = discord_app.upgrade() {
+            let mut settings = load_settings().unwrap_or_default();
+            settings.discord_rpc_enabled = enabled;
+            match save_settings(&settings) {
+                Ok(()) => {
+                    apply_launcher_settings(&app, &settings);
+                    discord_rpc::rpc_set_enabled(enabled);
+                    app.set_message(
+                        if enabled {
+                            "Discord Rich Presence включён."
+                        } else {
+                            "Discord Rich Presence выключён."
                         }
                         .into(),
                     );
@@ -742,13 +777,21 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
             app.set_download_progress(0.0);
             app.set_message("Готовим профиль к запуску...".into());
         }
+        discord_rpc::rpc_set(discord_rpc::Presence::Downloading {
+            profile: profile.name.clone(),
+        });
 
+        let nick_for_rpc = user.login.clone();
         let app_weak = play_app.clone();
         let config = config.clone();
         thread::spawn(move || {
             let result = sync_and_launch(&config, &token, &user, &profile, &app_weak);
+            let nick_for_rpc = nick_for_rpc.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
+                    discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
+                        nick: nick_for_rpc.clone(),
+                    });
                     let _ = app.show();
                     app.set_is_syncing(false);
                     match result {
@@ -894,7 +937,7 @@ fn apply_session(
 
     app.set_requires_totp(false);
     app.set_is_authenticated(true);
-    app.set_user_login(session.user.login.into());
+    app.set_user_login(session.user.login.clone().into());
     app.set_user_uuid(session.user.provider_uuid.into());
     app.set_is_slim(session.user.is_slim);
     app.set_token_expires_at(session.expires_at.into());
@@ -928,6 +971,9 @@ fn apply_session(
         Arc::clone(generation),
         my_generation,
     );
+    discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
+        nick: session.user.login.clone(),
+    });
 }
 
 /// Обновляет в UI поля выбранного профиля (или показывает «Нет профилей»).
@@ -2198,11 +2244,19 @@ fn launch_profile(
     }
     // Иначе java.exe открыл бы собственное консольное окно рядом с игрой.
     hide_console_window(&mut process);
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let mut child = process
         .spawn()
         .map_err(|err| format!("Не удалось запустить Minecraft: {}", err))?;
 
     post_game_started(app);
+    discord_rpc::rpc_set(discord_rpc::Presence::Playing {
+        profile: manifest.profile.name.clone(),
+        started_at,
+    });
 
     // Keepalive: пока игра запущена, держим yggdrasil-сессию живой по nonce. Стабильный
     // Rust-процесс лаунчера — надёжный сигнал живости, в отличие от heartbeat-треда агента,
@@ -2526,6 +2580,7 @@ fn apply_launcher_settings(app: &AppWindow, settings: &LauncherSettings) {
         None => app.set_discrete_gpu_available(false),
     }
     app.set_use_discrete_gpu(settings.use_discrete_gpu);
+    app.set_discord_rpc_enabled(settings.discord_rpc_enabled);
 }
 
 fn apply_install_folder_label(app: &AppWindow, state: &Arc<Mutex<RuntimeState>>) {
