@@ -778,7 +778,7 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
             app.set_message("Готовим профиль к запуску...".into());
         }
         discord_rpc::rpc_set(discord_rpc::Presence::Downloading {
-            profile: profile.name.clone(),
+            nick: user.login.clone(),
         });
 
         let nick_for_rpc = user.login.clone();
@@ -1606,7 +1606,7 @@ fn sync_and_launch(
     save_local_manifest(&paths.manifest_path, &paths.files_root, &manifest)?;
 
     post_progress(app, "Запускаем", &manifest.profile.name, "99%", 0.99, true);
-    launch_profile(app, config, &paths, &manifest, token)
+    launch_profile(app, config, &paths, &manifest, token, &user.login)
 }
 
 fn collect_files_to_download(
@@ -2115,6 +2115,7 @@ fn launch_profile(
     paths: &ProfilePaths,
     manifest: &Manifest,
     token: &str,
+    nick: &str,
 ) -> Result<String, String> {
     // Pre-launch античит: сбор HWID, скан процессов, проверка банов на бэкенде.
     // Блокирует запуск (Err) при бане HWID/аккаунта до получения игровой сессии.
@@ -2254,7 +2255,7 @@ fn launch_profile(
 
     post_game_started(app);
     discord_rpc::rpc_set(discord_rpc::Presence::Playing {
-        profile: manifest.profile.name.clone(),
+        nick: nick.to_string(),
         started_at,
     });
 

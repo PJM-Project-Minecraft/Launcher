@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use discord_rich_presence::activity::{Activity, Assets, Timestamps};
+use discord_rich_presence::activity::{Activity, Assets, Button, Timestamps};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 
 /// Стадия лаунчера, отражаемая в Discord.
@@ -16,13 +16,19 @@ pub enum Presence {
     /// Залогинен, смотрит профили.
     Browsing { nick: String },
     /// Идёт скачивание/подготовка сборки.
-    Downloading { profile: String },
+    Downloading { nick: String },
     /// Запущен Minecraft. `started_at` — Unix-секунды старта игры.
-    Playing { profile: String, started_at: i64 },
+    Playing { nick: String, started_at: i64 },
 }
 
 /// Большая иконка presence — лого проекта (ключ арт-ассета в Developer Portal).
 pub const LARGE_IMAGE: &str = "logo";
+/// Подпись при наведении на большую иконку.
+pub const LARGE_TEXT: &str = "Project Minecraft";
+
+/// Кнопка-ссылка в presence (видна другим в профиле игрока).
+pub const JOIN_BUTTON_LABEL: &str = "Присоединиться";
+pub const JOIN_BUTTON_URL: &str = "https://t.me/project_minecraft";
 
 /// Поля, из которых актор собирает `activity::Activity`.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,15 +54,15 @@ pub fn presence_to_activity_fields(p: &Presence) -> ActivityFields {
             small_image: Some("idle"),
             timestamp_start: None,
         },
-        Presence::Downloading { profile } => ActivityFields {
+        Presence::Downloading { nick } => ActivityFields {
             details: "Загружает сборку",
-            state: Some(profile.clone()),
+            state: Some(nick.clone()),
             small_image: Some("download"),
             timestamp_start: None,
         },
-        Presence::Playing { profile, started_at } => ActivityFields {
-            details: "Играет на Project: Minecraft",
-            state: Some(profile.clone()),
+        Presence::Playing { nick, started_at } => ActivityFields {
+            details: "Играет на сервере",
+            state: Some(nick.clone()),
             small_image: Some("playing"),
             timestamp_start: Some(*started_at),
         },
@@ -166,12 +172,16 @@ fn actor_loop(client_id: String, rx: Receiver<RpcCommand>) {
 fn apply_presence(client: &mut DiscordIpcClient, p: &Presence) -> bool {
     let fields = presence_to_activity_fields(p);
 
-    let mut assets = Assets::new().large_image(LARGE_IMAGE);
+    let mut assets = Assets::new().large_image(LARGE_IMAGE).large_text(LARGE_TEXT);
     if let Some(small) = fields.small_image {
         assets = assets.small_image(small);
     }
 
-    let mut activity = Activity::new().details(fields.details).assets(assets);
+    let mut activity = Activity::new()
+        .details(fields.details)
+        .assets(assets)
+        // Кнопка-ссылка на сообщество (видна другим в профиле игрока).
+        .buttons(vec![Button::new(JOIN_BUTTON_LABEL, JOIN_BUTTON_URL)]);
     if let Some(state) = &fields.state {
         activity = activity.state(state.as_str());
     }
@@ -204,22 +214,29 @@ mod tests {
     }
 
     #[test]
-    fn downloading_shows_profile() {
-        let f = presence_to_activity_fields(&Presence::Downloading { profile: "Pixelmon".into() });
+    fn downloading_shows_nick() {
+        let f = presence_to_activity_fields(&Presence::Downloading { nick: "Steve".into() });
         assert_eq!(f.details, "Загружает сборку");
-        assert_eq!(f.state, Some("Pixelmon".to_string()));
+        assert_eq!(f.state, Some("Steve".to_string()));
         assert_eq!(f.small_image, Some("download"));
     }
 
     #[test]
-    fn playing_carries_timestamp() {
+    fn playing_shows_nick_and_timestamp() {
         let f = presence_to_activity_fields(&Presence::Playing {
-            profile: "Pixelmon".into(),
+            nick: "Steve".into(),
             started_at: 1_700_000_000,
         });
-        assert_eq!(f.details, "Играет на Project: Minecraft");
-        assert_eq!(f.state, Some("Pixelmon".to_string()));
+        // details не повторяет имя сервера/приложения (Discord и так его показывает).
+        assert_eq!(f.details, "Играет на сервере");
+        assert_eq!(f.state, Some("Steve".to_string()));
         assert_eq!(f.small_image, Some("playing"));
         assert_eq!(f.timestamp_start, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn join_button_points_to_telegram() {
+        assert_eq!(JOIN_BUTTON_LABEL, "Присоединиться");
+        assert_eq!(JOIN_BUTTON_URL, "https://t.me/project_minecraft");
     }
 }
