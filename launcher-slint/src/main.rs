@@ -377,6 +377,8 @@ struct LauncherSettings {
     memory_auto: bool,
     #[serde(default = "default_use_discrete_gpu")]
     use_discrete_gpu: bool,
+    #[serde(default = "default_discord_rpc_enabled")]
+    discord_rpc_enabled: bool,
 }
 
 impl Default for LauncherSettings {
@@ -388,6 +390,7 @@ impl Default for LauncherSettings {
             memory_gb: DEFAULT_MEMORY_GB,
             memory_auto: true,
             use_discrete_gpu: true,
+            discord_rpc_enabled: true,
         }
     }
 }
@@ -2694,6 +2697,10 @@ fn default_use_discrete_gpu() -> bool {
     true
 }
 
+fn default_discord_rpc_enabled() -> bool {
+    true
+}
+
 fn post_progress(
     app: &Weak<AppWindow>,
     phase: &str,
@@ -3322,6 +3329,15 @@ impl LoginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_rpc_enabled_defaults_true_when_absent() {
+        // Старый settings.json без поля discord_rpc_enabled должен десериализоваться
+        // с дефолтом true (фича включена по умолчанию).
+        let json = r#"{"memoryGb":4,"memoryAuto":true,"useDiscreteGpu":true}"#;
+        let s: LauncherSettings = serde_json::from_str(json).unwrap();
+        assert!(s.discord_rpc_enabled);
+    }
 
     #[test]
     fn removes_module_path_entries_from_classpath() {
