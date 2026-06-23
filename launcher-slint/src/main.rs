@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
 mod anticheat;
+mod discord_rpc;
 mod gpu;
 mod updater;
 
