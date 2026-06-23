@@ -1323,55 +1323,6 @@ fn session_keepalive_loop(api_url: &str, token: &str, nonce: &str, stop: &Atomic
 
 // Гарантирует наличие authlib-injector.jar в служебной папке лаунчера (вне
 // files/, чтобы cleanup его не удалял). Качает с бэкенда при отсутствии.
-// Манифест целостности артефактов античита (SHA-256). Лаунчер сверяет им скачанные
-// agent.jar / нативную библиотеку / authlib-injector ПЕРЕД инжектом в JVM: несовпадение
-// = подмена (MITM или локально) → блок запуска. Закрывает RCE через подменённый агент.
-#[derive(Debug, Default, Deserialize)]
-struct AnticheatManifest {
-    #[serde(rename = "agentSha256", default)]
-    agent_sha256: String,
-    #[serde(rename = "authlibSha256", default)]
-    authlib_sha256: String,
-    #[serde(default)]
-    native: AnticheatNative,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct AnticheatNative {
-    #[serde(default)]
-    linux: String,
-    #[serde(default)]
-    windows: String,
-}
-
-impl AnticheatManifest {
-    // SHA нативной библиотеки для текущей ОС (пустая строка — нет хэша).
-    fn native_sha(&self) -> &str {
-        if cfg!(target_os = "linux") {
-            &self.native.linux
-        } else if cfg!(target_os = "windows") {
-            &self.native.windows
-        } else {
-            ""
-        }
-    }
-}
-
-// Тянет манифест целостности с бэкенда (без auth). None — недоступен (оффлайн/сбой):
-// тогда SHA-сверка не выполняется (fail-open, не ломаем оффлайн-запуск).
-fn fetch_anticheat_manifest(config: &AppConfig) -> Option<AnticheatManifest> {
-    let client = download_client().ok()?;
-    let url = format!(
-        "{}/api/anticheat/manifest",
-        config.api_url.trim_end_matches('/')
-    );
-    let response = client.get(url).send().ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    response.json::<AnticheatManifest>().ok()
-}
-
 fn ensure_authlib_injector(
     config: &AppConfig,
     expected_sha: Option<&str>,
@@ -2069,13 +2020,13 @@ fn launch_profile(
 
     // Манифест целостности (SHA-256) тянем один раз: им сверяем все инжектируемые
     // артефакты перед запуском. Недоступен → сверки нет (fail-open, оффлайн не ломаем).
-    let ac_manifest = fetch_anticheat_manifest(config);
+    let ac_manifest = anticheat::manifest::IntegrityManifest::fetch(config);
 
     // Подключаем authlib-injector как javaagent, указывая на наш Yggdrasil-сервер.
     // Jar — launcher-managed (качается с бэкенда), лежит вне files/, поэтому
     // cleanup его не трогает. Клиент и игровой сервер должны указывать на один
     // и тот же базовый URL (GML-совместимый путь).
-    let authlib_sha = ac_manifest.as_ref().and_then(|m| artifacts::sha_opt(&m.authlib_sha256));
+    let authlib_sha = ac_manifest.as_ref().and_then(|m| m.authlib_sha());
     if let Some(injector) = ensure_authlib_injector(config, authlib_sha)? {
         let ygg_url = format!(
             "{}/api/v1/integrations/authlib/minecraft",
@@ -2096,7 +2047,7 @@ fn launch_profile(
     if !guard.launch_token.is_empty() {
         // Нативный JVMTI-агент (M4): anti-inject/anti-debug + flag-файл для Java-агента.
         // Также запрещаем поздний attach к JVM (anti late-injection).
-        let native_sha = ac_manifest.as_ref().and_then(|m| artifacts::sha_opt(m.native_sha()));
+        let native_sha = ac_manifest.as_ref().and_then(|m| m.native_sha());
         if let Some(native) = ensure_native_agent(config, native_sha)? {
             let flag = native.with_file_name("ac_native.flag");
             let _ = fs::remove_file(&flag); // свежий старт: убираем прошлый флаг
@@ -2112,7 +2063,7 @@ fn launch_profile(
         }
 
         // Java-агент (M3): confirm + рантайм-скан классов/модов + heartbeat.
-        let agent_sha = ac_manifest.as_ref().and_then(|m| artifacts::sha_opt(&m.agent_sha256));
+        let agent_sha = ac_manifest.as_ref().and_then(|m| m.agent_sha());
         if let Some(agent) = ensure_agent_jar(config, agent_sha)? {
             let kick = agent.with_file_name("ac_kick.flag");
             let _ = fs::remove_file(&kick); // свежий старт

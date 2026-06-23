@@ -5,6 +5,7 @@
 //! Инжект агентов и привязка launch-token к игровой сессии добавятся в M2–M4.
 
 mod hwid;
+pub(crate) mod manifest;
 mod scan;
 
 use serde::Deserialize;
