@@ -19,8 +19,8 @@ pub enum Presence {
     Browsing { nick: String },
     /// Идёт скачивание/подготовка сборки.
     Downloading { nick: String },
-    /// Запущен Minecraft. `started_at` — Unix-секунды старта игры.
-    Playing { nick: String, started_at: i64 },
+    /// Запущен Minecraft.
+    Playing { nick: String },
 }
 
 /// Большая иконка presence — лого проекта (ключ арт-ассета в Developer Portal).
@@ -33,6 +33,9 @@ pub const JOIN_BUTTON_LABEL: &str = "Присоединиться";
 pub const JOIN_BUTTON_URL: &str = "https://t.me/project_minecraft";
 
 /// Поля, из которых актор собирает `activity::Activity`.
+///
+/// Таймстамп сюда НЕ входит: время отсчитывается от старта сессии лаунчера и
+/// одинаково для всех стадий, поэтому смена стадии его не сбрасывает (см. actor_loop).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivityFields {
     pub details: &'static str,
@@ -40,7 +43,6 @@ pub struct ActivityFields {
     pub small_image: Option<&'static str>,
     /// Подпись при наведении на маленькую иконку.
     pub small_text: Option<&'static str>,
-    pub timestamp_start: Option<i64>,
 }
 
 /// Чистый маппинг стадии в поля activity. Тестируется без реального IPC.
@@ -51,35 +53,30 @@ pub fn presence_to_activity_fields(p: &Presence) -> ActivityFields {
             state: None,
             small_image: None,
             small_text: None,
-            timestamp_start: None,
         },
         Presence::LoggingIn => ActivityFields {
             details: "Входит в лаунчер…",
             state: None,
             small_image: Some("idle"),
             small_text: Some("Авторизация"),
-            timestamp_start: None,
         },
         Presence::Browsing { nick } => ActivityFields {
             details: "Сидит в лаунчере",
             state: Some(nick.clone()),
             small_image: Some("idle"),
             small_text: Some("В лаунчере"),
-            timestamp_start: None,
         },
         Presence::Downloading { nick } => ActivityFields {
             details: "Загружает сборку",
             state: Some(nick.clone()),
             small_image: Some("download"),
             small_text: Some("Загрузка файлов"),
-            timestamp_start: None,
         },
-        Presence::Playing { nick, started_at } => ActivityFields {
+        Presence::Playing { nick } => ActivityFields {
             details: "Играет на сервере",
             state: Some(nick.clone()),
             small_image: Some("playing"),
             small_text: Some("В игре"),
-            timestamp_start: Some(*started_at),
         },
     }
 }
@@ -135,6 +132,9 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(15);
 /// Все ошибки IPC проглатываются — сбой RPC не влияет на лаунчер.
 fn actor_loop(client_id: String, rx: Receiver<RpcCommand>) {
     let mut client = DiscordIpcClient::new(&client_id);
+    // Единый момент старта сессии: один и тот же для всех стадий, поэтому таймер
+    // в Discord идёт непрерывно и не сбрасывается при смене стадии.
+    let session_start = now_unix();
     let mut connected = client.connect().is_ok();
     let mut enabled = true;
     let mut last: Option<Presence> = None;
@@ -174,7 +174,7 @@ fn actor_loop(client_id: String, rx: Receiver<RpcCommand>) {
         // Применяем текущую стадию (если включено и есть что показывать).
         if enabled {
             if let Some(p) = &last {
-                if !apply_presence(&mut client, p) {
+                if !apply_presence(&mut client, p, session_start) {
                     // Запись провалилась — соединение протухло, сбросим флаг.
                     connected = false;
                 }
@@ -183,8 +183,18 @@ fn actor_loop(client_id: String, rx: Receiver<RpcCommand>) {
     }
 }
 
+/// Текущее Unix-время в секундах.
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Собирает Activity из стадии и пишет в Discord. Возвращает false при ошибке IPC.
-fn apply_presence(client: &mut DiscordIpcClient, p: &Presence) -> bool {
+/// `session_start` одинаков для всех стадий — таймер не сбрасывается при их смене.
+fn apply_presence(client: &mut DiscordIpcClient, p: &Presence, session_start: i64) -> bool {
     let fields = presence_to_activity_fields(p);
 
     let mut assets = Assets::new().large_image(LARGE_IMAGE).large_text(LARGE_TEXT);
@@ -198,13 +208,11 @@ fn apply_presence(client: &mut DiscordIpcClient, p: &Presence) -> bool {
     let mut activity = Activity::new()
         .details(fields.details)
         .assets(assets)
+        .timestamps(Timestamps::new().start(session_start))
         // Кнопка-ссылка на сообщество (видна другим в профиле игрока).
         .buttons(vec![Button::new(JOIN_BUTTON_LABEL, JOIN_BUTTON_URL)]);
     if let Some(state) = &fields.state {
         activity = activity.state(state.as_str());
-    }
-    if let Some(start) = fields.timestamp_start {
-        activity = activity.timestamps(Timestamps::new().start(start));
     }
 
     client.set_activity(activity).is_ok()
@@ -215,12 +223,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn idle_has_no_state_or_timestamp() {
+    fn idle_has_no_state() {
         let f = presence_to_activity_fields(&Presence::Idle);
         assert_eq!(f.details, "В главном меню");
         assert_eq!(f.state, None);
         assert_eq!(f.small_image, None);
-        assert_eq!(f.timestamp_start, None);
+        assert_eq!(f.small_text, None);
     }
 
     #[test]
@@ -250,16 +258,13 @@ mod tests {
     }
 
     #[test]
-    fn playing_shows_nick_and_timestamp() {
-        let f = presence_to_activity_fields(&Presence::Playing {
-            nick: "Steve".into(),
-            started_at: 1_700_000_000,
-        });
+    fn playing_shows_nick() {
+        let f = presence_to_activity_fields(&Presence::Playing { nick: "Steve".into() });
         // details не повторяет имя сервера/приложения (Discord и так его показывает).
         assert_eq!(f.details, "Играет на сервере");
         assert_eq!(f.state, Some("Steve".to_string()));
         assert_eq!(f.small_image, Some("playing"));
-        assert_eq!(f.timestamp_start, Some(1_700_000_000));
+        assert_eq!(f.small_text, Some("В игре"));
     }
 
     #[test]

@@ -2250,10 +2250,6 @@ fn launch_profile(
     }
     // Иначе java.exe открыл бы собственное консольное окно рядом с игрой.
     hide_console_window(&mut process);
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
     let mut child = process
         .spawn()
         .map_err(|err| format!("Не удалось запустить Minecraft: {}", err))?;
@@ -2261,7 +2257,6 @@ fn launch_profile(
     post_game_started(app);
     discord_rpc::rpc_set(discord_rpc::Presence::Playing {
         nick: nick.to_string(),
-        started_at,
     });
 
     // Keepalive: пока игра запущена, держим yggdrasil-сессию живой по nonce. Стабильный
