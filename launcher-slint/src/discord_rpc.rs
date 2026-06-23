@@ -63,9 +63,9 @@ pub fn presence_to_activity_fields(p: &Presence) -> ActivityFields {
     }
 }
 
-/// Плейсхолдер Client ID. Реальный ID подставляется через env `DISCORD_CLIENT_ID`
-/// при сборке (см. main.rs). При значении "0"/пустом RPC не запускается.
-pub const DEFAULT_DISCORD_CLIENT_ID: &str = "0";
+/// Client ID Discord-приложения лаунчера. Может быть переопределён через env
+/// `DISCORD_CLIENT_ID` при сборке (см. main.rs). При значении "0"/пустом RPC не запускается.
+pub const DEFAULT_DISCORD_CLIENT_ID: &str = "1446203231784013924";
 
 /// Команда актору.
 enum RpcCommand {
