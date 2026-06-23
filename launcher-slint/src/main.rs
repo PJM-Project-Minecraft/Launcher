@@ -32,9 +32,6 @@ const KEYRING_SERVICE: &str = "xyz.projectminecraft.launcher";
 const KEYRING_USER: &str = "launcher-auth-token";
 const JAVA_RUNTIME_INDEX_URL: &str =
     "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
-// Маркер в тексте ошибки запуска: означает, что игру закрыл античит (kick).
-// Play-хендлер показывает по нему полноэкранное уведомление вместо обычной ошибки.
-const ANTICHEAT_KICK_PREFIX: &str = "\u{1}ANTICHEAT_KICK\u{1}";
 const DEFAULT_MEMORY_GB: i32 = 8;
 const MIN_MEMORY_GB: i32 = 2;
 const MAX_MEMORY_GB: i32 = 64;
@@ -808,7 +805,7 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                             app.set_message(message.into());
                         }
                         Err(message) => {
-                            if let Some(alert) = message.strip_prefix(ANTICHEAT_KICK_PREFIX) {
+                            if let Some(alert) = message.strip_prefix(anticheat::kick::KICK_PREFIX) {
                                 // Игру закрыл античит — полноэкранное уведомление.
                                 app.set_download_panel_visible(false);
                                 app.set_message(SharedString::default());
@@ -2091,33 +2088,14 @@ fn launch_profile(
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о
     // попытке инжекта вместо обычного сообщения о закрытии.
-    if let Some(kick) = kick_file {
-        if let Ok(content) = fs::read_to_string(&kick) {
-            let _ = fs::remove_file(&kick);
-            let reason = content
-                .lines()
-                .find_map(|l| l.strip_prefix("reason="))
-                .unwrap_or("")
-                .trim();
-            return Err(format!("{}{}", ANTICHEAT_KICK_PREFIX, anticheat_kick_message(reason)));
+    if let Some(kick) = &kick_file {
+        if let Some(reason) = anticheat::kick::KickReason::read_from(kick) {
+            let _ = fs::remove_file(kick);
+            return Err(reason.into_alert());
         }
     }
 
     Ok(minecraft_exit_message(status))
-}
-
-// Текст уведомления игроку при кике античитом.
-fn anticheat_kick_message(reason: &str) -> String {
-    let detail = match reason {
-        "illegal-class-name" => "обнаружена инъекция стороннего кода (чит-клиент)",
-        "inject" => "обнаружена инъекция стороннего кода",
-        "" => "обнаружена попытка вмешательства",
-        other => other,
-    };
-    format!(
-        "⛔ Игра закрыта системой защиты: {}. Уберите сторонние программы и запустите снова.",
-        detail
-    )
 }
 
 fn post_game_started(app: &Weak<AppWindow>) {
