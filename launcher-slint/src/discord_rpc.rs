@@ -13,7 +13,9 @@ use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 pub enum Presence {
     /// Лаунчер открыт, игрок не в сессии.
     Idle,
-    /// Залогинен, смотрит профили.
+    /// Идёт вход в аккаунт.
+    LoggingIn,
+    /// Залогинен, в лаунчере (выбор сборки/меню).
     Browsing { nick: String },
     /// Идёт скачивание/подготовка сборки.
     Downloading { nick: String },
@@ -36,6 +38,8 @@ pub struct ActivityFields {
     pub details: &'static str,
     pub state: Option<String>,
     pub small_image: Option<&'static str>,
+    /// Подпись при наведении на маленькую иконку.
+    pub small_text: Option<&'static str>,
     pub timestamp_start: Option<i64>,
 }
 
@@ -46,24 +50,35 @@ pub fn presence_to_activity_fields(p: &Presence) -> ActivityFields {
             details: "В главном меню",
             state: None,
             small_image: None,
+            small_text: None,
+            timestamp_start: None,
+        },
+        Presence::LoggingIn => ActivityFields {
+            details: "Входит в лаунчер…",
+            state: None,
+            small_image: Some("idle"),
+            small_text: Some("Авторизация"),
             timestamp_start: None,
         },
         Presence::Browsing { nick } => ActivityFields {
-            details: "Выбирает сборку",
+            details: "Сидит в лаунчере",
             state: Some(nick.clone()),
             small_image: Some("idle"),
+            small_text: Some("В лаунчере"),
             timestamp_start: None,
         },
         Presence::Downloading { nick } => ActivityFields {
             details: "Загружает сборку",
             state: Some(nick.clone()),
             small_image: Some("download"),
+            small_text: Some("Загрузка файлов"),
             timestamp_start: None,
         },
         Presence::Playing { nick, started_at } => ActivityFields {
             details: "Играет на сервере",
             state: Some(nick.clone()),
             small_image: Some("playing"),
+            small_text: Some("В игре"),
             timestamp_start: Some(*started_at),
         },
     }
@@ -176,6 +191,9 @@ fn apply_presence(client: &mut DiscordIpcClient, p: &Presence) -> bool {
     if let Some(small) = fields.small_image {
         assets = assets.small_image(small);
     }
+    if let Some(small_text) = fields.small_text {
+        assets = assets.small_text(small_text);
+    }
 
     let mut activity = Activity::new()
         .details(fields.details)
@@ -206,11 +224,21 @@ mod tests {
     }
 
     #[test]
+    fn logging_in_has_no_nick() {
+        let f = presence_to_activity_fields(&Presence::LoggingIn);
+        assert_eq!(f.details, "Входит в лаунчер…");
+        assert_eq!(f.state, None);
+        assert_eq!(f.small_image, Some("idle"));
+        assert_eq!(f.small_text, Some("Авторизация"));
+    }
+
+    #[test]
     fn browsing_shows_nick() {
         let f = presence_to_activity_fields(&Presence::Browsing { nick: "Steve".into() });
-        assert_eq!(f.details, "Выбирает сборку");
+        assert_eq!(f.details, "Сидит в лаунчере");
         assert_eq!(f.state, Some("Steve".to_string()));
         assert_eq!(f.small_image, Some("idle"));
+        assert_eq!(f.small_text, Some("В лаунчере"));
     }
 
     #[test]

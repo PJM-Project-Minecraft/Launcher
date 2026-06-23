@@ -515,6 +515,7 @@ fn register_login_handler(
             app.set_is_loading(true);
             app.set_message("Проверяем аккаунт...".into());
         }
+        discord_rpc::rpc_set(discord_rpc::Presence::LoggingIn);
 
         let app_weak = login_app.clone();
         let config = config.clone();
@@ -528,6 +529,8 @@ fn register_login_handler(
                     match result {
                         Ok(session) => apply_session(&app, &state, &config, &generation, session),
                         Err(error) => {
+                            // Вход не удался — возвращаем presence в исходное состояние.
+                            discord_rpc::rpc_set(discord_rpc::Presence::Idle);
                             let keep_totp_prompt = error.requires_two_factor || submitted_totp;
                             app.set_requires_totp(keep_totp_prompt);
                             if keep_totp_prompt {
@@ -836,6 +839,7 @@ fn restore_saved_session(
 
     app.set_is_loading(true);
     app.set_message("Восстанавливаем сессию...".into());
+    discord_rpc::rpc_set(discord_rpc::Presence::LoggingIn);
 
     let app_weak = app.as_weak();
     thread::spawn(move || {
@@ -846,6 +850,7 @@ fn restore_saved_session(
                 match result {
                     Ok(session) => apply_session(&app, &state, &config, &generation, session),
                     Err(message) => {
+                        discord_rpc::rpc_set(discord_rpc::Presence::Idle);
                         if should_forget_saved_session(&message) {
                             let _ = delete_token();
                         }
