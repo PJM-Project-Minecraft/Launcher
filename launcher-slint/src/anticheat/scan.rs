@@ -1,7 +1,7 @@
 //! Скан запущенных процессов против блэклиста сигнатур с бэкенда. Best-effort и
 //! кроссплатформенно: на Linux читаем /proc, на Windows — tasklist.
 
-use super::Signature;
+use super::handshake::Signature;
 
 /// Обнаружение, найденное сканом (соответствует DetectionInput на бэкенде).
 #[derive(Debug, Clone, serde::Serialize)]

@@ -1927,13 +1927,13 @@ fn launch_profile(
     token: &str,
     nick: &str,
 ) -> Result<String, String> {
-    // Pre-launch античит: сбор HWID, скан процессов, проверка банов на бэкенде.
-    // Блокирует запуск (Err) при бане HWID/аккаунта до получения игровой сессии.
-    let guard = anticheat::pre_launch_guard(config, token)?;
+    // Pre-launch античит: скан процессов, HWID, handshake (баны/форс-апдейт), манифест
+    // целостности. Блокирует запуск (Err) при бане/форс-апдейте. nonce связывает сессию.
+    let mut guard = anticheat::LaunchGuard::begin(config, token)?;
 
     // Игровая сессия привязывается к nonce из handshake/init. confirm выполняет
     // Java-агент внутри JVM (M3) — без него сессия не Verified и сервер отклонит join.
-    let session = fetch_yggdrasil_session(config, token, &guard.nonce)?;
+    let session = fetch_yggdrasil_session(config, token, guard.nonce())?;
 
     let java_rel = os_value(
         &manifest.profile.java_path_windows,
@@ -1960,16 +1960,11 @@ fn launch_profile(
     let settings = load_settings().unwrap_or_default();
     let mut jvm_args = jvm_args_with_memory(&manifest.profile.jvm_args, effective_memory_gb(&settings))?;
 
-    // Манифест целостности (SHA-256) тянем один раз: им сверяем все инжектируемые
-    // артефакты перед запуском. Недоступен → сверки нет (fail-open, оффлайн не ломаем).
-    let ac_manifest = anticheat::manifest::IntegrityManifest::fetch(config);
-
     // Подключаем authlib-injector как javaagent, указывая на наш Yggdrasil-сервер.
     // Jar — launcher-managed (качается с бэкенда), лежит вне files/, поэтому
     // cleanup его не трогает. Клиент и игровой сервер должны указывать на один
-    // и тот же базовый URL (GML-совместимый путь).
-    let authlib_sha = ac_manifest.as_ref().and_then(|m| m.authlib_sha());
-    if let Some(injector) = ensure_authlib_injector(config, authlib_sha)? {
+    // и тот же базовый URL (GML-совместимый путь). SHA — из манифеста целостности guard.
+    if let Some(injector) = ensure_authlib_injector(config, guard.authlib_sha())? {
         let ygg_url = format!(
             "{}/api/v1/integrations/authlib/minecraft",
             config.api_url.trim_end_matches('/')
@@ -1980,20 +1975,10 @@ fn launch_profile(
         );
     }
 
-    // Инжект агентов античита в начало jvm_args. Только если handshake/init выдал токен —
-    // иначе агенты бессильны, а сессия не пройдёт verified-гейт на join. Порядок флагов:
-    // native, затем agent (для JVM порядок -D/-javaagent/-agentpath до главного класса не важен).
-    let mut kick_file: Option<PathBuf> = None;
-    if !guard.launch_token.is_empty() {
-        let plan = anticheat::inject::build(
-            &guard.launch_token,
-            &guard.challenge,
-            ac_manifest.as_ref(),
-            config,
-        )?;
-        kick_file = plan.kick_file;
-        jvm_args.splice(0..0, plan.args);
-    }
+    // Инжект агентов античита в начало jvm_args (native + Java-агент с SHA-сверкой).
+    // No-op, если handshake не выдал токен (fail-open) — тогда сессия не пройдёт
+    // verified-гейт на join. Err — подмена артефакта (блок запуска).
+    guard.inject_into(&mut jvm_args, config)?;
 
     let values = PlaceholderValues {
         java: java_path.to_string_lossy().to_string(),
@@ -2049,7 +2034,7 @@ fn launch_profile(
     let keepalive_handle = {
         let api_url = config.api_url.clone();
         let token = token.to_string();
-        let nonce = guard.nonce.clone();
+        let nonce = guard.nonce().to_string();
         let stop = keepalive_stop.clone();
         thread::spawn(move || session_keepalive_loop(&api_url, &token, &nonce, &stop))
     };
@@ -2065,11 +2050,8 @@ fn launch_profile(
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о
     // попытке инжекта вместо обычного сообщения о закрытии.
-    if let Some(kick) = &kick_file {
-        if let Some(reason) = anticheat::kick::KickReason::read_from(kick) {
-            let _ = fs::remove_file(kick);
-            return Err(reason.into_alert());
-        }
+    if let Some(reason) = guard.finish() {
+        return Err(reason.into_alert());
     }
 
     Ok(minecraft_exit_message(status))
