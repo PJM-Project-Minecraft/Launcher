@@ -6,6 +6,7 @@
 
 pub(crate) mod agents;
 mod hwid;
+pub(crate) mod inject;
 pub mod kick;
 pub(crate) mod manifest;
 mod scan;

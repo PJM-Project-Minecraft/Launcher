@@ -1980,42 +1980,19 @@ fn launch_profile(
         );
     }
 
-    // Путь к kick-файлу: Java-агент пишет сюда причину перед убийством JVM, лаунчер
-    // читает его после выхода игры, чтобы показать уведомление о попытке инжекта.
+    // Инжект агентов античита в начало jvm_args. Только если handshake/init выдал токен —
+    // иначе агенты бессильны, а сессия не пройдёт verified-гейт на join. Порядок флагов:
+    // native, затем agent (для JVM порядок -D/-javaagent/-agentpath до главного класса не важен).
     let mut kick_file: Option<PathBuf> = None;
-
-    // Инжект агентов античита. Только если handshake/init выдал токен — иначе агенты
-    // бессильны, а сессия не пройдёт verified-гейт на join.
     if !guard.launch_token.is_empty() {
-        // Нативный JVMTI-агент (M4): anti-inject/anti-debug + flag-файл для Java-агента.
-        // Также запрещаем поздний attach к JVM (anti late-injection).
-        let native_sha = ac_manifest.as_ref().and_then(|m| m.native_sha());
-        if let Some(native) = anticheat::agents::ensure_native(config, native_sha)? {
-            let flag = native.with_file_name("ac_native.flag");
-            let _ = fs::remove_file(&flag); // свежий старт: убираем прошлый флаг
-            // КРИТИЧНО: чистим и файл событий, иначе Java-поллер при новом запуске
-            // перечитает старые детекты прошлой (читерской) сессии и кикнет чистую игру.
-            let _ = fs::remove_file(native.with_file_name("ac_native.flag.events"));
-            jvm_args.insert(0, "-XX:+DisableAttachMechanism".to_string());
-            jvm_args.insert(1, format!("-Dac.native.flag={}", flag.to_string_lossy()));
-            jvm_args.insert(
-                2,
-                format!("-agentpath:{}={}", native.to_string_lossy(), flag.to_string_lossy()),
-            );
-        }
-
-        // Java-агент (M3): confirm + рантайм-скан классов/модов + heartbeat.
-        let agent_sha = ac_manifest.as_ref().and_then(|m| m.agent_sha());
-        if let Some(agent) = anticheat::agents::ensure_agent(config, agent_sha)? {
-            let kick = agent.with_file_name("ac_kick.flag");
-            let _ = fs::remove_file(&kick); // свежий старт
-            kick_file = Some(kick.clone());
-            jvm_args.insert(0, format!("-Dac.token={}", guard.launch_token));
-            jvm_args.insert(1, format!("-Dac.url={}", config.api_url.trim_end_matches('/')));
-            jvm_args.insert(2, format!("-Dac.kickfile={}", kick.to_string_lossy()));
-            jvm_args.insert(3, format!("-Dac.challenge={}", guard.challenge));
-            jvm_args.insert(4, format!("-javaagent:{}", agent.to_string_lossy()));
-        }
+        let plan = anticheat::inject::build(
+            &guard.launch_token,
+            &guard.challenge,
+            ac_manifest.as_ref(),
+            config,
+        )?;
+        kick_file = plan.kick_file;
+        jvm_args.splice(0..0, plan.args);
     }
 
     let values = PlaceholderValues {
