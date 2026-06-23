@@ -4,6 +4,7 @@
 //!
 //! Инжект агентов и привязка launch-token к игровой сессии добавятся в M2–M4.
 
+pub(crate) mod agents;
 mod hwid;
 pub(crate) mod manifest;
 mod scan;

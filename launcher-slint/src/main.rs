@@ -1339,61 +1339,6 @@ fn ensure_authlib_injector(
     artifacts::ensure(&client, &url, &path, &dir, expected_sha).map_err(|e| e.message())
 }
 
-// Гарантирует наличие agent.jar античита в служебной папке со сверкой SHA-256 из
-// манифеста. Всегда пытается скачать свежую версию (jar маленький), при ошибке — кэш.
-// Err — подмена (блок запуска); Ok(None) — недоступен (fail-open оффлайн).
-fn ensure_agent_jar(
-    config: &AppConfig,
-    expected_sha: Option<&str>,
-) -> Result<Option<PathBuf>, String> {
-    let Some(dir) = project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
-        return Ok(None);
-    };
-    let path = dir.join("anticheat-agent.jar");
-    let url = format!(
-        "{}/api/anticheat/agent.jar",
-        config.api_url.trim_end_matches('/')
-    );
-    let client = download_client()?;
-    artifacts::ensure(&client, &url, &path, &dir, expected_sha).map_err(|e| e.message())
-}
-
-// Имя нативной JVMTI-библиотеки и токен ОС для эндпоинта раздачи. None — ОС без
-// собранной нативной части (агент тогда не инжектится, его отсутствие зафиксирует
-// Java-агент как детект).
-fn native_agent_target() -> Option<(&'static str, &'static str)> {
-    if cfg!(target_os = "linux") {
-        Some(("linux", "libanticheat.so"))
-    } else if cfg!(target_os = "windows") {
-        Some(("windows", "anticheat.dll"))
-    } else {
-        None
-    }
-}
-
-// Гарантирует наличие нативной библиотеки античита в служебной папке (качает с
-// бэкенда по текущей ОС) со сверкой SHA-256. Err — подмена (блок); Ok(None) — нет
-// нативной части для этой ОС или недоступна (fail-open).
-fn ensure_native_agent(
-    config: &AppConfig,
-    expected_sha: Option<&str>,
-) -> Result<Option<PathBuf>, String> {
-    let Some((os_token, file_name)) = native_agent_target() else {
-        return Ok(None);
-    };
-    let Some(dir) = project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
-        return Ok(None);
-    };
-    let path = dir.join(file_name);
-    let url = format!(
-        "{}/api/anticheat/native/{}",
-        config.api_url.trim_end_matches('/'),
-        os_token
-    );
-    let client = download_client()?;
-    artifacts::ensure(&client, &url, &path, &dir, expected_sha).map_err(|e| e.message())
-}
-
 // После закрытия игры гасим accessToken, чтобы скопированную команду запуска
 // нельзя было переиспользовать позже. Best-effort: ошибки игнорируем.
 fn invalidate_yggdrasil_session(config: &AppConfig, access_token: &str) {
@@ -2048,7 +1993,7 @@ fn launch_profile(
         // Нативный JVMTI-агент (M4): anti-inject/anti-debug + flag-файл для Java-агента.
         // Также запрещаем поздний attach к JVM (anti late-injection).
         let native_sha = ac_manifest.as_ref().and_then(|m| m.native_sha());
-        if let Some(native) = ensure_native_agent(config, native_sha)? {
+        if let Some(native) = anticheat::agents::ensure_native(config, native_sha)? {
             let flag = native.with_file_name("ac_native.flag");
             let _ = fs::remove_file(&flag); // свежий старт: убираем прошлый флаг
             // КРИТИЧНО: чистим и файл событий, иначе Java-поллер при новом запуске
@@ -2064,7 +2009,7 @@ fn launch_profile(
 
         // Java-агент (M3): confirm + рантайм-скан классов/модов + heartbeat.
         let agent_sha = ac_manifest.as_ref().and_then(|m| m.agent_sha());
-        if let Some(agent) = ensure_agent_jar(config, agent_sha)? {
+        if let Some(agent) = anticheat::agents::ensure_agent(config, agent_sha)? {
             let kick = agent.with_file_name("ac_kick.flag");
             let _ = fs::remove_file(&kick); // свежий старт
             kick_file = Some(kick.clone());
