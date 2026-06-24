@@ -7,13 +7,17 @@ use serde::Deserialize;
 use super::scan;
 use crate::{http_client, AppConfig};
 
-/// Сигнатура из блэклиста (`/api/anticheat/blacklist`).
+/// Сигнатура из блэклиста (`/api/anticheat/blacklist`). match_type — аддитивное поле
+/// (serde default): на старом сервере без него десериализация не ломается. Прочие поля
+/// JSON (hashHex и т.п.) serde игнорирует — лаунчер матчит процессы только по pattern.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Signature {
     pub kind: String,
     pub pattern: String,
     #[serde(default)]
     pub severity: i32,
+    #[serde(rename = "matchType", default)]
+    pub match_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,7 +72,7 @@ pub fn fetch_blacklist(config: &AppConfig, token: &str) -> Result<Vec<Signature>
 pub fn init(
     config: &AppConfig,
     token: &str,
-    hwid_hash: &str,
+    components: &super::hwid::HwidComponents,
     detections: &[scan::Detection],
 ) -> InitOutcome {
     let Ok(client) = http_client() else {
@@ -78,8 +82,11 @@ pub fn init(
         "{}/api/anticheat/handshake/init",
         config.api_url.trim_end_matches('/')
     );
+    // hwidHash — агрегат (совместимость со старыми банами); hwidComponents — раздельные
+    // хеши для fuzzy-матча. Старый сервер hwidComponents игнорирует.
     let body = serde_json::json!({
-        "hwidHash": hwid_hash,
+        "hwidHash": components.aggregate,
+        "hwidComponents": components,
         "detections": detections,
     });
     let Ok(response) = client

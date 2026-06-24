@@ -168,20 +168,17 @@ func TestAutoBanOnHighSeverity(t *testing.T) {
 	svc := NewService(db, "secret", true, nil, "") // autoBan включён
 	ctx := context.Background()
 
-	// Severity теперь СЕРВЕРНАЯ: заводим сигнатуру блэклиста c severity 9.
-	if _, err := svc.CreateSignature(ctx, models.CheatSignature{Kind: "jar", Pattern: "baritone", Severity: 9, Enabled: true}); err != nil {
-		t.Fatalf("signature: %v", err)
-	}
-
 	res, _ := svc.InitHandshake(ctx, "uuid-5", "Mal", "hwid-5", nil)
 	claims, _ := svc.VerifyToken(res.LaunchToken)
-	// Клиент шлёт заниженную severity=1 — сервер обязан её проигнорировать и взять 9 из блэклиста.
-	sev, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone-1.21.jar", Severity: 1})
+	// inject — hard-детект с серверной severity 9. Клиент шлёт заниженную severity=1 —
+	// сервер обязан её проигнорировать (server-authoritative). Авто-бан только за hard:
+	// сигнатурные substring-матчи (jar/class/process) на Фазе 0 — soft и сами не банят.
+	sev, _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "inject", Signature: "foreign-agent", Severity: 1})
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
 	if sev < autoBanSeverity {
-		t.Fatalf("серверная severity должна быть >= %d (из блэклиста), получено %d", autoBanSeverity, sev)
+		t.Fatalf("серверная severity inject должна быть >= %d, получено %d", autoBanSeverity, sev)
 	}
 
 	var accBans, hwidBans int64
@@ -202,15 +199,13 @@ func TestAutoBanEscalatesToPermanent(t *testing.T) {
 	db := newTestDB(t)
 	svc := NewService(db, "secret", true, nil, "")
 	ctx := context.Background()
-	if _, err := svc.CreateSignature(ctx, models.CheatSignature{Kind: "jar", Pattern: "baritone", Severity: 9, Enabled: true}); err != nil {
-		t.Fatalf("signature: %v", err)
-	}
 	// Одна сессия (claims переиспользуются): RecordDetection не проверяет баны, в отличие
 	// от InitHandshake, поэтому эскалация воспроизводится в рамках одного игрового запуска.
+	// Два разных hard-детекта (signature различается → не срабатывает дедуп).
 	res, _ := svc.InitHandshake(ctx, "uuid-esc", "Mal", "hwid-esc", nil)
 	claims, _ := svc.VerifyToken(res.LaunchToken)
 
-	if _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone-a.jar"}); err != nil {
+	if _, _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "inject", Signature: "foreign-agent"}); err != nil {
 		t.Fatalf("detect1: %v", err)
 	}
 	var b1 models.AccountBan
@@ -219,7 +214,7 @@ func TestAutoBanEscalatesToPermanent(t *testing.T) {
 		t.Fatal("первый авто-бан должен быть временным (ExpiresAt != nil)")
 	}
 
-	if _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "jar", Signature: "baritone-b.jar"}); err != nil {
+	if _, _, err := svc.RecordDetection(ctx, claims, DetectionInput{Type: "inject", Signature: "illegal-class-name"}); err != nil {
 		t.Fatalf("detect2: %v", err)
 	}
 	var b2 models.AccountBan
@@ -377,7 +372,7 @@ func TestDetectKickStillInvalidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if kick, _ := svc.EvaluateKick(claims, 9, "inject"); !kick {
+	if kick, _ := svc.EvaluateKick(claims, 9, "hard", "inject"); !kick {
 		t.Fatal("inject severity 9 должен кикать")
 	}
 	if v.IsActiveByNonce(res.Nonce) {
@@ -443,5 +438,25 @@ func TestServerSeverityForSystemType(t *testing.T) {
 	// Неизвестная сигнатура без блэклиста — дефолт.
 	if got := svc.resolveSeverity(ctx, "process", "unknown.exe"); got != defaultDetectionSeverity {
 		t.Fatalf("несовпавшая сигнатура должна давать дефолт %d, получено %d", defaultDetectionSeverity, got)
+	}
+}
+
+// Сигнатурный матч берёт severity из блэклиста (server-authoritative), игнорируя клиента.
+func TestServerSeverityFromBlacklist(t *testing.T) {
+	// Изолированная БД: сигнатура не должна протечь в другие тесты пакета (shared cache).
+	db, err := gorm.Open(sqlite.Open("file:sev_blacklist_test?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.AutoMigrate(&models.CheatSignature{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc := NewService(db, "secret", false, nil, "")
+	ctx := context.Background()
+	if _, err := svc.CreateSignature(ctx, models.CheatSignature{Kind: "jar", Pattern: "baritone", Severity: 9, Enabled: true}); err != nil {
+		t.Fatalf("signature: %v", err)
+	}
+	if got := svc.resolveSeverity(ctx, "jar", "baritone-1.21.jar"); got != 9 {
+		t.Fatalf("jar-сигнатура из блэклиста должна давать severity 9, получено %d", got)
 	}
 }

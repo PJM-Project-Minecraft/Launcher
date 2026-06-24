@@ -21,7 +21,12 @@ function severityTone(severity: number): 'danger' | 'warn' | 'default' {
   return 'default';
 }
 
-const emptyForm = { kind: 'process', pattern: '', hashHex: '', severity: 5, note: '' };
+const emptyForm = { kind: 'process', pattern: '', matchType: 'substring', hashHex: '', severity: 5, note: '' };
+
+// substring — soft (возможен ложняк, в review-очередь); exact/word/regex/hash — hard.
+function matchTypeTone(matchType: string): 'danger' | 'default' {
+  return matchType === 'substring' || matchType === '' ? 'default' : 'danger';
+}
 
 export function SignaturesTab({
   signatures,
@@ -73,7 +78,7 @@ export function SignaturesTab({
   }
 
   if (loading) {
-    return <SkeletonTable rows={5} cols={6} />;
+    return <SkeletonTable rows={5} cols={7} />;
   }
 
   return (
@@ -85,6 +90,7 @@ export function SignaturesTab({
           <thead>
             <tr>
               <Th>Тип</Th>
+              <Th>Способ</Th>
               <Th>Паттерн / хеш</Th>
               <Th>Severity</Th>
               <Th>Заметка</Th>
@@ -96,6 +102,9 @@ export function SignaturesTab({
             {signatures.map((s) => (
               <tr key={s.id}>
                 <Td className="font-medium">{s.kind}</Td>
+                <Td>
+                  <Badge tone={matchTypeTone(s.matchType)}>{s.matchType || 'substring'}</Badge>
+                </Td>
                 <Td className="font-mono text-xs text-fg-secondary" title={s.pattern || s.hashHex}>
                   {s.pattern || `${s.hashHex.slice(0, 16)}…`}
                 </Td>
@@ -119,7 +128,7 @@ export function SignaturesTab({
 
       <Card>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-fg-secondary">Новая сигнатура</h2>
-        <form onSubmit={createSignature} className="grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[auto_1fr_1fr_auto_1fr_auto]">
+        <form onSubmit={createSignature} className="grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Field label="Тип">
             <Select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
               <option value="process">process</option>
@@ -128,38 +137,47 @@ export function SignaturesTab({
               <option value="file">file</option>
             </Select>
           </Field>
-          <Field label="Паттерн (имя/подстрока)">
-            <Input
-              value={form.pattern}
-              onChange={(e) => setForm({ ...form, pattern: e.target.value })}
-              placeholder="cheatengine"
-            />
-          </Field>
-          <Field label="SHA-256 (опц.)">
-            <Input
-              value={form.hashHex}
-              onChange={(e) => setForm({ ...form, hashHex: e.target.value })}
-              placeholder="hex"
-            />
+          <Field label="Способ матча" hint="substring — soft (review); exact/word/regex/hash — hard">
+            <Select value={form.matchType} onChange={(e) => setForm({ ...form, matchType: e.target.value })}>
+              <option value="substring">substring (soft)</option>
+              <option value="exact">exact (hard)</option>
+              <option value="word">word (hard)</option>
+              <option value="regex">regex (hard)</option>
+              <option value="hash">hash (hard)</option>
+              <option value="string-literal">string-literal (hard)</option>
+            </Select>
           </Field>
           <Field label="Severity">
             <Input
               type="number"
               min={1}
               max={10}
-              className="w-20"
               value={form.severity}
               onChange={(e) => setForm({ ...form, severity: Number(e.target.value) })}
             />
           </Field>
-          <Field label="Заметка">
+          <Field label="Паттерн (имя / подстрока / regex)" className="sm:col-span-2">
+            <Input
+              value={form.pattern}
+              onChange={(e) => setForm({ ...form, pattern: e.target.value })}
+              placeholder="cheatengine"
+            />
+          </Field>
+          <Field label="SHA-256 (для способа hash)">
+            <Input
+              value={form.hashHex}
+              onChange={(e) => setForm({ ...form, hashHex: e.target.value })}
+              placeholder="hex"
+            />
+          </Field>
+          <Field label="Заметка" className="sm:col-span-2">
             <Input
               value={form.note}
               onChange={(e) => setForm({ ...form, note: e.target.value })}
               placeholder="комментарий"
             />
           </Field>
-          <Button type="submit" variant="primary" loading={submitting}>
+          <Button type="submit" variant="primary" loading={submitting} className="lg:self-end">
             Добавить
           </Button>
         </form>

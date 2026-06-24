@@ -80,6 +80,8 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin := app.Group("/api/admin/anticheat")
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/detections", h.listDetections)
+	admin.Patch("/detections/:id", h.updateDetectionStatus)
+	admin.Get("/stats", h.signatureStats)
 	admin.Get("/bans/hwid", h.listHwidBans)
 	admin.Get("/bans/account", h.listAccountBans)
 	admin.Post("/bans/hwid", h.banHwid)
@@ -93,8 +95,9 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 }
 
 type initRequest struct {
-	HwidHash   string           `json:"hwidHash"`
-	Detections []DetectionInput `json:"detections"`
+	HwidHash       string           `json:"hwidHash"`
+	HwidComponents HwidComponents   `json:"hwidComponents"`
+	Detections     []DetectionInput `json:"detections"`
 }
 
 func (h Handler) init(c fiber.Ctx) error {
@@ -131,7 +134,7 @@ func (h Handler) init(c fiber.Ctx) error {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
 	}
 	userUUID := yggdrasil.NormalizeUUID(user.ProviderUUID, user.Login)
-	result, err := h.service.InitHandshake(c.Context(), userUUID, user.Login, req.HwidHash, req.Detections)
+	result, err := h.service.InitHandshakeWithComponents(c.Context(), userUUID, user.Login, req.HwidHash, req.HwidComponents, req.Detections)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Ошибка инициализации"})
 	}
@@ -194,12 +197,12 @@ func (h Handler) detect(c fiber.Ctx) error {
 		Severity:  req.Severity, // игнорируется сервером — severity вычисляется в RecordDetection
 		Details:   req.Details,
 	}
-	severity, err := h.service.RecordDetection(c.Context(), claims, input)
+	severity, confidence, err := h.service.RecordDetection(c.Context(), claims, input)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось записать детект"})
 	}
-	// Решаем, кикать ли игрока (по СЕРВЕРНОЙ severity): ответ читает агент и убивает JVM.
-	if kick, reason := h.service.EvaluateKick(claims, severity, input.Type); kick {
+	// Решаем, кикать ли игрока (по СЕРВЕРНЫМ severity+confidence): ответ читает агент и убивает JVM.
+	if kick, reason := h.service.EvaluateKick(claims, severity, confidence, input.Type); kick {
 		return c.JSON(fiber.Map{"action": "kick", "reason": reason})
 	}
 	return c.JSON(fiber.Map{"action": "none"})
@@ -323,11 +326,47 @@ func (h Handler) blacklist(c fiber.Ctx) error {
 
 func (h Handler) listDetections(c fiber.Ctx) error {
 	limit, _ := strconv.Atoi(c.Query("limit", ""))
-	items, err := h.service.ListDetections(c.Context(), limit)
+	minSev, _ := strconv.Atoi(c.Query("minSeverity", ""))
+	filter := DetectionFilter{
+		Status:      c.Query("status", ""),
+		Confidence:  c.Query("confidence", ""),
+		MinSeverity: minSev,
+	}
+	items, err := h.service.ListDetections(c.Context(), limit, filter)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось получить детекты"})
 	}
 	return c.JSON(items)
+}
+
+// updateDetectionStatus меняет статус разбора детекта в review-очереди (admin).
+func (h Handler) updateDetectionStatus(c fiber.Ctx) error {
+	admin, _ := auth.CurrentUser(c)
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind().Body(&req); err != nil || req.Status == "" {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Укажите status"})
+	}
+	if err := h.service.UpdateDetectionStatus(c.Context(), c.Params("id"), req.Status, admin.Login); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Недопустимый статус или детект не найден"})
+	}
+	return c.SendStatus(http.StatusNoContent)
+}
+
+// signatureStats — агрегированная статистика детектов по сигнатурам за N дней (admin).
+// Инструмент оценки false-positive rate перед включением авто-бана.
+func (h Handler) signatureStats(c fiber.Ctx) error {
+	days, _ := strconv.Atoi(c.Query("days", "7"))
+	if days <= 0 {
+		days = 7
+	}
+	since := time.Now().AddDate(0, 0, -days)
+	stats, err := h.service.SignatureStats(c.Context(), since)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось получить статистику"})
+	}
+	return c.JSON(stats)
 }
 
 func (h Handler) listHwidBans(c fiber.Ctx) error {
@@ -438,12 +477,13 @@ func (h Handler) deleteSignature(c fiber.Ctx) error {
 // normalizeSignatureUpdates переводит JSON-ключи (camelCase) в имена колонок GORM.
 func normalizeSignatureUpdates(in map[string]any) map[string]any {
 	mapping := map[string]string{
-		"kind":     "kind",
-		"pattern":  "pattern",
-		"hashHex":  "hash_hex",
-		"severity": "severity",
-		"note":     "note",
-		"enabled":  "enabled",
+		"kind":      "kind",
+		"pattern":   "pattern",
+		"matchType": "match_type",
+		"hashHex":   "hash_hex",
+		"severity":  "severity",
+		"note":      "note",
+		"enabled":   "enabled",
 	}
 	out := make(map[string]any, len(in))
 	for k, v := range in {

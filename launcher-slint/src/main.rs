@@ -2039,6 +2039,10 @@ fn launch_profile(
         thread::spawn(move || session_keepalive_loop(&api_url, &token, &nonce, &stop))
     };
 
+    // In-game скан процессов: ловит чит-софт, запущенный уже ПОСЛЕ старта игры (pre-launch
+    // скан его не видел). Делит stop-флаг с keepalive — оба гаснут на закрытии игры.
+    let ingame_scan_handle = anticheat::spawn_ingame_scan(config, &guard, keepalive_stop.clone());
+
     let status = child
         .wait()
         .map_err(|err| format!("Не удалось дождаться закрытия Minecraft: {}", err))?;
@@ -2046,6 +2050,7 @@ fn launch_profile(
     // Останавливаем keepalive до инвалидации, чтобы он не продлил уже погашенную сессию.
     keepalive_stop.store(true, Ordering::Relaxed);
     let _ = keepalive_handle.join();
+    let _ = ingame_scan_handle.join();
     invalidate_yggdrasil_session(config, &session.access_token);
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о

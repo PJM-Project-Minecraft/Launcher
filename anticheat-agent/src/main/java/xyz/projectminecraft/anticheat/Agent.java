@@ -36,7 +36,23 @@ public final class Agent {
         "wurst", "meteorclient", "baritone", "xray", "killaura",
         "aimbot", "liquidbounce", "impactclient", "sigmaclient", "huzuni"
     );
-    private static volatile java.util.Set<String> markers = DEFAULT_MARKERS;
+
+    // Правило блэклиста: паттерн + способ матча (substring|exact|word|regex|hash) + hash
+    // (SHA-256 байткода для match_type=hash). Дефолтный seed — substring по именам;
+    // актуальный набор тянется с сервера через /rules и атомарно заменяет rules.
+    private record Rule(String pattern, String matchType, String hash) {}
+
+    private static List<Rule> defaultRules() {
+        List<Rule> r = new ArrayList<>();
+        for (String m : DEFAULT_MARKERS) {
+            r.add(new Rule(m, "substring", ""));
+        }
+        return r;
+    }
+
+    private static volatile List<Rule> rules = defaultRules();
+    private static final java.util.Map<String, java.util.regex.Pattern> REGEX_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
     private static volatile long blacklistVersion = -1;
 
     private static volatile String token = "";
@@ -172,7 +188,15 @@ public final class Agent {
             if (cs == null || cs.getLocation() == null) {
                 return "";
             }
-            byte[] data = Files.readAllBytes(Paths.get(cs.getLocation().toURI()));
+            return sha256hex(Files.readAllBytes(Paths.get(cs.getLocation().toURI())));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** SHA-256 байтов в hex (нижний регистр). Пустая строка при ошибке. */
+    private static String sha256hex(byte[] data) {
+        try {
             byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(data);
             StringBuilder sb = new StringBuilder(h.length * 2);
             for (byte b : h) {
@@ -299,18 +323,202 @@ public final class Agent {
         }
     }
 
-    /** Сверяет имя с маркерами и, при совпадении, шлёт детект (без дублей). */
+    /** Сверяет имя с правилами блэклиста по их match_type и, при совпадении, шлёт детект. */
     private static void checkAndReport(String kind, String name) {
         String lower = name.toLowerCase(Locale.ROOT);
-        for (String marker : markers) {
-            if (lower.contains(marker)) {
-                String key = kind + ":" + marker;
+        for (Rule rule : rules) {
+            if (ruleMatches(rule, lower)) {
+                String key = kind + ":" + rule.pattern();
                 if (reported.contains(key)) {
                     return;
                 }
                 reported.add(key);
-                detect(kind, marker, name);
+                detect(kind, rule.pattern(), name);
                 return;
+            }
+        }
+    }
+
+    /** Применяет match_type правила к имени (нижний регистр). hash — про байткод, не имя (Фаза 2). */
+    private static boolean ruleMatches(Rule rule, String lower) {
+        String p = rule.pattern();
+        if (p.isEmpty()) {
+            return false;
+        }
+        switch (rule.matchType()) {
+            case "exact":
+                return lower.equals(p);
+            case "word":
+                return matchesWord(lower, p);
+            case "regex":
+                return matchesRegex(p, lower);
+            case "hash":
+                return false;
+            default: // substring (вкл. пустой match_type)
+                return lower.contains(p);
+        }
+    }
+
+    /** true, если needle встречается в haystack как отдельное слово (границы — края/не-слово). */
+    private static boolean matchesWord(String haystack, String needle) {
+        int nlen = needle.length();
+        if (nlen == 0 || nlen > haystack.length()) {
+            return false;
+        }
+        int from = 0;
+        int i;
+        while ((i = haystack.indexOf(needle, from)) >= 0) {
+            boolean leftOk = i == 0 || !isWordChar(haystack.charAt(i - 1));
+            int endPos = i + nlen;
+            boolean rightOk = endPos == haystack.length() || !isWordChar(haystack.charAt(endPos));
+            if (leftOk && rightOk) {
+                return true;
+            }
+            from = i + 1;
+        }
+        return false;
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    private static boolean matchesRegex(String pattern, String lower) {
+        try {
+            return REGEX_CACHE.computeIfAbsent(pattern, java.util.regex.Pattern::compile)
+                .matcher(lower).find();
+        } catch (Exception e) {
+            return false; // невалидный regex (сервер валидирует при сохранении) — не матчим
+        }
+    }
+
+    private static boolean hasHashRules() {
+        for (Rule r : rules) {
+            if ("hash".equals(r.matchType()) && !r.hash().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Считает SHA-256 байткода и сверяет с hash-правилами. Бьёт обфускацию имён: хеш не
+     *  зависит от имени класса. Хеширует только при наличии hash-правил (иначе зря грузим
+     *  каждый класс на старте). */
+    private static void checkClassHash(byte[] classfileBuffer, String className) {
+        if (classfileBuffer == null || classfileBuffer.length == 0 || !hasHashRules()) {
+            return;
+        }
+        matchHash(sha256hex(classfileBuffer), className);
+    }
+
+    /** Сверяет готовый hash с hash-правилами; при совпадении — детект (без дублей). */
+    private static void matchHash(String hash, String className) {
+        if (hash == null || hash.isEmpty()) {
+            return;
+        }
+        for (Rule r : rules) {
+            if ("hash".equals(r.matchType()) && hash.equalsIgnoreCase(r.hash())) {
+                String key = "classhash:" + hash;
+                if (reported.contains(key)) {
+                    return;
+                }
+                reported.add(key);
+                detectHash(className, hash);
+                return;
+            }
+        }
+    }
+
+    /** Детект по hash байткода: сервер берёт severity из hash-сигнатуры (confidence hard). */
+    private static void detectHash(String className, String hash) {
+        String name = (className == null || className.isEmpty()) ? hash : className;
+        String body = "{"
+            + "\"launchToken\":\"" + escape(token) + "\","
+            + "\"source\":\"java\","
+            + "\"type\":\"class\","
+            + "\"signature\":\"" + escape(name) + "\","
+            + "\"severity\":9,"
+            + "\"details\":{\"name\":\"" + escape(name) + "\",\"hash\":\"" + escape(hash) + "\"}"
+            + "}";
+        String resp = postRead("/api/anticheat/detect", body);
+        if (resp != null && resp.contains("\"action\":\"kick\"")) {
+            kickGame("class-hash:" + name);
+        }
+    }
+
+    private static boolean hasStringRules() {
+        for (Rule r : rules) {
+            if ("string-literal".equals(r.matchType()) && !r.pattern().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Парсит constant pool класса и возвращает все CONSTANT_Utf8-строки. Best-effort:
+     *  при первой аномалии формата возвращает уже собранное. */
+    private static List<String> extractStrings(byte[] buf) {
+        List<String> out = new ArrayList<>();
+        if (buf == null || buf.length < 10) {
+            return out;
+        }
+        if ((buf[0] & 0xff) != 0xCA || (buf[1] & 0xff) != 0xFE
+                || (buf[2] & 0xff) != 0xBA || (buf[3] & 0xff) != 0xBE) {
+            return out;
+        }
+        int cpCount = ((buf[8] & 0xff) << 8) | (buf[9] & 0xff);
+        int pos = 10;
+        for (int i = 1; i < cpCount && pos < buf.length; i++) {
+            int tag = buf[pos++] & 0xff;
+            switch (tag) {
+                case 1: { // Utf8
+                    if (pos + 2 > buf.length) {
+                        return out;
+                    }
+                    int len = ((buf[pos] & 0xff) << 8) | (buf[pos + 1] & 0xff);
+                    pos += 2;
+                    if (pos + len > buf.length) {
+                        return out;
+                    }
+                    out.add(new String(buf, pos, len, java.nio.charset.StandardCharsets.UTF_8));
+                    pos += len;
+                    break;
+                }
+                case 7: case 8: case 16: case 19: case 20: pos += 2; break;
+                case 15: pos += 3; break;
+                case 3: case 4: case 9: case 10: case 11: case 12: case 17: case 18: pos += 4; break;
+                case 5: case 6: pos += 8; i++; break; // Long/Double — два слота CP
+                default: return out; // неизвестный tag — дальше парсить небезопасно
+            }
+        }
+        return out;
+    }
+
+    /** Ищет сигнатурные строки в constant pool класса. Устойчивее hash к рекомпиляции:
+     *  имена/URL чита в строках переживают пересборку. Парсит CP только при наличии правил. */
+    private static void checkClassStrings(byte[] buf, String className) {
+        if (buf == null || buf.length == 0 || !hasStringRules()) {
+            return;
+        }
+        List<String> strings = null;
+        for (Rule r : rules) {
+            if (!"string-literal".equals(r.matchType()) || r.pattern().isEmpty()) {
+                continue;
+            }
+            if (strings == null) {
+                strings = extractStrings(buf);
+            }
+            for (String s : strings) {
+                if (s.toLowerCase(Locale.ROOT).contains(r.pattern())) {
+                    String key = "strlit:" + r.pattern();
+                    if (reported.contains(key)) {
+                        return;
+                    }
+                    reported.add(key);
+                    // Совпавший паттерн как signature — сервер exact-сверит (severity hard).
+                    detect("class", r.pattern(), "string-literal:" + className);
+                    return;
+                }
             }
         }
     }
@@ -389,6 +597,14 @@ public final class Agent {
                     case "debugger-runtime" -> detect("debugger", "debugger-runtime", "native:" + name);
                     case "module-unknown" -> detect("module-unknown", "module-unknown", "native:" + name);
                     case "ld-preload" -> detect("ld-preload", "ld-preload", "native:" + name);
+                    case "class-hash" -> {
+                        // Нативка хеширует bootstrap-классы, недоступные Java-трансформеру:
+                        // "class-hash\t<sha256>\t<className>". Сверяем с hash-правилами.
+                        int t = name.indexOf('\t');
+                        String h = (t > 0 ? name.substring(0, t) : name).trim().toLowerCase(Locale.ROOT);
+                        String cls = t > 0 ? name.substring(t + 1) : "";
+                        matchHash(h, cls);
+                    }
                     default -> detect("inject", type, "native:" + name); // маркеры читов в именах классов
                 }
             }
@@ -502,12 +718,22 @@ public final class Agent {
                 return;
             }
             String body = resp.body();
-            java.util.Set<String> patterns = parsePatterns(body);
-            if (!patterns.isEmpty()) {
-                // Объединяем с дефолтным seed, чтобы усечённый/частичный блэклист не ослаблял детект.
-                java.util.Set<String> merged = new java.util.HashSet<>(DEFAULT_MARKERS);
-                merged.addAll(patterns);
-                markers = merged;
+            List<Rule> parsed = parseRules(body);
+            if (!parsed.isEmpty()) {
+                // Серверные правила (с match_type) + дефолтный seed для паттернов, которых
+                // сервер не прислал: усечённый блэклист не должен ослаблять детект.
+                java.util.Set<String> seen = new java.util.HashSet<>();
+                List<Rule> merged = new ArrayList<>();
+                for (Rule r : parsed) {
+                    merged.add(r);
+                    seen.add(r.pattern());
+                }
+                for (String m : DEFAULT_MARKERS) {
+                    if (!seen.contains(m)) {
+                        merged.add(new Rule(m, "substring", ""));
+                    }
+                }
+                rules = merged;
             }
             long v = parseLongField(body, "version");
             if (v >= 0) {
@@ -545,33 +771,63 @@ public final class Agent {
         }
     }
 
-    /** Извлекает все значения "pattern":"..." из ответа /rules (lowercase). */
-    private static java.util.Set<String> parsePatterns(String body) {
-        java.util.Set<String> out = new java.util.HashSet<>();
-        String key = "\"pattern\":\"";
+    /** Читает JSON-строку с позиции pos (сразу после открывающей кавычки). Возвращает
+     *  декодированное значение; endPos[0] — индекс закрывающей кавычки. */
+    private static String readJsonStringAt(String body, int pos, int[] endPos) {
+        StringBuilder sb = new StringBuilder();
+        int end = pos;
+        while (end < body.length()) {
+            char c = body.charAt(end);
+            if (c == '\\' && end + 1 < body.length()) {
+                sb.append(body.charAt(end + 1));
+                end += 2;
+                continue;
+            }
+            if (c == '"') {
+                break;
+            }
+            sb.append(c);
+            end++;
+        }
+        endPos[0] = end;
+        return sb.toString();
+    }
+
+    /** Извлекает правила {pattern, matchType, hash} из ответа /rules. matchType и hash
+     *  каждого объекта идут после его pattern (порядок полей RuleSignature) и до следующего
+     *  pattern. Hash-правила приходят с пустым pattern — берём их по непустому hash. */
+    private static List<Rule> parseRules(String body) {
+        List<Rule> out = new ArrayList<>();
+        String patKey = "\"pattern\":\"";
+        String mtKey = "\"matchType\":\"";
+        String hashKey = "\"hash\":\"";
         int idx = 0;
-        while ((idx = body.indexOf(key, idx)) >= 0) {
-            idx += key.length();
-            StringBuilder sb = new StringBuilder();
-            int end = idx;
-            while (end < body.length()) {
-                char c = body.charAt(end);
-                if (c == '\\' && end + 1 < body.length()) {
-                    sb.append(body.charAt(end + 1));
-                    end += 2;
-                    continue;
+        int[] end = new int[1];
+        while ((idx = body.indexOf(patKey, idx)) >= 0) {
+            int patStart = idx + patKey.length();
+            String pattern = readJsonStringAt(body, patStart, end).trim().toLowerCase(Locale.ROOT);
+            idx = end[0];
+            int nextPat = body.indexOf(patKey, idx);
+
+            String matchType = "substring";
+            int mtIdx = body.indexOf(mtKey, idx);
+            if (mtIdx >= 0 && (nextPat < 0 || mtIdx < nextPat)) {
+                String mt = readJsonStringAt(body, mtIdx + mtKey.length(), end).trim().toLowerCase(Locale.ROOT);
+                if (!mt.isEmpty()) {
+                    matchType = mt;
                 }
-                if (c == '"') {
-                    break;
-                }
-                sb.append(c);
-                end++;
             }
-            String pat = sb.toString().trim().toLowerCase(Locale.ROOT);
-            if (!pat.isEmpty()) {
-                out.add(pat);
+
+            String hash = "";
+            int hIdx = body.indexOf(hashKey, idx);
+            if (hIdx >= 0 && (nextPat < 0 || hIdx < nextPat)) {
+                hash = readJsonStringAt(body, hIdx + hashKey.length(), end).trim();
             }
-            idx = end;
+
+            if (!pattern.isEmpty() || ("hash".equals(matchType) && !hash.isEmpty())) {
+                out.add(new Rule(pattern, matchType, hash));
+            }
+            idx = Math.max(idx, end[0]);
         }
         return out;
     }
@@ -601,13 +857,18 @@ public final class Agent {
         @Override
         public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                                 ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+            String dotName = className == null ? "" : className.replace('/', '.');
             if (className != null) {
                 // Проверяем сырое внутреннее имя (со слэшами) на нелегальные символы.
                 if (isIllegalClassName(className)) {
                     reportIllegalName(className, "transform");
                 }
-                checkAndReport("class", className.replace('/', '.'));
+                checkAndReport("class", dotName);
             }
+            // Hash байткода — даже для className==null (инъекция через defineClass(null,...)).
+            checkClassHash(classfileBuffer, dotName);
+            // Сигнатурные строки в constant pool (устойчивее hash к рекомпиляции).
+            checkClassStrings(classfileBuffer, dotName);
             return null; // null = байткод не изменён
         }
     }

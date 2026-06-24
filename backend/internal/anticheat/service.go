@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +36,10 @@ type SessionVerifier interface {
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
 // блэклиста, управление банами. Подпись launch-token делегируется TokenSigner.
 type Service struct {
-	db          *gorm.DB
-	signer      TokenSigner
-	autoBan     bool
-	verifier    SessionVerifier
+	db           *gorm.DB
+	signer       TokenSigner
+	autoBan      bool
+	verifier     SessionVerifier
 	agentPath    string
 	nativeLinux  string
 	nativeWin    string
@@ -108,11 +109,12 @@ func (s *Service) SetKickSeverity(severity int) {
 // EvaluateKick решает, нужно ли кикнуть игрока за детект, и если да — гасит его
 // игровую сессию (анти-reconnect). Реальный кик из запущенной игры делает агент,
 // убивая JVM; здесь мы дополнительно закрываем сессию на сервере. Возвращает причину.
-func (s *Service) EvaluateKick(claims LaunchClaims, severity int, dtype string) (bool, string) {
-	// Кикаем только за реальную инъекцию/высокую серьёзность. Стартовые сигналы
-	// (tamper "native-agent-missing", debugger) идут с низкой severity и лишь репортятся,
-	// чтобы не выкидывать легитимных игроков, у кого нативный слой не поднялся.
-	kick := severity >= s.kickSeverity || dtype == "inject"
+func (s *Service) EvaluateKick(claims LaunchClaims, severity int, confidence, dtype string) (bool, string) {
+	// inject — всегда kick (явная инъекция / ghost-client). Прочее кикаем по severity,
+	// но ТОЛЬКО hard-детекты: soft-эвристики (tamper "native-agent-missing", debugger,
+	// substring-матчи) не должны выкидывать легитимного игрока, даже если их серверная
+	// severity высока (tamper=8). Это закрывает ложный кик игрока без нативного слоя.
+	kick := dtype == "inject" || (severity >= s.kickSeverity && confidence == "hard")
 	if !kick {
 		return false, ""
 	}
@@ -285,10 +287,14 @@ func (s *Service) BlacklistVersion(ctx context.Context) int64 {
 }
 
 // RuleSignature — облегчённая запись блэклиста для агента (без id/служебных полей).
+// MatchType и Hash — аддитивные поля: старые клиенты (Java parsePatterns берёт только
+// "pattern", Rust Signature имеет serde(default)) их игнорируют и не ломаются.
 type RuleSignature struct {
-	Kind     string `json:"kind"`
-	Pattern  string `json:"pattern"`
-	Severity int    `json:"severity"`
+	Kind      string `json:"kind"`
+	Pattern   string `json:"pattern"`
+	Severity  int    `json:"severity"`
+	MatchType string `json:"matchType"`
+	Hash      string `json:"hash"`
 }
 
 // RulesResponse — ответ /rules: версия + включённые сигнатуры для рантайм-скана агентом.
@@ -305,7 +311,13 @@ func (s *Service) Rules(ctx context.Context) (RulesResponse, error) {
 	}
 	out := RulesResponse{Version: s.BlacklistVersion(ctx), Signatures: make([]RuleSignature, 0, len(sigs))}
 	for _, sig := range sigs {
-		out.Signatures = append(out.Signatures, RuleSignature{Kind: sig.Kind, Pattern: sig.Pattern, Severity: sig.Severity})
+		out.Signatures = append(out.Signatures, RuleSignature{
+			Kind:      sig.Kind,
+			Pattern:   sig.Pattern,
+			Severity:  sig.Severity,
+			MatchType: effectiveMatchType(sig.MatchType),
+			Hash:      sig.HashHex,
+		})
 	}
 	return out, nil
 }
@@ -347,38 +359,188 @@ func normalizeSource(src string) string {
 	}
 }
 
-// resolveSeverity вычисляет серьёзность детекта НА СЕРВЕРЕ, игнорируя клиентское
-// значение. Системные типы — из systemSeverity; сигнатурные — максимальная severity
-// совпавшей записи блэклиста; иначе — defaultDetectionSeverity.
-func (s *Service) resolveSeverity(ctx context.Context, dtype, signature string) int {
-	if sv, ok := systemSeverity[dtype]; ok {
-		return sv
+// detectionConfidence делит детект на hard (высокая уверенность — кандидат на
+// авто-бан/кик) и soft (эвристика, возможен ложняк — пишется, но сам не банит и не
+// кикает; разбирается в review-очереди). hard — системная инъекция/attach (вкл.
+// illegal-class-name и foreign-agent, приходящие как type "inject") и точный
+// сигнатурный матч (exact|word|regex|hash). Substring-матч и стартовые эвристики
+// (tamper, debugger, module-unknown, ld-preload) — soft: легальный игрок не должен
+// от них пострадать.
+func detectionConfidence(dtype, matchType string) string {
+	switch dtype {
+	case "inject", "attach":
+		return "hard"
 	}
-	if sv := s.signatureSeverity(ctx, dtype, signature); sv > 0 {
-		return sv
+	switch matchType {
+	case "exact", "word", "regex", "hash", "string-literal":
+		return "hard"
 	}
-	return defaultDetectionSeverity
+	return "soft"
 }
 
-// signatureSeverity ищет в блэклисте включённые сигнатуры заданного kind, чей Pattern
-// является подстрокой signature, и возвращает максимальную их severity (0 — не найдено).
-func (s *Service) signatureSeverity(ctx context.Context, kind, signature string) int {
-	if signature == "" {
-		return 0
+// resolveSeverity — серверная severity детекта (без match_type/hash; для системных типов
+// и прямого использования в тестах). Обёртка над resolveDetection.
+func (s *Service) resolveSeverity(ctx context.Context, dtype, signature string) int {
+	sev, _ := s.resolveDetection(ctx, dtype, signature, "")
+	return sev
+}
+
+// resolveDetection вычисляет серверную severity И match_type сработавшей сигнатуры,
+// игнорируя клиентское значение. Системные типы — из systemSeverity (match_type пустой,
+// confidence по dtype); hash байткода (если прислан) — из hash-сигнатуры; сигнатурные —
+// из сильнейшего совпадения блэклиста по Pattern; иначе — defaultDetectionSeverity.
+func (s *Service) resolveDetection(ctx context.Context, dtype, signature, hash string) (int, string) {
+	if sv, ok := systemSeverity[dtype]; ok {
+		return sv, ""
 	}
-	sig := strings.ToLower(signature)
+	// Хеш-матч байткода (Фаза 2): если клиент прислал hash, ищем hash-сигнатуру —
+	// она матчит независимо от имени класса, поэтому бьёт обфускацию имён.
+	if hash != "" {
+		if sv := s.hashSeverity(ctx, dtype, hash); sv > 0 {
+			return sv, "hash"
+		}
+	}
+	if sv, mt := s.signatureMatch(ctx, dtype, signature); sv > 0 {
+		return sv, mt
+	}
+	return defaultDetectionSeverity, ""
+}
+
+// hashSeverity ищет включённую hash-сигнатуру заданного kind с совпадающим HashHex и
+// возвращает её максимальную severity (0 — не найдено).
+func (s *Service) hashSeverity(ctx context.Context, kind, hash string) int {
 	var rows []models.CheatSignature
-	if err := s.db.WithContext(ctx).Where("enabled = ? AND kind = ?", true, kind).Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Where("enabled = ? AND kind = ? AND match_type = ? AND hash_hex = ?", true, kind, "hash", hash).
+		Find(&rows).Error; err != nil {
 		return 0
 	}
 	best := 0
 	for _, r := range rows {
-		p := strings.ToLower(r.Pattern)
-		if p != "" && strings.Contains(sig, p) && r.Severity > best {
+		if r.Severity > best {
 			best = r.Severity
 		}
 	}
 	return best
+}
+
+// detectionHash извлекает SHA-256 байткода из Details детекта (поле "hash"), если есть.
+func detectionHash(details map[string]any) string {
+	if details == nil {
+		return ""
+	}
+	if h, ok := details["hash"].(string); ok {
+		return h
+	}
+	return ""
+}
+
+// signatureMatch ищет в блэклисте включённые сигнатуры заданного kind, совпавшие с
+// сигналом по своему MatchType, и возвращает максимальную severity и MatchType
+// сильнейшего совпадения (0, "" — не найдено).
+func (s *Service) signatureMatch(ctx context.Context, kind, signature string) (int, string) {
+	if signature == "" {
+		return 0, ""
+	}
+	sig := strings.ToLower(signature)
+	var rows []models.CheatSignature
+	if err := s.db.WithContext(ctx).Where("enabled = ? AND kind = ?", true, kind).Find(&rows).Error; err != nil {
+		return 0, ""
+	}
+	bestSev, bestMatch := 0, ""
+	for _, r := range rows {
+		if matchPattern(r.MatchType, r.Pattern, sig) && r.Severity > bestSev {
+			bestSev = r.Severity
+			bestMatch = effectiveMatchType(r.MatchType)
+		}
+	}
+	return bestSev, bestMatch
+}
+
+// effectiveMatchType нормализует пустой MatchType к "substring" (обратная совместимость).
+func effectiveMatchType(mt string) string {
+	if mt == "" {
+		return "substring"
+	}
+	return mt
+}
+
+// matchPattern сопоставляет одну сигнатуру блэклиста с сигналом детекта по её MatchType.
+// signatureLower — сигнал уже в нижнем регистре. Хэш-матч (MatchType "hash") здесь не
+// обрабатывается — он по HashHex, а не по Pattern (см. Фаза 2).
+func matchPattern(matchType, pattern, signatureLower string) bool {
+	if pattern == "" {
+		return false
+	}
+	p := strings.ToLower(pattern)
+	switch matchType {
+	case "exact":
+		return signatureLower == p
+	case "word":
+		return matchesWord(signatureLower, p)
+	case "regex":
+		re := compileCachedRegex(pattern)
+		return re != nil && re.MatchString(signatureLower)
+	case "hash":
+		return false
+	case "string-literal":
+		// Клиент (Java) сам ищет литерал в байткоде и шлёт совпавший паттерн как signature;
+		// сервер лишь подтверждает точным равенством и резолвит severity.
+		return signatureLower == p
+	default: // substring (вкл. пустой MatchType — обратная совместимость)
+		return strings.Contains(signatureLower, p)
+	}
+}
+
+// matchesWord — true, если patternLower встречается в signatureLower как отдельное
+// слово (границы — начало/конец строки или не-словесный символ). Ловит "java" в
+// "run java now", но не в "javaw"/"myjava" — резко снижает ложные срабатывания.
+func matchesWord(signatureLower, patternLower string) bool {
+	from := 0
+	for {
+		i := strings.Index(signatureLower[from:], patternLower)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(patternLower)
+		leftOk := start == 0 || !isWordChar(signatureLower[start-1])
+		rightOk := end == len(signatureLower) || !isWordChar(signatureLower[end])
+		if leftOk && rightOk {
+			return true
+		}
+		from = start + 1
+		if from >= len(signatureLower) {
+			return false
+		}
+	}
+}
+
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+var (
+	regexCacheMu sync.Mutex
+	regexCache   = map[string]*regexp.Regexp{}
+)
+
+// compileCachedRegex компилирует regex-паттерн сигнатуры с кэшем. Go regexp — RE2, без
+// catastrophic backtracking (ReDoS невозможен). Невалидный паттерн → nil (кэшируется,
+// детект просто не сматчится — не паникуем).
+func compileCachedRegex(pattern string) *regexp.Regexp {
+	regexCacheMu.Lock()
+	defer regexCacheMu.Unlock()
+	if re, ok := regexCache[pattern]; ok {
+		return re
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		regexCache[pattern] = nil
+		return nil
+	}
+	regexCache[pattern] = re
+	return re
 }
 
 // DetectionInput — единичное обнаружение, присланное лаунчером или агентом.
@@ -399,26 +561,52 @@ type InitResult struct {
 	Challenge   string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
 }
 
-// InitHandshake проверяет баны, фиксирует HWID и pre-launch детекты, и при
-// успехе выдаёт подписанный launch-token + nonce. Блок запуска = Allowed:false.
+// HwidComponents — раздельные солёные хеши компонентов железа (для fuzzy-матча HWID).
+// Пустые поля игнорируются. Сырьё не передаётся — только хеши (приватность).
+type HwidComponents struct {
+	MachineID string   `json:"machineId"`
+	BoardUUID string   `json:"boardUuid"`
+	Macs      []string `json:"macs"`
+}
+
+// stableCount — число непустых СТАБИЛЬНЫХ компонентов (machine_id + board_uuid). MAC
+// нестабилен (смена сетевой карты, VPN, виртуальные адаптеры) и в порог не входит.
+func (c HwidComponents) stableCount() int {
+	n := 0
+	if c.MachineID != "" {
+		n++
+	}
+	if c.BoardUUID != "" {
+		n++
+	}
+	return n
+}
+
+// InitHandshake — совместимая обёртка без компонентов HWID (старый путь и тесты).
 func (s *Service) InitHandshake(ctx context.Context, userUUID, login, hwidHash string, detections []DetectionInput) (InitResult, error) {
+	return s.InitHandshakeWithComponents(ctx, userUUID, login, hwidHash, HwidComponents{}, detections)
+}
+
+// InitHandshakeWithComponents проверяет баны (точный + fuzzy по компонентам), фиксирует
+// HWID и pre-launch детекты, и при успехе выдаёт launch-token + nonce. Блок = Allowed:false.
+func (s *Service) InitHandshakeWithComponents(ctx context.Context, userUUID, login, hwidHash string, comps HwidComponents, detections []DetectionInput) (InitResult, error) {
 	now := s.now()
 
 	if banned, reason := s.accountBanned(ctx, userUUID, now); banned {
 		return InitResult{Allowed: false, Reason: reason}, nil
 	}
 	if hwidHash != "" {
-		if banned, reason := s.hwidBanned(ctx, hwidHash, now); banned {
+		if banned, reason := s.hwidBanned(ctx, hwidHash, comps, now); banned {
 			return InitResult{Allowed: false, Reason: reason}, nil
 		}
-		if err := s.touchHwid(ctx, hwidHash, userUUID, login, now); err != nil {
+		if err := s.touchHwid(ctx, hwidHash, userUUID, login, comps, now); err != nil {
 			return InitResult{}, err
 		}
 	}
 
 	// Фиксируем pre-launch детекты от лаунчера (скан процессов/файлов).
 	for _, d := range detections {
-		if _, err := s.recordDetection(ctx, userUUID, login, hwidHash, "", d, now); err != nil {
+		if _, _, err := s.recordDetection(ctx, userUUID, login, hwidHash, "", d, now); err != nil {
 			return InitResult{}, err
 		}
 	}
@@ -446,18 +634,19 @@ func (s *Service) VerifyToken(token string) (LaunchClaims, error) {
 }
 
 // RecordDetection пишет обнаружение, аутентифицированное launch-token, и возвращает
-// СЕРВЕРНУЮ серьёзность детекта (используется для решения о kick). Клиентская
+// СЕРВЕРНУЮ severity и confidence детекта (используются для решения о kick). Клиентская
 // severity из запроса игнорируется — её нельзя занизить.
-func (s *Service) RecordDetection(ctx context.Context, claims LaunchClaims, d DetectionInput) (int, error) {
+func (s *Service) RecordDetection(ctx context.Context, claims LaunchClaims, d DetectionInput) (int, string, error) {
 	return s.recordDetection(ctx, claims.UUID, claims.Login, claims.HwidHash, claims.Nonce, d, s.now())
 }
 
-func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash, sessionID string, d DetectionInput, now time.Time) (int, error) {
-	severity := s.resolveSeverity(ctx, d.Type, d.Signature)
-	// Дедуп: одинаковый детект в пределах окна не пишем повторно, но severity всё равно
-	// возвращаем — kick-решение должно срабатывать и на «застрявшем»/спамящем агенте.
+func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash, sessionID string, d DetectionInput, now time.Time) (int, string, error) {
+	severity, matchType := s.resolveDetection(ctx, d.Type, d.Signature, detectionHash(d.Details))
+	confidence := detectionConfidence(d.Type, matchType)
+	// Дедуп: одинаковый детект в пределах окна не пишем повторно, но severity/confidence
+	// всё равно возвращаем — kick-решение должно срабатывать и на спамящем агенте.
 	if s.isDuplicate(userUUID, sessionID, d.Type, d.Signature, now) {
-		return severity, nil
+		return severity, confidence, nil
 	}
 	raw := ""
 	if d.Details != nil {
@@ -466,22 +655,26 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 		}
 	}
 	rec := models.Detection{
-		ID:        uuid.NewString(),
-		UserUUID:  userUUID,
-		Login:     login,
-		HwidHash:  hwidHash,
-		SessionID: sessionID,
-		Source:    normalizeSource(d.Source),
-		Type:      d.Type,
-		Signature: d.Signature,
-		Severity:  severity,
-		Raw:       raw,
-		CreatedAt: now,
+		ID:         uuid.NewString(),
+		UserUUID:   userUUID,
+		Login:      login,
+		HwidHash:   hwidHash,
+		SessionID:  sessionID,
+		Source:     normalizeSource(d.Source),
+		Type:       d.Type,
+		Signature:  d.Signature,
+		Severity:   severity,
+		Confidence: confidence,
+		Status:     "new",
+		Raw:        raw,
+		CreatedAt:  now,
 	}
 	if err := s.db.WithContext(ctx).Create(&rec).Error; err != nil {
-		return severity, err
+		return severity, confidence, err
 	}
-	autoBanned := s.autoBan && severity >= autoBanSeverity
+	// Авто-бан только за hard-детект: soft-эвристика (substring-матч, tamper, debugger)
+	// не банит даже при включённом autoBan — она лишь попадает в review-очередь.
+	autoBanned := s.autoBan && severity >= autoBanSeverity && confidence == "hard"
 	if autoBanned {
 		s.autoBanEscalated(ctx, userUUID, login, hwidHash, d.Signature, now)
 	}
@@ -489,7 +682,7 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 		// Алерт не должен задерживать ответ лаунчеру/агенту.
 		go s.notifier.NotifyDetection(rec, autoBanned)
 	}
-	return severity, nil
+	return severity, confidence, nil
 }
 
 // isDuplicate возвращает true, если идентичный детект уже писался в пределах
@@ -567,22 +760,55 @@ func (s *Service) accountBanned(ctx context.Context, userUUID string, now time.T
 	return true, banReason("Аккаунт заблокирован", ban.Reason)
 }
 
-func (s *Service) hwidBanned(ctx context.Context, hwidHash string, now time.Time) (bool, string) {
+func (s *Service) hwidBanned(ctx context.Context, hwidHash string, comps HwidComponents, now time.Time) (bool, string) {
+	// 1. Точный агрегат — старые баны и клиенты без компонентов.
 	var ban models.HwidBan
 	err := s.db.WithContext(ctx).Where("hwid_hash = ?", hwidHash).First(&ban).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, ""
+	if err == nil && (ban.ExpiresAt == nil || !now.After(*ban.ExpiresAt)) {
+		return true, banReason("Устройство заблокировано", ban.Reason)
 	}
-	if err != nil {
-		return false, ""
+	// 2. Fuzzy: смена нестабильного компонента (MAC) меняет агрегат, но не обходит бан,
+	//    если совпали ОБА стабильных компонента. Нужен весомый отпечаток (≥2 стабильных) —
+	//    одиночное совпадение не банит (защита от коллизии общего образа/партии машин).
+	if comps.stableCount() >= 2 {
+		if reason := s.fuzzyHwidBanned(ctx, comps, now); reason != "" {
+			return true, reason
+		}
 	}
-	if ban.ExpiresAt != nil && now.After(*ban.ExpiresAt) {
-		return false, ""
-	}
-	return true, banReason("Устройство заблокировано", ban.Reason)
+	return false, ""
 }
 
-func (s *Service) touchHwid(ctx context.Context, hwidHash, userUUID, login string, now time.Time) error {
+// fuzzyHwidBanned ищет активный бан, чей HWID совпадает с текущим по ОБОИМ стабильным
+// компонентам (machine_id И board_uuid). Возвращает причину или "". Один совпавший
+// компонент НЕ банит — защита от коллизии (общий образ ОС, партия одинаковых машин).
+func (s *Service) fuzzyHwidBanned(ctx context.Context, comps HwidComponents, now time.Time) string {
+	var bans []models.HwidBan
+	if err := s.db.WithContext(ctx).Find(&bans).Error; err != nil {
+		return ""
+	}
+	for _, ban := range bans {
+		if ban.ExpiresAt != nil && now.After(*ban.ExpiresAt) {
+			continue
+		}
+		var h models.Hwid
+		if err := s.db.WithContext(ctx).Where("hash = ?", ban.HwidHash).First(&h).Error; err != nil {
+			continue
+		}
+		if comps.MachineID != "" && comps.MachineID == h.MachineIDHash &&
+			comps.BoardUUID != "" && comps.BoardUUID == h.BoardUUIDHash {
+			return banReason("Устройство заблокировано", ban.Reason)
+		}
+	}
+	return ""
+}
+
+func (s *Service) touchHwid(ctx context.Context, hwidHash, userUUID, login string, comps HwidComponents, now time.Time) error {
+	macJSON := ""
+	if len(comps.Macs) > 0 {
+		if b, err := json.Marshal(comps.Macs); err == nil {
+			macJSON = string(b)
+		}
+	}
 	var h models.Hwid
 	err := s.db.WithContext(ctx).Where("hash = ?", hwidHash).First(&h).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -593,15 +819,29 @@ func (s *Service) touchHwid(ctx context.Context, hwidHash, userUUID, login strin
 			SeenCount:     1,
 			FirstSeen:     now,
 			LastSeen:      now,
+			MachineIDHash: comps.MachineID,
+			BoardUUIDHash: comps.BoardUUID,
+			MacHashes:     macJSON,
 		}).Error
 	}
 	if err != nil {
 		return err
 	}
-	return s.db.WithContext(ctx).Model(&models.Hwid{}).Where("hash = ?", hwidHash).Updates(map[string]any{
+	updates := map[string]any{
 		"seen_count": gorm.Expr("seen_count + 1"),
 		"last_seen":  now,
-	}).Error
+	}
+	// Компоненты обновляем только если присланы — старый клиент их не шлёт, не затираем.
+	if comps.MachineID != "" {
+		updates["machine_id_hash"] = comps.MachineID
+	}
+	if comps.BoardUUID != "" {
+		updates["board_uuid_hash"] = comps.BoardUUID
+	}
+	if macJSON != "" {
+		updates["mac_hashes"] = macJSON
+	}
+	return s.db.WithContext(ctx).Model(&models.Hwid{}).Where("hash = ?", hwidHash).Updates(updates).Error
 }
 
 func (s *Service) BanAccount(ctx context.Context, userUUID, login, reason, by string) error {
@@ -659,12 +899,83 @@ func (s *Service) UnbanHwid(ctx context.Context, hwidHash string) error {
 
 // --- Admin-чтение ---
 
-func (s *Service) ListDetections(ctx context.Context, limit int) ([]models.Detection, error) {
+// DetectionFilter — необязательные фильтры review-очереди (пустые поля игнорируются).
+type DetectionFilter struct {
+	Status      string // new|reviewed|confirmed|dismissed
+	Confidence  string // hard|soft
+	MinSeverity int
+}
+
+func (s *Service) ListDetections(ctx context.Context, limit int, filter DetectionFilter) ([]models.Detection, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	q := s.db.WithContext(ctx).Order("created_at desc").Limit(limit)
+	if filter.Status != "" {
+		q = q.Where("status = ?", filter.Status)
+	}
+	if filter.Confidence != "" {
+		q = q.Where("confidence = ?", filter.Confidence)
+	}
+	if filter.MinSeverity > 0 {
+		q = q.Where("severity >= ?", filter.MinSeverity)
+	}
 	var out []models.Detection
-	err := s.db.WithContext(ctx).Order("created_at desc").Limit(limit).Find(&out).Error
+	err := q.Find(&out).Error
+	return out, err
+}
+
+// validDetectionStatuses — допустимые значения статуса review-очереди.
+var validDetectionStatuses = map[string]bool{
+	"new": true, "reviewed": true, "confirmed": true, "dismissed": true,
+}
+
+// UpdateDetectionStatus меняет статус разбора детекта оператором и фиксирует, кто и
+// когда его проставил. Невалидный статус отклоняется.
+func (s *Service) UpdateDetectionStatus(ctx context.Context, id, status, adminLogin string) error {
+	if !validDetectionStatuses[status] {
+		return errors.New("invalid detection status")
+	}
+	now := s.now()
+	return s.db.WithContext(ctx).Model(&models.Detection{}).Where("id = ?", id).Updates(map[string]any{
+		"status":      status,
+		"reviewed_by": adminLogin,
+		"reviewed_at": now,
+	}).Error
+}
+
+// SignatureStat — агрегат детектов по одной сигнатуре (shadow-телеметрия, оценка FP).
+type SignatureStat struct {
+	Signature     string `json:"signature"`
+	Type          string `json:"type"`
+	Confidence    string `json:"confidence"`
+	Total         int64  `json:"total"`         // всего срабатываний
+	UniquePlayers int64  `json:"uniquePlayers"` // уникальных игроков (distinct user_uuid)
+	NewCount      int64  `json:"new"`           // не разобрано оператором
+	Confirmed     int64  `json:"confirmed"`     // подтверждено (истинный детект)
+	Dismissed     int64  `json:"dismissed"`     // отклонено (ложняк)
+}
+
+// SignatureStats агрегирует детекты с момента since по (signature, type, confidence):
+// число срабатываний, уникальных игроков и разбивку по статусу review. Сигнатура с
+// большим total на многих игроках при нуле confirmed — кандидат в ложняки: её надо
+// сузить (match_type) или отключить, а не банить. Главный инструмент перед autoBan.
+func (s *Service) SignatureStats(ctx context.Context, since time.Time) ([]SignatureStat, error) {
+	var out []SignatureStat
+	err := s.db.WithContext(ctx).
+		Model(&models.Detection{}).
+		Select(`signature,
+			type,
+			confidence,
+			COUNT(*) AS total,
+			COUNT(DISTINCT user_uuid) AS unique_players,
+			SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+			SUM(CASE WHEN status = 'dismissed' THEN 1 ELSE 0 END) AS dismissed,
+			SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS new_count`).
+		Where("created_at >= ?", since).
+		Group("signature, type, confidence").
+		Order("total DESC").
+		Scan(&out).Error
 	return out, err
 }
 
@@ -688,7 +999,30 @@ func (s *Service) ListSignatures(ctx context.Context) ([]models.CheatSignature, 
 	return out, err
 }
 
+const maxPatternLen = 255
+
+// validateSignature проверяет сигнатуру перед сохранением: лимит длины Pattern и
+// компилируемость regex (для MatchType "regex"). Невалидный regex отклоняется здесь,
+// а не молча игнорируется в рантайме матчинга.
+func validateSignature(matchType, pattern string) error {
+	if len(pattern) > maxPatternLen {
+		return errors.New("pattern too long")
+	}
+	if matchType == "regex" {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return errors.New("invalid regex: " + err.Error())
+		}
+	}
+	return nil
+}
+
 func (s *Service) CreateSignature(ctx context.Context, sig models.CheatSignature) (models.CheatSignature, error) {
+	if sig.MatchType == "" {
+		sig.MatchType = "substring"
+	}
+	if err := validateSignature(sig.MatchType, sig.Pattern); err != nil {
+		return models.CheatSignature{}, err
+	}
 	sig.ID = uuid.NewString()
 	now := s.now()
 	sig.CreatedAt = now
@@ -698,6 +1032,23 @@ func (s *Service) CreateSignature(ctx context.Context, sig models.CheatSignature
 }
 
 func (s *Service) UpdateSignature(ctx context.Context, id string, updates map[string]any) error {
+	// Валидируем эффективные match_type/pattern (с учётом частичного апдейта): читаем
+	// существующую запись, накладываем изменения и проверяем regex-компиляцию/длину.
+	var existing models.CheatSignature
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&existing).Error; err != nil {
+		return err
+	}
+	mt := effectiveMatchType(existing.MatchType)
+	pat := existing.Pattern
+	if v, ok := updates["match_type"].(string); ok {
+		mt = v
+	}
+	if v, ok := updates["pattern"].(string); ok {
+		pat = v
+	}
+	if err := validateSignature(mt, pat); err != nil {
+		return err
+	}
 	updates["updated_at"] = s.now()
 	return s.db.WithContext(ctx).Model(&models.CheatSignature{}).Where("id = ?", id).Updates(updates).Error
 }

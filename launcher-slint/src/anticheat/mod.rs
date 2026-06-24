@@ -10,19 +10,29 @@ mod manifest;
 mod scan;
 pub mod kick;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use crate::AppConfig;
 use manifest::IntegrityManifest;
 
+/// Интервал in-game скана процессов во время игры.
+const INGAME_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Состояние античит-сессии запуска: токен/nonce/challenge от handshake, манифест
-/// целостности (тянется один раз), путь kick-файла (заполняется при инжекте).
+/// целостности (тянется один раз), путь kick-файла (заполняется при инжекте), блэклист
+/// процессов (для in-game скана во время игры).
 pub struct LaunchGuard {
     launch_token: String,
     nonce: String,
     challenge: String,
     manifest: Option<IntegrityManifest>,
     kick_file: Option<PathBuf>,
+    blacklist: Vec<handshake::Signature>,
 }
 
 impl LaunchGuard {
@@ -32,10 +42,10 @@ impl LaunchGuard {
     pub fn begin(config: &AppConfig, token: &str) -> Result<Self, String> {
         let blacklist = handshake::fetch_blacklist(config, token).unwrap_or_default();
         let detections = scan::scan_processes(&blacklist);
-        let hwid_hash = hwid::collect_hwid_hash();
+        let components = hwid::collect_hwid_components();
         let manifest = IntegrityManifest::fetch(config);
 
-        match handshake::init(config, token, &hwid_hash, &detections) {
+        match handshake::init(config, token, &components, &detections) {
             handshake::InitOutcome::Allowed {
                 token,
                 nonce,
@@ -46,6 +56,7 @@ impl LaunchGuard {
                 challenge,
                 manifest,
                 kick_file: None,
+                blacklist,
             }),
             handshake::InitOutcome::Blocked(reason) => Err(reason),
             handshake::InitOutcome::UpdateRequired(message) => Err(message),
@@ -56,6 +67,7 @@ impl LaunchGuard {
                 challenge: String::new(),
                 manifest,
                 kick_file: None,
+                blacklist,
             }),
         }
     }
@@ -99,4 +111,45 @@ impl LaunchGuard {
         let _ = std::fs::remove_file(path);
         reason
     }
+}
+
+/// Запускает фоновый поток in-game скана процессов во время игры: периодически сверяет
+/// запущенные процессы с блэклистом и шлёт НОВЫЕ совпадения на бэкенд по launch-token.
+/// Закрывает пробел pre-launch скана — чит-софт, запущенный уже ПОСЛЕ старта игры.
+/// No-op (поток сразу завершается) без launch-token или при пустом блэклисте. Данные
+/// клонируются в поток, поэтому guard остаётся доступен в основном потоке (для finish).
+pub fn spawn_ingame_scan(
+    config: &AppConfig,
+    guard: &LaunchGuard,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    let api_url = config.api_url.clone();
+    let launch_token = guard.launch_token.clone();
+    let blacklist = guard.blacklist.clone();
+    thread::spawn(move || {
+        if launch_token.is_empty() || blacklist.is_empty() {
+            return;
+        }
+        let mut reported: HashSet<String> = HashSet::new();
+        // Спим короткими квантами для отзывчивого завершения на закрытии игры.
+        let quantum = Duration::from_secs(2);
+        let mut elapsed = Duration::ZERO;
+        loop {
+            thread::sleep(quantum);
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            elapsed += quantum;
+            if elapsed < INGAME_SCAN_INTERVAL {
+                continue;
+            }
+            elapsed = Duration::ZERO;
+            for d in scan::scan_processes(&blacklist) {
+                // Дедуп: одну и ту же сигнатуру за сессию шлём один раз.
+                if reported.insert(d.signature.clone()) {
+                    scan::report_detection(&api_url, &launch_token, &d);
+                }
+            }
+        }
+    })
 }

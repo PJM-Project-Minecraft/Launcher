@@ -23,6 +23,7 @@
 #include <ctype.h>
 
 #include "agent.h"
+#include "sha256.h"
 
 /* Диагностические логи только в отладочной сборке (-DAC_DEBUG). В релизе раскрывающие
  * строки ("[anticheat-native] suspect class: ... (wurst)") в бинарь не попадают —
@@ -204,13 +205,47 @@ static int extract_class_name(const unsigned char *d, jint len, char *out, size_
     return 1;
 }
 
+/* Счётчик class-hash событий — отдельный от MAX_EVENTS, чтобы хеши и именные детекты
+ * не вытесняли друг друга из общего лимита. */
+static int g_hash_count = 0;
+#define MAX_HASH_EVENTS 60
+
+/* Эмитит "class-hash\t<sha256>\t<name>" для non-bootstrap класса: Java-агент сверит хеш
+ * байткода с блэклистом и поймает чит с обфусцированным именем (его маркеры в имени не
+ * палят). Bootstrap-классы (loader==NULL: java.*, jdk.*) пропускаем — читов там нет, а
+ * поток на старте огромен; отдельный лимит MAX_HASH_EVENTS защищает от флуда модами. */
+static void emit_class_hash(jobject loader, const char *cls,
+                            const unsigned char *data, jint len) {
+    if (loader == NULL || data == NULL || len <= 0) {
+        return;
+    }
+    if (!g_events_path[0] || g_hash_count >= MAX_HASH_EVENTS) {
+        return;
+    }
+    g_hash_count++;
+    char hex[65];
+    ac_sha256_hex(data, (size_t)len, hex);
+    char safe[256];
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)cls; *p && j < sizeof(safe) - 1; p++) {
+        safe[j++] = (*p >= 0x21 && *p <= 0x7e) ? (char)*p : '.';
+    }
+    safe[j] = '\0';
+    FILE *f = fopen(g_events_path, "a");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "class-hash\t%s\t%s\n", hex, safe);
+    fclose(f);
+}
+
 /* ClassFileLoadHook: вызывается на каждый загружаемый класс (вкл. bootstrap). */
 static void JNICALL on_class_file_load(
         jvmtiEnv *jvmti, JNIEnv *jni, jclass class_being_redefined, jobject loader,
         const char *name, jobject protection_domain, jint class_data_len,
         const unsigned char *class_data, jint *new_class_data_len,
         unsigned char **new_class_data) {
-    (void)jvmti; (void)jni; (void)class_being_redefined; (void)loader;
+    (void)jvmti; (void)jni; (void)class_being_redefined;
     (void)protection_domain;
     (void)new_class_data_len; (void)new_class_data;
 
@@ -230,6 +265,10 @@ static void JNICALL on_class_file_load(
         ac_append_event("illegal-class-name", cls);
         return;
     }
+
+    /* Hash байткода (non-bootstrap): Java сверит с блэклистом — ловит обфусцированные имена. */
+    emit_class_hash(loader, cls, class_data, class_data_len);
+
     char lower[512];
     to_lower_copy(cls, lower, sizeof(lower));
     for (int i = 0; i < SUSPECT_COUNT; i++) {

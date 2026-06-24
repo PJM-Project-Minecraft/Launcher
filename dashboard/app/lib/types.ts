@@ -106,6 +106,8 @@ export type LoaderVersion = {
   stable: boolean;
 };
 
+export type DetectionStatus = 'new' | 'reviewed' | 'confirmed' | 'dismissed';
+
 export type Detection = {
   id: string;
   userUuid: string;
@@ -115,7 +117,23 @@ export type Detection = {
   type: string;
   signature: string;
   severity: number;
+  confidence: string; // hard | soft
+  status: DetectionStatus;
+  reviewedBy?: string;
+  reviewedAt?: string | null;
   createdAt: string;
+};
+
+// SignatureStat — агрегат детектов по сигнатуре (shadow-телеметрия, оценка FP).
+export type SignatureStat = {
+  signature: string;
+  type: string;
+  confidence: string;
+  total: number;
+  uniquePlayers: number;
+  new: number;
+  confirmed: number;
+  dismissed: number;
 };
 
 export type HwidBan = {
@@ -139,6 +157,7 @@ export type CheatSignature = {
   id: string;
   kind: string;
   pattern: string;
+  matchType: string; // substring | exact | word | regex | hash
   hashHex: string;
   severity: number;
   note: string;
