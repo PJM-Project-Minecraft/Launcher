@@ -27,10 +27,13 @@ type SessionVerifier interface {
 	// TouchByNonce продлевает игровую сессию (sliding TTL): heartbeat — сигнал живости
 	// игры, без которого 15-мин TTL сессии истекает прямо во время игры.
 	TouchByNonce(nonce string) bool
-	// LauncherActive — лаунчер недавно слал keepalive по nonce (игра точно запущена).
-	// Это надёжный сигнал «игра идёт» от стабильного лаунчера: по нему reaper отличает
-	// убийство агента в живой игре (алерт) от обычного закрытия игры (тишина).
-	LauncherActive(nonce string) bool
+	// LauncherSeenAfter — слал ли лаунчер keepalive по nonce ПОЗЖЕ момента t. reaper
+	// передаёт t = lastHeartbeat + grace: keepalive после того, как агент замолк, значит
+	// лаунчер пережил агента (его убили в живой игре → алерт). При резком закрытии лаунчера
+	// (kill -9/краш) cleanup не отрабатывает, но обрывается и keepalive: его метка ≤ времени
+	// гибели агента → условие ложно → ложного алерта нет. Это надёжнее прежнего TTL-окна,
+	// которое держало метку «свежей» ещё 5 минут после смерти лаунчера.
+	LauncherSeenAfter(nonce string, t time.Time) bool
 }
 
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
@@ -223,6 +226,14 @@ func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool
 	return !active, s.BlacklistVersion(ctx)
 }
 
+// launcherOutliveGrace — на сколько keepalive лаунчера должен опередить последний
+// heartbeat агента, чтобы счесть, что «лаунчер пережил агента» (агента убили в живой
+// игре). Агент пингует каждые ~30с, поэтому при ОДНОВРЕМЕННОЙ гибели лаунчера и игры
+// keepalive опережает последний heartbeat не более чем на один интервал (~30с); порог
+// 60с (2× интервала, с запасом на джиттер) уверенно отделяет этот случай от ситуации,
+// когда лаунчер реально продолжал слать keepalive уже после смерти агента.
+const launcherOutliveGrace = 60 * time.Second
+
 // reapStale ловит сессии, по которым давно (дольше hbTimeout) не было heartbeat от
 // агента, и шлёт по ним МЯГКИЙ детект (алерт), НЕ гася сессию. Раньше reaper гасил
 // сессию (InvalidateByNonce), но heartbeat-тред агента мог тихо умереть в модовом
@@ -232,29 +243,35 @@ func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool
 // Дедуп: nonce снимается с трекинга живости, так что алерт уходит один раз.
 // Время инъектируется для детерминированных тестов.
 func (s *Service) reapStale(now time.Time) {
+	type staleSession struct {
+		nonce string
+		last  time.Time // время последнего heartbeat — нужно для сравнения с keepalive
+	}
 	s.hbMu.Lock()
-	var silent []string
+	var silent []staleSession
 	for nonce, last := range s.heartbeats {
 		if now.Sub(last) > s.hbTimeout {
-			silent = append(silent, nonce)
+			silent = append(silent, staleSession{nonce, last})
 			delete(s.heartbeats, nonce)
 		}
 	}
 	s.hbMu.Unlock()
-	for _, nonce := range silent {
-		// Алертим, только если игра ТОЧНО идёт (лаунчер свежо keepalive'ит), а агент при
-		// этом замолк — его убили в живой игре. Если keepalive лаунчера тоже пропал, игра
-		// просто закрыта → молчание агента ожидаемо → тихо снимаем с трекинга без ложного
-		// алерта. Сессию проверяем заодно (detect-kick мог её уже погасить).
-		// У лаунчеров без keepalive (старые версии) LauncherActive всегда false → тишина:
-		// без сигнала живости лаунчера закрытие игры неотличимо от убийства агента.
-		if s.verifier == nil || !s.verifier.IsActiveByNonce(nonce) || !s.verifier.LauncherActive(nonce) {
+	for _, st := range silent {
+		// Алертим, только если лаунчер доказал живость ПОЗЖЕ, чем агент замолк: keepalive
+		// пришёл после lastHeartbeat+grace — значит лаунчер пережил агента, и того убили в
+		// живой игре. При резком закрытии лаунчера (kill -9/краш/выключение) cleanup не
+		// отрабатывает, но keepalive обрывается одновременно с агентом — его метка остаётся
+		// ≤ времени гибели агента, поэтому сравнение по ВРЕМЕНИ (в отличие от прежнего
+		// 5-мин TTL-окна) ложного алерта не даёт. Сессию проверяем заодно (detect-kick мог
+		// её уже погасить). Лаунчеры без keepalive (старые версии) метки не шлют → тишина.
+		if s.verifier == nil || !s.verifier.IsActiveByNonce(st.nonce) ||
+			!s.verifier.LauncherSeenAfter(st.nonce, st.last.Add(launcherOutliveGrace)) {
 			continue
 		}
 		slog.Warn("anticheat: agent heartbeat silent (мягкий детект, сессию не гасим)",
-			"nonce", nonce, "timeout", s.hbTimeout)
+			"nonce", st.nonce, "timeout", s.hbTimeout)
 		if s.notifier != nil {
-			s.notifier.NotifyAgentSilent(nonce)
+			s.notifier.NotifyAgentSilent(st.nonce)
 		}
 	}
 }

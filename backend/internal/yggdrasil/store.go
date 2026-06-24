@@ -13,8 +13,11 @@ import (
 const (
 	sessionTTL = 15 * time.Minute
 	joinTTL    = 60 * time.Second
-	// launcherKeepaliveTTL — окно, в течение которого keepalive от лаунчера считается
-	// «свежим» (игра идёт). Лаунчер пингует каждые ~120с; берём с запасом на пропуски.
+	// launcherKeepaliveTTL — порог GC меток keepalive: метки старше него подчищаются в
+	// cleanup (отметка нужна reaper'у лишь сравнить keepalive с моментом молчания агента,
+	// что происходит в первые ~90с — держать её дольше незачем). Раньше этот TTL ещё и
+	// определял «лаунчер активен», но из-за резкого закрытия лаунчера давал ложные алерты
+	// (метка оставалась «свежей» 5 минут после смерти) — теперь это решает LauncherSeenAfter.
 	launcherKeepaliveTTL = 5 * time.Minute
 )
 
@@ -242,16 +245,20 @@ func (s *Store) RecordLauncherKeepalive(nonce string) {
 	s.mu.Unlock()
 }
 
-// LauncherActive сообщает, слал ли лаунчер keepalive по nonce недавно (игра ещё идёт).
-// По нему reaper отличает убийство агента в живой игре от обычного закрытия игры.
-func (s *Store) LauncherActive(nonce string) bool {
+// LauncherSeenAfter сообщает, слал ли лаунчер keepalive по nonce ПОЗЖЕ момента t.
+// reaper передаёт t = время последнего heartbeat агента + grace: если лаунчер
+// keepalive'ил уже после того, как агент замолк, значит лаунчер пережил агента (того
+// убили в живой игре) → алерт. При резком закрытии лаунчера (kill -9/краш) keepalive
+// обрывается одновременно с агентом, его метка остаётся ≤ времени гибели → условие
+// ложно → ложного алерта нет (в отличие от TTL-окна, державшего метку «свежей» 5 минут).
+func (s *Store) LauncherSeenAfter(nonce string, t time.Time) bool {
 	if nonce == "" {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	last, ok := s.launcherSeen[nonce]
-	return ok && time.Since(last) < launcherKeepaliveTTL
+	return ok && last.After(t)
 }
 
 func (s *Store) Session(accessToken string) (Session, bool) {

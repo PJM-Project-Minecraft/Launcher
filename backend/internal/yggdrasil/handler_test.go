@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"launcher-backend/internal/models"
 
@@ -32,15 +33,17 @@ func TestKeepaliveEndpoint(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	if svc.Store().LauncherActive("nonce-ka") {
-		t.Fatal("до keepalive лаунчер не должен считаться активным")
+	before := time.Now()
+	if svc.Store().LauncherSeenAfter("nonce-ka", before) {
+		t.Fatal("до keepalive отметки живости лаунчера быть не должно")
 	}
 	if code := post(`{"nonce":"nonce-ka"}`); code != http.StatusNoContent {
 		t.Fatalf("живой nonce: ожидался 204, получен %d", code)
 	}
-	// keepalive должен зафиксировать живость лаунчера (сигнал «игра идёт» для reaper).
-	if !svc.Store().LauncherActive("nonce-ka") {
-		t.Fatal("после keepalive лаунчер должен считаться активным")
+	// keepalive должен зафиксировать живость лаунчера (сигнал «игра идёт» для reaper):
+	// метка должна оказаться позже момента before.
+	if !svc.Store().LauncherSeenAfter("nonce-ka", before) {
+		t.Fatal("после keepalive должна появиться свежая метка живости лаунчера")
 	}
 	if code := post(`{"nonce":"never-issued"}`); code != http.StatusNotFound {
 		t.Fatalf("неизвестный nonce: ожидался 404, получен %d", code)

@@ -97,14 +97,15 @@ func TestInitRecordsHwidAndDetections(t *testing.T) {
 }
 
 type fakeVerifier struct {
-	verified map[string]bool
-	invalid  map[string]bool
-	touched  map[string]int
-	launcher map[string]bool // nonce -> лаунчер свежо keepalive'ит (игра идёт)
+	verified     map[string]bool
+	invalid      map[string]bool
+	touched      map[string]int
+	launcherSeen map[string]time.Time // nonce -> время последнего keepalive от лаунчера
 }
 
-func (f *fakeVerifier) LauncherActive(nonce string) bool {
-	return f.launcher[nonce]
+func (f *fakeVerifier) LauncherSeenAfter(nonce string, t time.Time) bool {
+	seen, ok := f.launcherSeen[nonce]
+	return ok && seen.After(t)
 }
 
 func (f *fakeVerifier) MarkVerifiedByNonce(nonce string) bool {
@@ -276,7 +277,7 @@ func (n *fakeNotifier) silentCount() int {
 // держит keepalive от лаунчера, а reaper при молчании агента лишь шлёт мягкий детект
 // (алерт), НЕ гася сессию. Реальный чит гасит сессию отдельно (detect-kick).
 func TestHeartbeatSilentSoftDetect(t *testing.T) {
-	v := &fakeVerifier{verified: map[string]bool{}, launcher: map[string]bool{}}
+	v := &fakeVerifier{verified: map[string]bool{}, launcherSeen: map[string]time.Time{}}
 	svc := NewService(newTestDB(t), "secret", false, v, "")
 	n := &fakeNotifier{}
 	svc.SetNotifier(n)
@@ -288,8 +289,10 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
-	// Игра ТОЧНО идёт — лаунчер свежо keepalive'ит, но агент замолк (его убили).
-	v.launcher[res.Nonce] = true
+	// Агента убили в живой игре: его последний heartbeat — на base (из Confirm), а лаунчер
+	// ПРОДОЛЖАЛ слать keepalive уже после этого (на base+110s, далеко за grace 60s) —
+	// доказательство, что лаунчер пережил агента.
+	v.launcherSeen[res.Nonce] = base.Add(110 * time.Second)
 	// В пределах таймаута — тихо, без алертов.
 	svc.reapStale(base.Add(60 * time.Second))
 	if n.silentCount() != 0 {
@@ -314,7 +317,7 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 // (TTL/инвалидация ненадёжны). Без keepalive лаунчера (старые версии или закрытая игра)
 // алерта быть НЕ должно — закрытие неотличимо от убийства агента только по молчанию.
 func TestSilentDetectSkipsWhenLauncherGone(t *testing.T) {
-	v := &fakeVerifier{verified: map[string]bool{}, launcher: map[string]bool{}}
+	v := &fakeVerifier{verified: map[string]bool{}, launcherSeen: map[string]time.Time{}}
 	svc := NewService(newTestDB(t), "secret", false, v, "")
 	n := &fakeNotifier{}
 	svc.SetNotifier(n)
@@ -333,6 +336,38 @@ func TestSilentDetectSkipsWhenLauncherGone(t *testing.T) {
 	}
 	if n.silentCount() != 0 {
 		t.Fatalf("без keepalive лаунчера алерта быть не должно, получено %d", n.silentCount())
+	}
+}
+
+// Регрессия резкого закрытия лаунчера (kill -9/краш/выключение): cleanup лаунчера не
+// отрабатывает, поэтому сессия остаётся активной, а последняя метка keepalive ещё «свежа»
+// по TTL. Но keepalive оборвался ОДНОВРЕМЕННО с агентом — его метка ≤ времени гибели
+// агента, поэтому она НЕ позже lastHeartbeat+grace → ложного алерта быть не должно.
+// (Старая TTL-логика держала метку «свежей» 5 минут и слала ложный «присмотритесь к игроку».)
+func TestSilentDetectSkipsAbruptLauncherClose(t *testing.T) {
+	v := &fakeVerifier{verified: map[string]bool{}, launcherSeen: map[string]time.Time{}}
+	svc := NewService(newTestDB(t), "secret", false, v, "")
+	n := &fakeNotifier{}
+	svc.SetNotifier(n)
+	base := time.Unix(1_700_000_000, 0)
+	svc.now = func() time.Time { return base }
+	svc.SetHeartbeatTimeout(90 * time.Second)
+
+	res, _ := svc.InitHandshake(context.Background(), "uuid-abrupt", "Liko", "hwid-abrupt", nil)
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	// Резкое закрытие: и агент, и keepalive оборвались около base. Последний keepalive мог
+	// прийти чуть ПОЗЖЕ последнего heartbeat (base), но в пределах grace — base+20s.
+	v.launcherSeen[res.Nonce] = base.Add(20 * time.Second)
+	// Сессия ещё активна (cleanup лаунчера не отработал), heartbeat протух — но keepalive
+	// не пережил агента → reaper молчит.
+	svc.reapStale(base.Add(120 * time.Second))
+	if !v.IsActiveByNonce(res.Nonce) {
+		t.Fatal("сессия не должна гаситься reaper'ом")
+	}
+	if n.silentCount() != 0 {
+		t.Fatalf("при резком закрытии лаунчера ложного алерта быть не должно, получено %d", n.silentCount())
 	}
 }
 
