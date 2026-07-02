@@ -5,6 +5,8 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"math/big"
 	"net/url"
 	"strings"
 
@@ -140,6 +142,29 @@ func NormalizeUUID(raw, name string) string {
 		return clean
 	}
 	return OfflineUUID(name)
+}
+
+// canonicalServerID приводит Minecraft serverId-хеш к каноничному виду:
+// беззнаковые 20 байт SHA-1 → 40 hex-символов в нижнем регистре. Разные клиенты
+// кодируют один и тот же хеш по-разному (Java authlib — знаковый BigInteger в
+// нижнем регистре, напр. "-25e3..."; прокси Void — беззнаковый в верхнем регистре,
+// напр. "70B0..."). Канонизация в /join и /hasJoined убирает расхождения по
+// регистру, знаку и ведущим нулям, иначе map-lookup в Store промахивается.
+func canonicalServerID(raw string) string {
+	s := strings.TrimSpace(raw)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	n, ok := new(big.Int).SetString(s, 16)
+	if !ok {
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+	if neg {
+		mod := new(big.Int).Lsh(big.NewInt(1), 160)
+		n.Mod(n.Sub(mod, n), mod)
+	}
+	return fmt.Sprintf("%040x", n)
 }
 
 func normalizeHex(raw string) string {

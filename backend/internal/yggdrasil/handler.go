@@ -212,7 +212,7 @@ func (h Handler) join(c fiber.Ctx) error {
 	if normalizeHex(req.SelectedProfile) != sess.UUID {
 		return forbidden(c, "Профиль не совпадает с токеном")
 	}
-	h.service.Store().PutJoin(req.ServerID, JoinRecord{
+	h.service.Store().PutJoin(canonicalServerID(req.ServerID), JoinRecord{
 		UUID: sess.UUID,
 		Name: sess.Name,
 		IP:   c.IP(),
@@ -228,7 +228,7 @@ func (h Handler) hasJoined(c fiber.Ctx) error {
 	username := c.Query("username")
 	serverID := c.Query("serverId")
 
-	record, ok := h.service.Store().ConsumeJoin(serverID)
+	record, ok := h.service.Store().ConsumeJoin(canonicalServerID(serverID))
 	if !ok || !strings.EqualFold(record.Name, username) {
 		return c.SendStatus(http.StatusNoContent)
 	}
