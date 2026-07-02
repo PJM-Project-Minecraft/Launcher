@@ -41,12 +41,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Доверие X-Forwarded-For: c.IP() (в т.ч. ключ брутфорс-лимитера) берёт последний hop
+	// из XFF ТОЛЬКО если непосредственный peer — доверенный прокси.
+	//
+	// ПРЕДУПРЕЖДЕНИЕ О СПУФИНГЕ: если апстрим-прокси лишь ДОБАВЛЯЕТ X-Forwarded-For, не
+	// затирая пришедший от клиента, злоумышленник может подделать свой IP и обойти лимитер.
+	// Поэтому в проде задавайте TRUSTED_PROXIES точным IP/подсетью апстрима (Reverse Proxy
+	// хостинга), а сам прокси должен перезаписывать заголовок. Пустой TRUSTED_PROXIES
+	// оставляет исторический дефолт (Loopback/Private) — безопасен, только когда апстрим
+	// реально находится в одной из этих подсетей.
+	trustCfg := fiber.TrustProxyConfig{Loopback: true, LinkLocal: true, Private: true}
+	if len(cfg.TrustedProxies) > 0 {
+		trustCfg.Proxies = cfg.TrustedProxies
+		slog.Info("trusted proxies configured", "proxies", cfg.TrustedProxies)
+	}
 	app := fiber.New(fiber.Config{
 		AppName: "Launcher Backend",
-		// Бэкенд стоит за nginx: настоящий IP клиента приходит в X-Forwarded-For.
+		// Бэкенд стоит за reverse-прокси: настоящий IP клиента приходит в X-Forwarded-For.
 		ProxyHeader:      fiber.HeaderXForwardedFor,
 		TrustProxy:       true,
-		TrustProxyConfig: fiber.TrustProxyConfig{Loopback: true, LinkLocal: true, Private: true},
+		TrustProxyConfig: trustCfg,
 		// Лимит тела запроса: загрузка бинарников релизов лаунчера через админку.
 		BodyLimit: 512 * 1024 * 1024,
 	})

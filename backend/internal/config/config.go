@@ -40,6 +40,10 @@ type Config struct {
 	AnticheatRequireAttestation bool
 	// TokenTTL — срок жизни JWT-сессии (логин в лаунчере и админке).
 	TokenTTL time.Duration
+	// TrustedProxies — явный список доверенных прокси (IP или CIDR) из TRUSTED_PROXIES.
+	// Только с этих адресов X-Forwarded-For принимается как источник реального IP клиента.
+	// Пусто — используется дефолт Loopback/Private (см. cmd/server/main.go).
+	TrustedProxies []string
 	// Алерты античита в Telegram: токен бота (например, vps-ops-bot) и chat_id получателя.
 	AnticheatAlertBotToken string
 	AnticheatAlertChatID   string
@@ -86,6 +90,7 @@ func Load() Config {
 		AnticheatHeartbeatSeconds: atoiDefault(env("ANTICHEAT_HEARTBEAT_TIMEOUT", "90"), 90),
 		AnticheatRequireAttestation: env("ANTICHEAT_REQUIRE_ATTESTATION", "false") == "true",
 		TokenTTL:              time.Duration(atoiDefault(env("TOKEN_TTL_HOURS", "168"), 168)) * time.Hour,
+		TrustedProxies:        splitCSV(env("TRUSTED_PROXIES", "")),
 		AnticheatAlertBotToken: env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
 		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),
 	}
@@ -128,6 +133,11 @@ func (c Config) Validate() error {
 	}
 	if devSecrets[c.AnticheatSecret] {
 		return errors.New("APP_ENV=production требует настоящий ANTICHEAT_SECRET (сейчас дев-заглушка)")
+	}
+	// В production обязателен Postgres (DATABASE_URL). Пустой URL молча уводит на SQLite,
+	// что в проде даёт split-brain аккаунтов/банов между репликами и потерю данных.
+	if c.DatabaseURL == "" {
+		return errors.New("APP_ENV=production требует DATABASE_URL (Postgres): тихий SQLite-fallback запрещён")
 	}
 	return nil
 }

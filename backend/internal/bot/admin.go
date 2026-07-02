@@ -5,12 +5,54 @@ import (
 	"strconv"
 	"strings"
 
+	"launcher-backend/internal/models"
 	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
 	"launcher-backend/internal/validators"
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+// roleRank — числовой ранг роли для сравнения привилегий (больше = привилегированнее).
+// Используется, чтобы запретить эскалацию moderator → admin через админ-действия бота.
+func roleRank(role string) int {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case models.RoleAdmin:
+		return 2
+	case models.RoleModerator:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// ensureCanManageTarget проверяет, что бот-админ (по telegramUID) вправе выполнять
+// деструктивное действие над target. Запрещено трогать цель, чья роль НЕ НИЖЕ роли
+// исполнителя: модератор не тронет админа/модератора, админ не тронет другого админа
+// (и себя как админа). Возвращает allowed=false, если действие отклонено (уведомление
+// пользователю уже отправлено).
+func (s *Service) ensureCanManageTarget(chatID int64, telegramUID int64, targetID string) (bool, error) {
+	adm, err := s.resolveAdmin(telegramUID)
+	if err != nil {
+		return false, err
+	}
+	if adm == nil {
+		return false, s.notifyWarn(chatID, "Действие недоступно: нет прав администратора.")
+	}
+	tgt, err := repo.FindUserByID(s.ctx(), s.DB, targetID)
+	if err != nil {
+		return false, err
+	}
+	if tgt == nil {
+		return false, s.notifyWarn(chatID, "Цель не найдена — повторите поиск.")
+	}
+	if roleRank(tgt.Role) >= roleRank(adm.user.Role) {
+		return false, s.notifyWarn(chatID, fmt.Sprintf(
+			"Недостаточно прав: нельзя выполнять действия над аккаунтом с ролью «%s» — она не ниже вашей («%s»).",
+			tgt.Role, adm.user.Role))
+	}
+	return true, nil
+}
 
 func (s *Service) adminOpsKeyboardMarkup() map[string]any {
 	k := &telegram.ReplyKeyboardStyled{
@@ -189,12 +231,22 @@ func (s *Service) adminManage(chatID int64, telegramUIDFrom int64, text string) 
 
 	switch text {
 	case "📧 Изменить email цели":
+		if ok, err := s.ensureCanManageTarget(chatID, admT, target); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
 		if err := s.notifyHTML(chatID, s.msgWithCancelHint("Введите новый <b>e-mail</b> аккаунта."), keyboardRemove()); err != nil {
 			return err
 		}
 		return repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminAskNewEmail, &pl)
 
 	case "🔓 Сгенерировать пароль":
+		if ok, err := s.ensureCanManageTarget(chatID, admT, target); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
 		pwd, err := randPassword14()
 		if err != nil {
 			return err
@@ -239,6 +291,11 @@ func (s *Service) adminApplyEmail(chatID int64, adminTID int64, mail string) err
 		return fmt.Errorf("цель потеряна")
 	}
 	target := *pl.AdminTargetID
+	if ok, err := s.ensureCanManageTarget(chatID, adminTID, target); err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
 	if !validators.IsValidEmail(true, mail) {
 		return s.notifyWarn(chatID, "Некорректный email.")
 	}

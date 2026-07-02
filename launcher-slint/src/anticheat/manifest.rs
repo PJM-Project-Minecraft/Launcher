@@ -1,6 +1,7 @@
 //! Манифест целостности (`GET /api/anticheat/manifest`): SHA-256 инжектируемых
 //! артефактов (agent.jar / нативная библиотека / authlib-injector). Сверяется перед
-//! инжектом — несовпадение = подмена. Тянется без auth; None = недоступен (fail-open).
+//! инжектом — несовпадение = подмена. Требует JWT (эндпоинт закрыт авторизацией,
+//! чтобы не отдавать эталонные хеши анонимам); None = недоступен (fail-open).
 
 use serde::Deserialize;
 
@@ -26,15 +27,15 @@ struct NativeSha {
 }
 
 impl IntegrityManifest {
-    /// Тянет манифест с бэкенда (без auth). None — недоступен (оффлайн/сбой):
+    /// Тянет манифест с бэкенда под JWT. None — недоступен (оффлайн/сбой/401):
     /// тогда SHA-сверка не выполняется (fail-open, не ломаем оффлайн-запуск).
-    pub fn fetch(config: &AppConfig) -> Option<Self> {
+    pub fn fetch(config: &AppConfig, token: &str) -> Option<Self> {
         let client = crate::download_client().ok()?;
         let url = format!(
             "{}/api/anticheat/manifest",
             config.api_url.trim_end_matches('/')
         );
-        let response = client.get(url).send().ok()?;
+        let response = client.get(url).bearer_auth(token).send().ok()?;
         if !response.status().is_success() {
             return None;
         }

@@ -74,7 +74,11 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// Раздача нативной JVMTI-библиотеки по ОС: лаунчер инжектит как -agentpath.
 	group.Get("/native/:os", h.nativeLib)
 	// Манифест целостности (SHA-256 артефактов): лаунчер сверяет скачанное перед инжектом.
-	group.Get("/manifest", h.manifest)
+	// JWT-защищён: публичный agentSha256 позволял бы подделать attestation-proof (эхо
+	// ожидаемого self-hash). Манифест тянется на этапе pre-launch (после логина, JWT уже
+	// есть), поэтому закрытие не мешает лаунчеру. agent.jar/native остаются публичными —
+	// их лаунчер качает тем же этапом, но по прямым раздачам без JWT (как и раньше).
+	group.Get("/manifest", authMiddleware, h.manifest)
 
 	// Admin: просмотр и управление.
 	admin := app.Group("/api/admin/anticheat")

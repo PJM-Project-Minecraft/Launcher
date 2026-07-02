@@ -170,7 +170,27 @@ func (s *Service) Confirm(token string, proof ConfirmProof) error {
 			return perr // жёсткий режим: без валидного proof не верифицируем сессию
 		}
 		// Transition: фиксируем будущий отказ, но пускаем (пока не раздан новый лаунчер).
-		slog.Warn("anticheat: attestation would fail (transition mode)", "login", claims.Login, "reason", perr)
+		// Уровень Error + Telegram-алерт: срабатывание этой ветки в масштабе = признак
+		// массового обхода античита (подделанный/отсутствующий proof), операторы должны
+		// это видеть, а не терять в Warn-шуме. Сессию всё равно не блокируем — enforcement
+		// requireAttestation флипается прод-переменной ANTICHEAT_REQUIRE_ATTESTATION.
+		slog.Error("anticheat: attestation bypass (transition mode — сессия пропущена)",
+			"login", claims.Login, "uuid", claims.UUID, "reason", perr)
+		if s.notifier != nil {
+			// Переиспользуем канал алертов о детектах (Telegram): синтетический детект
+			// «attestation-bypass». go — не блокировать confirm сетевым вызовом.
+			go s.notifier.NotifyDetection(models.Detection{
+				UserUUID:   claims.UUID,
+				Login:      claims.Login,
+				HwidHash:   claims.HwidHash,
+				SessionID:  claims.Nonce,
+				Source:     "native",
+				Type:       "attestation-bypass",
+				Signature:  perr.Error(),
+				Severity:   9,
+				Confidence: "soft",
+			}, false)
+		}
 	}
 	if s.verifier == nil || !s.verifier.MarkVerifiedByNonce(claims.Nonce) {
 		return errors.New("session not found or already confirmed")

@@ -23,6 +23,12 @@ func (s Service) RequireAuth() fiber.Handler {
 			return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Сессия недействительна"})
 		}
 
+		// Забаненный аккаунт не должен пользоваться API даже с уже выданным JWT
+		// (TTL до 7 дней). Проверяем оба флага бана при каждом запросе.
+		if user.IsBanned || user.IsHwidBanned {
+			return c.Status(http.StatusForbidden).JSON(ErrorResponse{Message: "Аккаунт заблокирован"})
+		}
+
 		c.Locals(currentUserKey, user)
 		return c.Next()
 	}

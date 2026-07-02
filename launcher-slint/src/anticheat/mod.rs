@@ -43,7 +43,7 @@ impl LaunchGuard {
         let blacklist = handshake::fetch_blacklist(config, token).unwrap_or_default();
         let detections = scan::scan_processes(&blacklist);
         let components = hwid::collect_hwid_components();
-        let manifest = IntegrityManifest::fetch(config);
+        let manifest = IntegrityManifest::fetch(config, token);
 
         match handshake::init(config, token, &components, &detections) {
             handshake::InitOutcome::Allowed {

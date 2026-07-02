@@ -25,9 +25,29 @@ func TestValidateAllowsRealSecretInProduction(t *testing.T) {
 		AppEnv:          "production",
 		JWTSecret:       "a-real-32-char-random-secret-value",
 		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("production с нормальными секретами должен проходить: %v", err)
+	}
+}
+
+func TestValidateRejectsEmptyDatabaseURLInProduction(t *testing.T) {
+	cfg := Config{
+		AppEnv:          "production",
+		JWTSecret:       "a-real-32-char-random-secret-value",
+		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		// DatabaseURL пуст → тихий SQLite-fallback, запрещён в проде.
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("production без DATABASE_URL должен отклоняться (SQLite-fallback запрещён)")
+	}
+}
+
+func TestValidateAllowsEmptyDatabaseURLInDevelopment(t *testing.T) {
+	cfg := Config{AppEnv: "development", JWTSecret: "dev-only-change-me"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("development с пустым DATABASE_URL (SQLite) должен работать: %v", err)
 	}
 }
 
