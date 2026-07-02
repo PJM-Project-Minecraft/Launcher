@@ -125,8 +125,11 @@ func main() {
 		acService.SetNotifier(notifier)
 		slog.Info("anticheat: telegram alerts enabled", "chat_id", cfg.AnticheatAlertChatID)
 	}
+	screenshotSvc := anticheat.NewScreenshotService(db, cfg.ScreenshotStorageRoot)
+	screenshotSvc.StartReaper(30 * time.Second)
 	anticheat.NewHandler(acService).
 		WithVersionGate(releaseService).
+		WithScreenshots(screenshotSvc, yggService.Store()).
 		RegisterRoutes(app, authService.RequireAuth())
 
 	slog.Info(

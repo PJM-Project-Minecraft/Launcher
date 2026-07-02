@@ -34,6 +34,17 @@ type Session struct {
 	Nonce       string
 	Verified    bool
 	expiresAt   time.Time
+	startedAt   time.Time // момент выдачи сессии (для списка онлайн в дашборде)
+}
+
+// OnlineSession — компактное представление живой игровой сессии для дашборда:
+// кто играет, с какого IP (join-запись) и когда сессия выдана.
+type OnlineSession struct {
+	UUID      string    `json:"uuid"`
+	Login     string    `json:"login"`
+	Nonce     string    `json:"nonce"`
+	IPAddress string    `json:"ipAddress"`
+	StartedAt time.Time `json:"startedAt"`
 }
 
 // JoinRecord — факт того, что клиент вызвал /join с валидным accessToken.
@@ -85,6 +96,10 @@ func (s *Store) restore() {
 			AccessToken: row.AccessToken, ClientToken: row.ClientToken,
 			UUID: row.UUID, Name: row.Name, Nonce: row.Nonce,
 			Verified: row.Verified, expiresAt: row.ExpiresAt,
+		}
+		// startedAt не персистится отдельно; используем expiresAt - TTL как оценку.
+		if !row.ExpiresAt.IsZero() {
+			sess.startedAt = row.ExpiresAt.Add(-sessionTTL)
 		}
 		s.sessions[sess.AccessToken] = sess
 		if sess.Nonce != "" {
@@ -149,6 +164,9 @@ func (s *Store) deleteJoin(serverID string) {
 
 func (s *Store) PutSession(sess Session) {
 	sess.expiresAt = time.Now().Add(sessionTTL)
+	if sess.startedAt.IsZero() {
+		sess.startedAt = time.Now()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[sess.AccessToken] = sess
@@ -269,6 +287,57 @@ func (s *Store) Session(accessToken string) (Session, bool) {
 		return Session{}, false
 	}
 	return sess, true
+}
+
+// SessionByNonce возвращает живую сессию по nonce (для привязки скриншот-запроса
+// к конкретному игроку: админ выбирает онлайн-сессию по nonce).
+func (s *Store) SessionByNonce(nonce string) (Session, bool) {
+	if nonce == "" {
+		return Session{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token, ok := s.nonces[nonce]
+	if !ok {
+		return Session{}, false
+	}
+	sess, ok := s.sessions[token]
+	if !ok || time.Now().After(sess.expiresAt) {
+		return Session{}, false
+	}
+	return sess, true
+}
+
+// ActiveSessions возвращает все живые Verified-сессии (онлайн-игроки) для дашборда.
+// IP берётся из связанной join-записи по UUID (join фиксирует IP подключения к серверу).
+func (s *Store) ActiveSessions() []OnlineSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	ipByUUID := make(map[string]string, len(s.joins))
+	for _, j := range s.joins {
+		if now.Before(j.expiresAt) && j.IP != "" {
+			ipByUUID[j.UUID] = j.IP
+		}
+	}
+	out := make([]OnlineSession, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		if now.After(sess.expiresAt) || !sess.Verified {
+			continue
+		}
+		started := sess.startedAt
+		if started.IsZero() {
+			started = sess.expiresAt.Add(-sessionTTL)
+		}
+		out = append(out, OnlineSession{
+			UUID:      sess.UUID,
+			Login:     sess.Name,
+			Nonce:     sess.Nonce,
+			IPAddress: ipByUUID[sess.UUID],
+			StartedAt: started,
+		})
+	}
+	return out
 }
 
 // ReplaceToken используется при /authserver/refresh: старый accessToken

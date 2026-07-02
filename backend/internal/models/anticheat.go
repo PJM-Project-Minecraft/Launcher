@@ -63,6 +63,27 @@ type AccountBan struct {
 	ExpiresAt *time.Time `json:"expiresAt"`
 }
 
+// Screenshot — скриншот экрана игрока по запросу админа (античит). Загружается
+// лаунчером игрока по pending-запросу, хранится в storage/screenshots и доступен
+// для повторного просмотра в дашборде. AutoMigrate создаёт таблицу; файлы — в ФС.
+type Screenshot struct {
+	ID        string    `gorm:"type:uuid;primaryKey" json:"id"`
+	UserUUID  string    `gorm:"size:64;index;not null" json:"userUuid"`
+	Login     string    `gorm:"size:64;index" json:"login"`
+	Nonce     string    `gorm:"size:64;index" json:"nonce"` // игровая сессия на момент запроса
+	// Status: pending (запрос создан, ждёт лаунчер) | capturing (лаунчер взял в работу)
+	// | done (скриншот загружен) | failed (ошибка/таймаут).
+	Status    string    `gorm:"size:16;not null;default:pending;index" json:"status"`
+	RequestedBy string  `gorm:"size:64" json:"requestedBy"` // login админа
+	FileName  string    `gorm:"size:255" json:"fileName"`    // имя файла в storage
+	Width     int       `json:"width"`
+	Height    int       `json:"height"`
+	Size      int64     `json:"size"` // байты JPEG
+	Error     string    `gorm:"size:255" json:"error"` // причина, если failed
+	CreatedAt time.Time `gorm:"index" json:"createdAt"`
+	CapturedAt *time.Time `json:"capturedAt,omitempty"` // когда лаунчер загрузил
+}
+
 // CheatSignature — запись блэклиста, по которой лаунчер и агенты ищут читы.
 // Kind задаёт, что сопоставляется; способ матча — MatchType (по Pattern или HashHex).
 type CheatSignature struct {

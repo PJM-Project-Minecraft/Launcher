@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, errorMessage } from '../lib/api';
-import type { AccountBan, CheatSignature, Detection, HwidBan, SignatureStat } from '../lib/types';
+import type { AccountBan, CheatSignature, Detection, HwidBan, Screenshot, SignatureStat } from '../lib/types';
 import { Tabs } from '../../components/ui/tabs';
 import { useToast } from '../../components/ui/toast';
 import { DetectionsTab } from '../../components/anticheat/detections-tab';
 import { BansTab } from '../../components/anticheat/bans-tab';
 import { SignaturesTab } from '../../components/anticheat/signatures-tab';
 import { StatsTab } from '../../components/anticheat/stats-tab';
+import { ScreenshotsTab } from '../../components/anticheat/screenshots-tab';
 
 export default function AnticheatPage() {
   const toast = useToast();
@@ -20,21 +21,24 @@ export default function AnticheatPage() {
   const [hwidBans, setHwidBans] = useState<HwidBan[]>([]);
   const [signatures, setSignatures] = useState<CheatSignature[]>([]);
   const [stats, setStats] = useState<SignatureStat[]>([]);
+  const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
 
   const reload = useCallback(async () => {
     try {
-      const [det, ab, hb, sigs, st] = await Promise.all([
+      const [det, ab, hb, sigs, st, shots] = await Promise.all([
         api<Detection[]>('/api/admin/anticheat/detections?limit=200'),
         api<AccountBan[]>('/api/admin/anticheat/bans/account'),
         api<HwidBan[]>('/api/admin/anticheat/bans/hwid'),
         api<CheatSignature[]>('/api/admin/anticheat/signatures'),
-        api<SignatureStat[]>('/api/admin/anticheat/stats?days=7')
+        api<SignatureStat[]>('/api/admin/anticheat/stats?days=7'),
+        api<Screenshot[]>('/api/admin/anticheat/screenshots?limit=100')
       ]);
       setDetections(det ?? []);
       setAccountBans(ab ?? []);
       setHwidBans(hb ?? []);
       setSignatures(sigs ?? []);
       setStats(st ?? []);
+      setScreenshots(shots ?? []);
     } catch (e) {
       toast('error', errorMessage(e));
     } finally {
@@ -58,6 +62,7 @@ export default function AnticheatPage() {
           { key: 'detections', label: 'Детекты', badge: detections.length },
           { key: 'bans', label: 'Баны', badge: accountBans.length + hwidBans.length },
           { key: 'signatures', label: 'Сигнатуры', badge: signatures.length },
+          { key: 'screenshots', label: 'Скриншоты', badge: screenshots.length },
           { key: 'stats', label: 'Статистика', badge: stats.length }
         ]}
         active={tab}
@@ -69,6 +74,7 @@ export default function AnticheatPage() {
         <BansTab accountBans={accountBans} hwidBans={hwidBans} loading={loading} onReload={reload} />
       )}
       {tab === 'signatures' && <SignaturesTab signatures={signatures} loading={loading} onReload={reload} />}
+      {tab === 'screenshots' && <ScreenshotsTab screenshots={screenshots} loading={loading} onReload={reload} />}
       {tab === 'stats' && <StatsTab stats={stats} loading={loading} />}
     </div>
   );

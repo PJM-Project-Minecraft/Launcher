@@ -22,6 +22,7 @@ type Config struct {
 	AdminLogins         []string
 	ProfileStorageRoot  string
 	LauncherReleaseRoot string
+	ScreenshotStorageRoot string
 	TelegramChannel     string
 	PublicBaseURL       string
 	YggdrasilKeyPath    string
@@ -71,6 +72,10 @@ func Load() Config {
 		LauncherReleaseRoot: env(
 			"LAUNCHER_RELEASE_ROOT",
 			filepath.Join("storage", "releases"),
+		),
+		ScreenshotStorageRoot: env(
+			"SCREENSHOT_STORAGE_ROOT",
+			filepath.Join("storage", "screenshots"),
 		),
 		AllowedOrigins: splitCSV(env(
 			"ALLOWED_ORIGINS",

@@ -1298,24 +1298,13 @@ fn session_keepalive_loop(api_url: &str, token: &str, nonce: &str, stop: &Atomic
         "{}/api/yggdrasil/launcher-session/keepalive",
         api_url.trim_end_matches('/')
     );
-    let quantum = Duration::from_secs(2);
-    let mut elapsed = Duration::ZERO;
-    loop {
-        thread::sleep(quantum);
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        elapsed += quantum;
-        if elapsed < KEEPALIVE_INTERVAL {
-            continue;
-        }
-        elapsed = Duration::ZERO;
+    anticheat::poll_until(stop, KEEPALIVE_INTERVAL, || {
         let _ = client
             .post(&url)
             .bearer_auth(token)
             .json(&serde_json::json!({ "nonce": nonce }))
             .send();
-    }
+    });
 }
 
 // Гарантирует наличие authlib-injector.jar в служебной папке лаунчера (вне
@@ -2043,6 +2032,14 @@ fn launch_profile(
     // скан его не видел). Делит stop-флаг с keepalive — оба гаснут на закрытии игры.
     let ingame_scan_handle = anticheat::spawn_ingame_scan(config, &guard, keepalive_stop.clone());
 
+    // Опрос скриншот-запросов: пока игра запущена, лаунчер проверяет, не запросил ли
+    // админ скриншот экрана. Делит stop-флаг с keepalive — гаснет на закрытии игры.
+    let screenshot_handle = anticheat::screenshot::spawn_screenshot_loop(
+        &config.api_url,
+        guard.launch_token(),
+        keepalive_stop.clone(),
+    );
+
     let status = child
         .wait()
         .map_err(|err| format!("Не удалось дождаться закрытия Minecraft: {}", err))?;
@@ -2051,6 +2048,7 @@ fn launch_profile(
     keepalive_stop.store(true, Ordering::Relaxed);
     let _ = keepalive_handle.join();
     let _ = ingame_scan_handle.join();
+    let _ = screenshot_handle.join();
     invalidate_yggdrasil_session(config, &session.access_token);
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о

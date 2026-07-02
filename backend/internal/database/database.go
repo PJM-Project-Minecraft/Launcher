@@ -57,5 +57,7 @@ func AutoMigrate(db *gorm.DB) error {
 		// Релизы лаунчера (автообновление).
 		&models.LauncherRelease{},
 		&models.LauncherReleaseFile{},
+		// Скриншоты экранов игроков (античит-запросы от админа).
+		&models.Screenshot{},
 	)
 }

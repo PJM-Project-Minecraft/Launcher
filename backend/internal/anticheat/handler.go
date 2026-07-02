@@ -2,6 +2,8 @@ package anticheat
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,24 +26,43 @@ type VersionGate interface {
 
 type Handler struct {
 	service     *Service
+	screenshots *ScreenshotService
+	sessions    OnlineSessionsProvider
 	versionGate VersionGate
 	// Лимитеры (указатели — переживают копирование Handler в WithVersionGate).
 	initLimiter   *rateLimiter
 	detectLimiter *rateLimiter
 	hbLimiter     *rateLimiter
+	// Лимитер аплоада скриншотов (на UUID игрока): лаунчер грузит редко, но защита от сбоя.
+	screenshotLimiter *rateLimiter
 }
 
-type ErrorResponse struct {
-	Message string `json:"message"`
+// OnlineSessionsProvider — доступ к живым игровым сессиям для скриншот-запросов и
+// списка онлайн-игроков. Реализуется yggdrasil.Store; интерфейс развязывает пакеты.
+type OnlineSessionsProvider interface {
+	ActiveSessions() []yggdrasil.OnlineSession
+	SessionByNonce(nonce string) (yggdrasil.Session, bool)
 }
 
 func NewHandler(service *Service) Handler {
 	return Handler{
-		service:       service,
-		initLimiter:   newRateLimiter(10, time.Minute),
-		detectLimiter: newRateLimiter(40, time.Minute),
-		hbLimiter:     newRateLimiter(6, time.Minute),
+		service:           service,
+		initLimiter:       newRateLimiter(10, time.Minute),
+		detectLimiter:     newRateLimiter(40, time.Minute),
+		hbLimiter:         newRateLimiter(6, time.Minute),
+		screenshotLimiter: newRateLimiter(10, time.Minute),
 	}
+}
+
+// WithScreenshots подключает подсистему скриншотов и провайдера онлайн-сессий.
+func (h Handler) WithScreenshots(ss *ScreenshotService, sessions OnlineSessionsProvider) Handler {
+	h.screenshots = ss
+	h.sessions = sessions
+	return h
+}
+
+type ErrorResponse struct {
+	Message string `json:"message"`
 }
 
 // WithVersionGate включает серверный форс-апдейт: клиенты ниже минимальной
@@ -80,6 +101,16 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// их лаунчер качает тем же этапом, но по прямым раздачам без JWT (как и раньше).
 	group.Get("/manifest", authMiddleware, h.manifest)
 
+	// Скриншоты (по launch-token): лаунчер опрашивает pending-запрос, грузит JPEG
+	// и сообщает об ошибке захвата. launch-token привязан к nonce онлайн-сессии,
+	// поэтому JWT не нужен — токен уже аутентифицирует конкретного игрока на
+	// конкретной игровой сессии. Токен берётся ТОЛЬКО из заголовка (не из query —
+	// иначе утечёт в логи reverse-proxy). Per-route BodyLimit сужает app-wide 512МБ
+	// до потолка скриншота на upload (защита memory-DoS).
+	group.Get("/screenshot/pending", h.screenshotPending)
+	group.Post("/screenshot/:id", screenshotUploadBodyLimit(h.screenshotUpload))
+	group.Post("/screenshot/:id/fail", h.screenshotFail)
+
 	// Admin: просмотр и управление.
 	admin := app.Group("/api/admin/anticheat")
 	admin.Use(authMiddleware, auth.RequireAdmin)
@@ -96,6 +127,14 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Post("/signatures", h.createSignature)
 	admin.Patch("/signatures/:id", h.updateSignature)
 	admin.Delete("/signatures/:id", h.deleteSignature)
+
+	// Скриншоты (admin): список онлайн-игроков, запрос скриншота, список/просмотр.
+	if h.screenshots != nil && h.sessions != nil {
+		admin.Get("/sessions/online", h.listOnlineSessions)
+		admin.Post("/screenshots", h.requestScreenshot)
+		admin.Get("/screenshots", h.listScreenshots)
+		admin.Get("/screenshots/:id/image", h.screenshotImage)
+	}
 }
 
 type initRequest struct {
@@ -159,11 +198,7 @@ func (h Handler) confirm(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
 	}
-	token := req.LaunchToken
-	if token == "" {
-		token = c.Get("X-Launch-Token")
-	}
-	if err := h.service.Confirm(token, req.Proof); err != nil {
+	if err := h.service.Confirm(launchTokenFromBody(c, req.LaunchToken), req.Proof); err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Не удалось подтвердить защиту"})
 	}
 	return c.SendStatus(http.StatusNoContent)
@@ -183,11 +218,7 @@ func (h Handler) detect(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
 	}
-	token := req.LaunchToken
-	if token == "" {
-		token = c.Get("X-Launch-Token")
-	}
-	claims, err := h.service.VerifyToken(token)
+	claims, err := h.service.VerifyToken(launchTokenFromBody(c, req.LaunchToken))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -219,11 +250,7 @@ func (h Handler) heartbeat(c fiber.Ctx) error {
 		LaunchToken string `json:"launchToken"`
 	}
 	_ = c.Bind().Body(&req)
-	token := req.LaunchToken
-	if token == "" {
-		token = c.Get("X-Launch-Token")
-	}
-	claims, err := h.service.VerifyToken(token)
+	claims, err := h.service.VerifyToken(launchTokenFromBody(c, req.LaunchToken))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -249,11 +276,7 @@ func (h Handler) diag(c fiber.Ctx) error {
 		Detail      string `json:"detail"`
 	}
 	_ = c.Bind().Body(&req)
-	token := req.LaunchToken
-	if token == "" {
-		token = c.Get("X-Launch-Token")
-	}
-	claims, err := h.service.VerifyToken(token)
+	claims, err := h.service.VerifyToken(launchTokenFromBody(c, req.LaunchToken))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -276,11 +299,7 @@ func truncate(s string, max int) string {
 }
 
 func (h Handler) rules(c fiber.Ctx) error {
-	token := c.Get("X-Launch-Token")
-	if token == "" {
-		token = c.Query("launchToken")
-	}
-	if _, err := h.service.VerifyToken(token); err != nil {
+	if _, err := h.service.VerifyToken(launchTokenFromHeader(c)); err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
 	rules, err := h.service.Rules(c.Context())
@@ -496,4 +515,206 @@ func normalizeSignatureUpdates(in map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// --- Скриншоты ---
+
+// listOnlineSessions — список живых Verified-сессий (онлайн-игроки) для дашборда.
+// По nonce админ выбирает игрока для скриншота.
+func (h Handler) listOnlineSessions(c fiber.Ctx) error {
+	if h.sessions == nil {
+		return c.JSON([]yggdrasil.OnlineSession{})
+	}
+	return c.JSON(h.sessions.ActiveSessions())
+}
+
+type requestScreenshotBody struct {
+	Nonce string `json:"nonce"`
+}
+
+// requestScreenshot — админ запрашивает скриншот экрана онлайн-игрока по nonce.
+// Резолвит nonce → (uuid, login) через OnlineSessionsProvider, затем создаёт pending.
+func (h Handler) requestScreenshot(c fiber.Ctx) error {
+	if h.screenshots == nil || h.sessions == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(ErrorResponse{Message: "Скриншоты выключены"})
+	}
+	var req requestScreenshotBody
+	if err := c.Bind().Body(&req); err != nil || req.Nonce == "" {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Укажите nonce"})
+	}
+	sess, ok := h.sessions.SessionByNonce(req.Nonce)
+	if !ok {
+		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Игрок не онлайн"})
+	}
+	admin, _ := auth.CurrentUser(c)
+	rec, err := h.screenshots.RequestScreenshot(c.Context(), sess.UUID, sess.Name, req.Nonce, admin.Login)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось создать запрос"})
+	}
+	return c.Status(http.StatusCreated).JSON(rec)
+}
+
+func (h Handler) listScreenshots(c fiber.Ctx) error {
+	if h.screenshots == nil {
+		return c.JSON([]models.Screenshot{})
+	}
+	limit, _ := strconv.Atoi(c.Query("limit", "100"))
+	items, err := h.screenshots.ListScreenshots(c.Context(), limit)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось получить скриншоты"})
+	}
+	return c.JSON(items)
+}
+
+func (h Handler) screenshotImage(c fiber.Ctx) error {
+	if h.screenshots == nil {
+		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
+	}
+	path, err := h.screenshots.ScreenshotFile(c.Context(), c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: err.Error()})
+	}
+	c.Set(fiber.HeaderContentType, "image/jpeg")
+	return c.SendFile(path)
+}
+
+// screenshotPending — лаунчер опрашивает: есть ли pending-запрос скриншота для
+// его игровой сессии (по launch-token → claims.Nonce). Аутентификация launch-token.
+func (h Handler) screenshotPending(c fiber.Ctx) error {
+	if h.screenshots == nil {
+		return c.Status(http.StatusNoContent).Send(nil)
+	}
+	claims, err := h.service.VerifyToken(launchTokenFromHeader(c))
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	rec, ok, err := h.screenshots.PendingScreenshot(c.Context(), claims.Nonce)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Ошибка запроса скриншота"})
+	}
+	if !ok {
+		return c.Status(http.StatusNoContent).Send(nil)
+	}
+	return c.JSON(fiber.Map{
+		"id":       rec.ID,
+		"nonce":    rec.Nonce,
+		"login":    rec.Login,
+		"userUuid": rec.UserUUID,
+	})
+}
+
+type screenshotUploadBody struct {
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Data   string `json:"data"` // base64 JPEG
+}
+
+// screenshotUpload — лаунчер грузит JPEG-скриншот по ID из pending-ответа.
+// Аутентификация launch-token (связан с nonce сессии, как и pending). Ранняя
+// проверка размера base64 ДО декодирования защищает от memory-DoS (app-wide
+// BodyLimit 512МБ позволил бы декодировать ~384МБ в heap).
+func (h Handler) screenshotUpload(c fiber.Ctx) error {
+	if h.screenshots == nil {
+		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
+	}
+	claims, err := h.service.VerifyToken(launchTokenFromHeader(c))
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	if !h.screenshotLimiter.allow(claims.UUID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
+	}
+	var req screenshotUploadBody
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
+	}
+	// Ранняя отсечка oversized base64 до декодирования (защита heap от 512МБ-тела).
+	if len(req.Data) > maxBase64Len {
+		return c.Status(http.StatusRequestEntityTooLarge).JSON(ErrorResponse{Message: "Скриншот слишком большой"})
+	}
+	id := c.Params("id")
+	// Авторизация ДО декодирования: лаунчер не может грузить чужой скриншот по ID.
+	if !h.screenshots.BelongsToNonce(c.Context(), id, claims.Nonce) {
+		return c.Status(http.StatusForbidden).JSON(ErrorResponse{Message: "Скриншот не принадлежит сессии"})
+	}
+	data, err := base64Decode(req.Data)
+	if err != nil || len(data) == 0 {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректные данные скриншота"})
+	}
+	if err := h.screenshots.CompleteScreenshot(c.Context(), id, data, req.Width, req.Height); err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось сохранить скриншот"})
+	}
+	return c.SendStatus(http.StatusNoContent)
+}
+
+type screenshotFailBody struct {
+	Reason string `json:"reason"`
+}
+
+// screenshotFail — лаунчер сообщает, что не смог захватить экран. Ранний сигнал:
+// помечает запись failed сразу, не дожидаясь 60с-таймаута reaper'а. Launch-token +
+// BelongsToNonce — только свою сессию.
+func (h Handler) screenshotFail(c fiber.Ctx) error {
+	if h.screenshots == nil {
+		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
+	}
+	claims, err := h.service.VerifyToken(launchTokenFromHeader(c))
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	id := c.Params("id")
+	if !h.screenshots.BelongsToNonce(c.Context(), id, claims.Nonce) {
+		return c.Status(http.StatusForbidden).JSON(ErrorResponse{Message: "Скриншот не принадлежит сессии"})
+	}
+	var req screenshotFailBody
+	_ = c.Bind().Body(&req)
+	if err := h.screenshots.FailScreenshot(c.Context(), id, req.Reason); err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось пометить провал"})
+	}
+	return c.SendStatus(http.StatusNoContent)
+}
+
+// screenshotUploadBodyLimit — per-route лимит тела для аплоада скриншота: сужает
+// app-wide 512МБ до потолка base64-JPEG (~12МБ). Отвергает по Content-Length ДО
+// того, как Fiber забуферизует тело в память (защита от memory-DoS на ранней стадии).
+// Fiber v3 не имеет встроенного bodylimit-middleware — это ручная отсечка.
+const screenshotMaxBodySize = maxBase64Len + 2*1024*1024 // base64 + JSON-оверhead
+
+func screenshotUploadBodyLimit(h fiber.Handler) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if cl := c.Get("Content-Length"); cl != "" {
+			if n, err := strconv.Atoi(cl); err == nil && n > screenshotMaxBodySize {
+				return c.Status(http.StatusRequestEntityTooLarge).
+					JSON(ErrorResponse{Message: "Скриншот слишком большой"})
+			}
+		}
+		return h(c)
+	}
+}
+
+// launchTokenFromHeader достаёт launch-token только из заголовка (НЕ из query —
+// query-токен утекает в логи reverse-proxy). Хелпер устраняет дублирование извлечения
+// в нескольких хендлерах; для POST с телом используйте launchTokenFromBody.
+func launchTokenFromHeader(c fiber.Ctx) string {
+	return c.Get("X-Launch-Token")
+}
+
+// launchTokenFromBody достаёт launch-token из тела (приоритет) или заголовка —
+// единый путь для POST launch-token-хендлеров (detect/heartbeat/confirm/diag/fail).
+func launchTokenFromBody(c fiber.Ctx, bodyToken string) string {
+	if bodyToken != "" {
+		return bodyToken
+	}
+	return c.Get("X-Launch-Token")
+}
+
+// base64Decode декодирует base64 (standard или URL-safe) JPEG от лаунчера.
+func base64Decode(s string) ([]byte, error) {
+	if s == "" {
+		return nil, errors.New("empty")
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.URLEncoding.DecodeString(s)
 }

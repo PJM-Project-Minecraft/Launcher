@@ -183,3 +183,31 @@ export type LauncherRelease = {
   updatedAt: string;
   files: LauncherReleaseFile[];
 };
+
+// Онлайн-игрок: живая Verified-сессия (для выбора цели скриншота).
+export type OnlineSession = {
+  uuid: string;
+  login: string;
+  nonce: string;
+  ipAddress: string;
+  startedAt: string;
+};
+
+export type ScreenshotStatus = 'pending' | 'capturing' | 'done' | 'failed';
+
+// Скриншот экрана игрока (запрос от админа, выполняется лаунчером игрока).
+export type Screenshot = {
+  id: string;
+  userUuid: string;
+  login: string;
+  nonce: string;
+  status: ScreenshotStatus;
+  requestedBy: string;
+  fileName: string;
+  width: number;
+  height: number;
+  size: number;
+  error: string;
+  createdAt: string;
+  capturedAt?: string | null;
+};

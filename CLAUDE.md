@@ -83,11 +83,14 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 Прод-only файлы (в git не входят, deploy не трогает): `.env`, `docker-compose.override.yml`,
 `backend/storage`, `backend/data`.
 
-**Прод-окружение:**
-- VPS: `root@13.140.17.105`, `/root/Launcher`
-- Docker compose: `launcher-server-1` (Fiber API, `127.0.0.1:8082` → `:8080`), `launcher-bot-1` (Telegram long polling), `launcher-postgres-1` (Postgres 16, наружу порт не публикуется)
-- Nginx: `launcher.likonchik.xyz` → 8082; `pjm.likonchik.xyz/api/gml/auth` → 8082; `admin.likonchik.xyz` → 3000
-- Dashboard: `127.0.0.1:3000`, `NEXT_PUBLIC_API_URL=https://launcher.likonchik.xyz` вшит в сборку
+**Прод-окружение (с 2026-06-24 — мигрировано на новый сервер):**
+- Сервер: `ssh srv-129` (`root@81.88.221.192`), **LXC-контейнер Proxmox** (Debian 12, 4 CPU / 6 ГБ / 69 ГБ), `/root/Launcher`. Docker в LXC работает (nesting). За NAT, внутренний IP `192.168.88.53`.
+- Docker compose: `launcher-server-1` (Fiber API, слушает `0.0.0.0:8080` **и** `0.0.0.0:8081` — оба на `:8080` контейнера), `launcher-bot-1` (Telegram long polling), `launcher-postgres-1` (Postgres 16, `127.0.0.1:5432`), `launcher-dashboard-1` (`0.0.0.0:3000`)
+- **Нет хостового nginx/certbot.** Домены и SSL — через **Reverse Proxy хостинга** (вкладка панели, автоSSL Let's Encrypt): `pjm.likonchik.xyz` → порт `8080`; `launcher.likonchik.xyz` → порт `8081` (хостинг не даёт два прокси-правила на один порт → второй бинд `8081` у `server`); `admin.likonchik.xyz` → порт `3000`.
+- CloudFlare: `launcher`/`pjm`/`admin` — **серое облако (DNS-only)**, A-запись → `81.88.221.192` (хостинг сам выпускает Let's Encrypt; при оранжевом облаке ACME не проходит, а Flexible даёт redirect-петлю). SSL/TLS mode в CF держать **Full**, не Flexible.
+- Dashboard: `NEXT_PUBLIC_API_URL=https://launcher.likonchik.xyz` вшит в сборку.
+- **Старый сервер** `root@13.140.17.105`: лаунчер-стек остановлен (`docker compose stop`), тома `launcher_postgres_data` оставлены для отката; `amnezia-awg2` (VPN) и `launcher-account-bot-db-1` (MariaDB) там продолжают работать — не трогать.
+- Миграция выполнена rsync `/root/Launcher` + `pg_dump`/restore БД (см. [[launcher-prod-deploy]]).
 
 **Гочи деплоя:**
 - Порты в base `docker-compose.yml` параметризованы: `${POSTGRES_BIND:-5432}`, `${SERVER_BIND:-8080}`. В прод `.env` задано `POSTGRES_BIND=127.0.0.1:5432` и `SERVER_BIND=127.0.0.1:8082`.
@@ -103,10 +106,12 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 
 **Артефакты агентов в прод** едут через scp (git их не несёт):
 ```bash
-scp backend/data/libanticheat.so root@13.140.17.105:/root/Launcher/backend/data/
-scp backend/data/anticheat.dll   root@13.140.17.105:/root/Launcher/backend/data/
-scp backend/data/anticheat-agent.jar root@13.140.17.105:/root/Launcher/backend/data/
+scp backend/data/libanticheat.so   srv-129:/root/Launcher/backend/data/
+scp backend/data/anticheat.dll     srv-129:/root/Launcher/backend/data/
+scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 ```
+
+> **Деплой после миграции (2026-06-24):** `deploy.sh` (git push → `git reset --hard origin/main` на VPS) писался под старый сервер. Новый `srv-129` склонирован на `main` и тянет git напрямую; для авто-деплоя на нём настраивался GitHub Actions self-hosted runner (юзер `github-user`, org `PJM-Project-Minecraft`) — механизм деплоя на новый сервер ещё не финализирован. Прод-only файлы те же (`.env`, `docker-compose.override.yml`, `backend/storage`, `backend/data`). В override `server` добавлен второй порт `8081` (см. прод-окружение).
 
 ---
 
@@ -248,3 +253,18 @@ GML auth payload (бэкенд → провайдер): `{"Login","Password","To
 - Late-attach блокируется `-XX:+DisableAttachMechanism` (лаунчер добавляет рядом с `-agentpath`).
 - Канал нативный→Java для рантайм-детектов: `<flag>.events` (нативный пишет, Java-поллер каждые 2с читает → `/detect`).
 - `ANTICHEAT_AUTO_BAN` по умолчанию off — детекты не банят автоматически.
+
+---
+
+## Семантический поиск по коду (Qdrant)
+
+Кодовая база проиндексирована в локальном Qdrant. Для поиска «по смыслу» (рус/англ):
+
+```bash
+/home/liko/Разработка/Qdrant/qdrant.sh search -p launcher "выдача JWT при логине"
+/home/liko/Разработка/Qdrant/qdrant.sh search -p launcher -n 10 --full "anticheat heartbeat"
+```
+
+Выдаёт путь:строку и фрагмент кода. Дополняет Grep, не заменяет: хорош для вопросов
+«где обрабатывается X», когда точное имя символа неизвестно. После крупных изменений
+переиндексация: `qdrant.sh index launcher`. Требует запущенный Qdrant (`qdrant.sh start`).

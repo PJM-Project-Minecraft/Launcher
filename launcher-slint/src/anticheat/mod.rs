@@ -8,6 +8,7 @@ mod hwid;
 mod inject;
 mod manifest;
 mod scan;
+pub mod screenshot;
 pub mod kick;
 
 use std::collections::HashSet;
@@ -77,6 +78,12 @@ impl LaunchGuard {
         &self.nonce
     }
 
+    /// launch-token античита: по нему лаунчер опрашивает скриншот-запросы и грузит
+    /// JPEG. Пустой — античит недоступен (fail-open), опрос в этом случае no-op.
+    pub fn launch_token(&self) -> &str {
+        &self.launch_token
+    }
+
     /// Ожидаемый SHA authlib-injector.jar (для верифицированной доставки в main).
     pub fn authlib_sha(&self) -> Option<&str> {
         self.manifest.as_ref().and_then(|m| m.authlib_sha())
@@ -115,6 +122,27 @@ impl LaunchGuard {
 
 /// Запускает фоновый поток in-game скана процессов во время игры: периодически сверяет
 /// запущенные процессы с блэклистом и шлёт НОВЫЕ совпадения на бэкенд по launch-token.
+/// poll_until — общий скелет polling-цикла для фоновых задач лаунчера (keepalive,
+/// in-game скан, опрос скриншот-запросов). Спит короткими квантами для отзывчивого
+/// завершения на закрытии игры (stop), вызывает work каждые interval. Единый
+/// источник истины для терминации/интервала — иначе три копии цикла разойдутся.
+pub fn poll_until(stop: &AtomicBool, interval: Duration, mut work: impl FnMut()) {
+    let quantum = Duration::from_secs(2);
+    let mut elapsed = Duration::ZERO;
+    loop {
+        thread::sleep(quantum);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        elapsed += quantum;
+        if elapsed < interval {
+            continue;
+        }
+        elapsed = Duration::ZERO;
+        work();
+    }
+}
+
 /// Закрывает пробел pre-launch скана — чит-софт, запущенный уже ПОСЛЕ старта игры.
 /// No-op (поток сразу завершается) без launch-token или при пустом блэклисте. Данные
 /// клонируются в поток, поэтому guard остаётся доступен в основном потоке (для finish).
@@ -131,25 +159,13 @@ pub fn spawn_ingame_scan(
             return;
         }
         let mut reported: HashSet<String> = HashSet::new();
-        // Спим короткими квантами для отзывчивого завершения на закрытии игры.
-        let quantum = Duration::from_secs(2);
-        let mut elapsed = Duration::ZERO;
-        loop {
-            thread::sleep(quantum);
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            elapsed += quantum;
-            if elapsed < INGAME_SCAN_INTERVAL {
-                continue;
-            }
-            elapsed = Duration::ZERO;
+        poll_until(&stop, INGAME_SCAN_INTERVAL, || {
             for d in scan::scan_processes(&blacklist) {
                 // Дедуп: одну и ту же сигнатуру за сессию шлём один раз.
                 if reported.insert(d.signature.clone()) {
                     scan::report_detection(&api_url, &launch_token, &d);
                 }
             }
-        }
+        });
     })
 }
