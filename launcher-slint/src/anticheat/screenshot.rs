@@ -263,9 +263,45 @@ fn capture_raw() -> Result<(Vec<u8>, u32, u32), String> {
 fn encode_jpeg(rgba: &[u8], width: u32, height: u32) -> Result<(Vec<u8>, u32, u32), String> {
     use image::codecs::jpeg::JpegEncoder;
     use image::ExtendedColorType;
+    // JPEG не поддерживает альфа-канал — сбрасываем RGBA в RGB.
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+    }
     let mut out = Vec::new();
     let mut enc = JpegEncoder::new_with_quality(&mut out, 75);
-    enc.encode(rgba, width, height, ExtendedColorType::Rgba8)
+    enc.encode(&rgb, width, height, ExtendedColorType::Rgb8)
         .map_err(|e| format!("jpeg encode: {}", e))?;
     Ok((out, width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// JpegEncoder отвергает Rgba8 (JPEG без альфы) — encode_jpeg обязан
+    /// конвертировать в RGB сам, иначе каждый скриншот уходит в fail.
+    #[test]
+    fn encode_jpeg_accepts_rgba_input() {
+        let rgba: Vec<u8> = vec![
+            255, 0, 0, 255, /**/ 0, 255, 0, 255, //
+            0, 0, 255, 255, /**/ 255, 255, 255, 255,
+        ];
+        let (jpg, w, h) = encode_jpeg(&rgba, 2, 2).expect("encode_jpeg failed");
+        assert_eq!((w, h), (2, 2));
+        assert!(jpg.starts_with(&[0xFF, 0xD8]), "нет JPEG SOI-маркера");
+    }
+
+    /// Полный путь captura→JPEG на реальном экране. Требует дисплей,
+    /// поэтому ignored: cargo test -- --ignored (локально/на машине с X11).
+    #[test]
+    #[ignore]
+    fn capture_real_screen_to_jpeg() {
+        let (jpg, w, h) = capture_screen_jpeg().expect("capture failed");
+        assert!(w > 0 && h > 0);
+        assert!(jpg.starts_with(&[0xFF, 0xD8]));
+        if let Ok(dir) = std::env::var("SCREENSHOT_TEST_OUT") {
+            let _ = std::fs::write(format!("{}/capture_test.jpg", dir), &jpg);
+        }
+    }
 }

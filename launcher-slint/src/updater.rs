@@ -36,17 +36,16 @@ pub struct UpdateInfo {
     #[serde(default)]
     pub mandatory: bool,
     #[serde(default)]
-    pub changelog: String,
-    #[serde(default)]
     pub download_url: String,
     #[serde(default)]
     pub sha256: String,
-    #[serde(default)]
-    pub size: i64,
 }
 
 /// Посегментное сравнение версий "X.Y.Z"; отсутствующие и нечисловые
 /// сегменты считаются нулями (зеркало CompareVersions на бэкенде).
+/// Решение об обновлении принимает сервер; здесь оставлено как
+/// протестированный эталон алгоритма.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     fn parse(version: &str) -> Vec<u64> {
         version
