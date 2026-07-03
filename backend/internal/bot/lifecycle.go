@@ -16,6 +16,12 @@ func (s *Service) Attach(bot *tele.Bot) {
 		}
 		return nil
 	})
+	bot.Handle(tele.OnCallback, func(c tele.Context) error {
+		if err := s.HandleCallback(c); err != nil && s.Log != nil {
+			s.Log.Error("callback", "err", err)
+		}
+		return nil
+	})
 }
 
 func (s *Service) HandleText(c tele.Context) error {
@@ -185,33 +191,10 @@ func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, t
 		return s.beginRegisterFlow(chatID, _tg)
 
 	case "Сменить пароль", "/password":
-		if uidPtr, err := s.linkedUID(telegramUID); err != nil {
-			return err
-		} else if uidPtr == nil {
-			return s.forbidNotLinked(chatID, telegramUID)
-		}
-		ep := repo.EmptyPayload()
-		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangePwdOld, &ep)
-		return s.notifyHTML(chatID, s.msgWithCancelHint(
-			"Смена пароля в два шага:\n"+
-				"1) Сейчас пришлите <b>текущий пароль</b> (его сообщение будет удалено из чата и заменено заглушкой).\n"+
-				"2) Затем бот пришлёт <b>шестизначный код</b> в этот чат — введите его.\n"+
-				"3) После этого пришлите <b>новый пароль</b> (8–128 символов).\n\n"+
-				"<i>Если забыли пароль — обратитесь к администратору проекта.</i>"),
-			keyboardRemove())
+		return s.beginPasswordFlow(chatID, telegramUID)
 
 	case "Email", "/email":
-		if uidPtr, err := s.linkedUID(telegramUID); err != nil {
-			return err
-		} else if uidPtr == nil {
-			return s.forbidNotLinked(chatID, telegramUID)
-		}
-		ep := repo.EmptyPayload()
-		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangeEmailAsk, &ep)
-		return s.notifyHTML(chatID, s.msgWithCancelHint(
-			"Укажите новый <b>адрес e-mail</b> одним сообщением (тот, который будет храниться в аккаунте).\n\n"+
-				"После этого бот пришлёт код в чат — его нужно будет ввести, чтобы подтвердить смену."),
-			keyboardRemove())
+		return s.beginEmailFlow(chatID, telegramUID)
 
 	case "2FA", "/2fa", "/totp":
 		return s.beginTotpFlow(chatID, telegramUID)
@@ -297,4 +280,37 @@ func (s *Service) cmdHelp(chatID int64, telegramUID int64) error {
 		"<code>/admin</code> — панель модератора (только при роли и allowlist)",
 	}, "\n")
 	return s.notifyHTML(chatID, txt, kb)
+}
+
+// beginPasswordFlow запускает сценарий смены пароля (текстовые шаги как раньше).
+func (s *Service) beginPasswordFlow(chatID, telegramUID int64) error {
+	if uidPtr, err := s.linkedUID(telegramUID); err != nil {
+		return err
+	} else if uidPtr == nil {
+		return s.forbidNotLinked(chatID, telegramUID)
+	}
+	ep := repo.EmptyPayload()
+	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangePwdOld, &ep)
+	return s.notifyHTML(chatID, s.msgWithCancelHint(
+		"Смена пароля в два шага:\n"+
+			"1) Сейчас пришлите <b>текущий пароль</b> (его сообщение будет удалено из чата и заменено заглушкой).\n"+
+			"2) Затем бот пришлёт <b>шестизначный код</b> в этот чат — введите его.\n"+
+			"3) После этого пришлите <b>новый пароль</b> (8–128 символов).\n\n"+
+			"<i>Если забыли пароль — обратитесь к администратору проекта.</i>"),
+		homeReplyKeyboardMarkup())
+}
+
+// beginEmailFlow запускает сценарий смены почты.
+func (s *Service) beginEmailFlow(chatID, telegramUID int64) error {
+	if uidPtr, err := s.linkedUID(telegramUID); err != nil {
+		return err
+	} else if uidPtr == nil {
+		return s.forbidNotLinked(chatID, telegramUID)
+	}
+	ep := repo.EmptyPayload()
+	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangeEmailAsk, &ep)
+	return s.notifyHTML(chatID, s.msgWithCancelHint(
+		"Укажите новый <b>адрес e-mail</b> одним сообщением (тот, который будет храниться в аккаунте).\n\n"+
+			"После этого бот пришлёт код в чат — его нужно будет ввести, чтобы подтвердить смену."),
+		homeReplyKeyboardMarkup())
 }
