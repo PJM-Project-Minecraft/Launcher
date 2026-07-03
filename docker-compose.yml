@@ -65,6 +65,8 @@ services:
       TOTP_ISSUER: "${TOTP_ISSUER:-Launcher Accounts}"
       DONATE_SHOP_URL: "${DONATE_SHOP_URL:-https://shop.likonchik.xyz}"
       LAUNCHER_EXE_PATH: "${LAUNCHER_EXE_PATH:-}"
+      # Баннер inline-меню (link-preview). Пусто — меню без картинки.
+      BOT_BANNER_URL: "${BOT_BANNER_URL:-}"
     depends_on:
       postgres:
         condition: service_healthy
