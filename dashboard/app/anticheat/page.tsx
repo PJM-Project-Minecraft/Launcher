@@ -36,6 +36,9 @@ export default function AnticheatPage() {
   const [online, setOnline] = useState<OnlineSession[]>([]);
   const [onlineLoading, setOnlineLoading] = useState(false);
 
+  // Префильтр детектов по логину (переход из просмотрщика скриншотов).
+  const [detectionsLogin, setDetectionsLogin] = useState('');
+
   const reload = useCallback(async () => {
     try {
       const [det, ab, hb, sigs, st, shots] = await Promise.all([
@@ -95,7 +98,15 @@ export default function AnticheatPage() {
         onChange={setTab}
       />
 
-      {tab === 'detections' && <DetectionsTab detections={detections} loading={loading} onReload={reload} />}
+      {tab === 'detections' && (
+        <DetectionsTab
+          detections={detections}
+          loading={loading}
+          onReload={reload}
+          online={online}
+          initialLoginFilter={detectionsLogin}
+        />
+      )}
       {tab === 'bans' && (
         <BansTab accountBans={accountBans} hwidBans={hwidBans} loading={loading} onReload={reload} />
       )}
@@ -108,7 +119,10 @@ export default function AnticheatPage() {
           online={online}
           onlineLoading={onlineLoading}
           onReloadOnline={reloadOnline}
-          onOpenDetections={() => setTab('detections')}
+          onOpenDetections={(login) => {
+            setDetectionsLogin(login);
+            setTab('detections');
+          }}
         />
       )}
       {tab === 'stats' && <StatsTab stats={stats} loading={loading} />}

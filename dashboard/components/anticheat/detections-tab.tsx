@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Camera, ShieldCheck } from 'lucide-react';
 import { api, errorMessage } from '../../app/lib/api';
-import type { Detection, DetectionStatus } from '../../app/lib/types';
+import type { Detection, DetectionStatus, OnlineSession } from '../../app/lib/types';
+import { Input } from '../ui/input';
 import { StatCard } from '../ui/stat-card';
 import { Table, Th, Td } from '../ui/table';
 import { Badge } from '../ui/badge';
@@ -43,11 +44,15 @@ const selectClass =
 export function DetectionsTab({
   detections,
   loading,
-  onReload
+  onReload,
+  online,
+  initialLoginFilter
 }: {
   detections: Detection[];
   loading: boolean;
   onReload: () => Promise<void>;
+  online: OnlineSession[];
+  initialLoginFilter?: string;
 }) {
   const toast = useToast();
   const confirm = useConfirm();
@@ -56,6 +61,13 @@ export function DetectionsTab({
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [confidenceFilter, setConfidenceFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [loginFilter, setLoginFilter] = useState(initialLoginFilter ?? '');
+  const [shotRequestingId, setShotRequestingId] = useState<string | null>(null);
+
+  // Префильтр из просмотрщика скриншотов: «Детекты игрока» обновляет проп.
+  useEffect(() => {
+    if (initialLoginFilter !== undefined && initialLoginFilter !== '') setLoginFilter(initialLoginFilter);
+  }, [initialLoginFilter]);
 
   const stats = {
     total: detections.length,
@@ -64,15 +76,15 @@ export function DetectionsTab({
     players: new Set(detections.map((d) => d.userUuid)).size
   };
 
-  const filtered = useMemo(
-    () =>
-      detections.filter(
-        (d) =>
-          (confidenceFilter === '' || d.confidence === confidenceFilter) &&
-          (statusFilter === '' || d.status === statusFilter)
-      ),
-    [detections, confidenceFilter, statusFilter]
-  );
+  const filtered = useMemo(() => {
+    const q = loginFilter.trim().toLowerCase();
+    return detections.filter(
+      (d) =>
+        (confidenceFilter === '' || d.confidence === confidenceFilter) &&
+        (statusFilter === '' || d.status === statusFilter) &&
+        (q === '' || (d.login || d.userUuid).toLowerCase().includes(q))
+    );
+  }, [detections, confidenceFilter, statusFilter, loginFilter]);
 
   async function updateStatus(d: Detection, status: DetectionStatus) {
     setReviewingId(d.id);
@@ -134,6 +146,20 @@ export function DetectionsTab({
     }
   }
 
+  async function requestScreenshot(d: Detection) {
+    const sess = online.find((o) => o.uuid === d.userUuid);
+    if (!sess) return;
+    setShotRequestingId(d.id);
+    try {
+      await api('/api/admin/anticheat/screenshots', { method: 'POST', body: { nonce: sess.nonce } });
+      toast('success', `Запрос скриншота отправлен: ${sess.login}`);
+    } catch (e) {
+      toast('error', errorMessage(e));
+    } finally {
+      setShotRequestingId(null);
+    }
+  }
+
   if (loading) {
     return <SkeletonTable rows={6} cols={8} />;
   }
@@ -148,6 +174,13 @@ export function DetectionsTab({
       </div>
 
       <div className="flex flex-wrap gap-2">
+        <Input
+          value={loginFilter}
+          onChange={(e) => setLoginFilter(e.target.value)}
+          placeholder="Поиск по логину…"
+          className="h-9 w-44 text-sm"
+          aria-label="Поиск по логину"
+        />
         <select
           value={confidenceFilter}
           onChange={(e) => setConfidenceFilter(e.target.value)}
@@ -229,6 +262,17 @@ export function DetectionsTab({
                           Отклонить
                         </Button>
                       </>
+                    )}
+                    {online.some((o) => o.uuid === d.userUuid) && (
+                      <Button
+                        variant="ghost"
+                        className="h-8 px-2.5"
+                        title="Запросить скриншот экрана"
+                        loading={shotRequestingId === d.id}
+                        onClick={() => void requestScreenshot(d)}
+                      >
+                        <Camera size={14} />
+                      </Button>
                     )}
                     <Button
                       variant="danger"
