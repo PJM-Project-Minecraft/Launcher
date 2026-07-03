@@ -107,6 +107,7 @@ func (s *Service) HandleCallback(c tele.Context) error {
 	case cbAdmin:
 		adm, err := s.resolveAdmin(telegramUID)
 		if err != nil {
+			s.answerCb(cb.ID, "Ошибка, попробуйте ещё раз", false)
 			return err
 		}
 		if adm == nil {
