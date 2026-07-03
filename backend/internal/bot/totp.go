@@ -80,7 +80,7 @@ func (s *Service) beginTotpSetup(chatID int64, telegramUID int64, u *models.User
 			"<i>Пока вы не введёте верный код, 2FA для лаунчера не включится.</i>",
 		escHTML(key.Secret()), safeHref,
 	)
-	return s.notifyHTML(chatID, s.msgWithCancelHint(body), keyboardRemove())
+	return s.notifyHTML(chatID, s.msgWithCancelHint(body), homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleTotpConfirm(chatID int64, messageID int, telegramUID int64, text string) error {
@@ -103,11 +103,7 @@ func (s *Service) handleTotpConfirm(chatID int64, messageID int, telegramUID int
 	}
 	if u.TOTPEnabled {
 		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-		kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-		if err != nil {
-			return err
-		}
-		return s.notifyHTML(chatID, "2FA уже включена для этого аккаунта. Чтобы отключить — снова «2FA» и следуйте шагам (пароль и код).", kb)
+		return s.sendHomeMenu(chatID, telegramUID, "2FA уже включена для этого аккаунта.")
 	}
 	if len(code) != 6 {
 		return s.notifyWarn(chatID, "Нужен код из <b>6 цифр</b> без пробелов (как показывает приложение-аутентификатор прямо сейчас).")
@@ -123,14 +119,7 @@ func (s *Service) handleTotpConfirm(chatID int64, messageID int, telegramUID int
 		return err
 	}
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
-	return s.notifyHTML(chatID,
-		"<b>2FA включена.</b> При входе в лаунчер после логина и пароля потребуется код из приложения.\n\n"+
-			"<i>Потеряли телефон — восстановление только через администратора.</i>",
-		kb)
+	return s.sendHomeMenu(chatID, telegramUID, "✅ <b>2FA включена.</b> При входе в лаунчер потребуется код из приложения.")
 }
 
 func (s *Service) beginTotpDisable(chatID int64, telegramUID int64) error {
@@ -159,7 +148,7 @@ func (s *Service) beginTotpDisable(chatID int64, telegramUID int64) error {
 		"<b>Отключение 2FA</b>\n\n"+
 			"Введите <b>пароль от аккаунта</b> (как для входа). Сообщение с паролем бот скроет и удалит из линии чата.\n\n"+
 			"Затем попросим код из приложения — это защита от случайного отключения."),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleTotpDisablePwd(chatID int64, messageID int, telegramUID int64, text string) error {
@@ -180,11 +169,7 @@ func (s *Service) handleTotpDisablePwd(chatID int64, messageID int, telegramUID 
 	}
 	if !u.TOTPEnabled {
 		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-		kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-		if err != nil {
-			return err
-		}
-		return s.notifyHTML(chatID, "2FA уже выключена. Включить снова — кнопка «2FA».", kb)
+		return s.sendHomeMenu(chatID, telegramUID, "2FA уже выключена.")
 	}
 	pw := strings.TrimSpace(text)
 	if pw != "" && messageID > 0 {
@@ -201,7 +186,7 @@ func (s *Service) handleTotpDisablePwd(chatID int64, messageID int, telegramUID 
 	}
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"Пароль принят. Введите <b>текущий шестизначный код</b> из приложения 2FA — тем самым подтверждаете отключение."),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleTotpDisableOTP(chatID int64, messageID int, telegramUID int64, text string) error {
@@ -236,12 +221,5 @@ func (s *Service) handleTotpDisableOTP(chatID int64, messageID int, telegramUID 
 		return err
 	}
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
-	return s.notifyHTML(chatID,
-		"<b>2FA отключена.</b> В лаунчере снова достаточно логина и пароля.\n\n"+
-			"<i>При желании включите защиту снова кнопкой «2FA».</i>",
-		kb)
+	return s.sendHomeMenu(chatID, telegramUID, "✅ <b>2FA отключена.</b> В лаунчере снова достаточно логина и пароля.")
 }

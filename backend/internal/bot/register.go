@@ -21,12 +21,8 @@ func (s *Service) alreadyLinkedChat(chatID int64, sender *tele.User) (bool, erro
 		return false, err
 	}
 	if u != nil {
-		kb, kbErr := s.mainKeyboardMarkup(chatID, tgid)
-		if kbErr != nil {
-			return false, kbErr
-		}
-		_ = s.notifyHTML(chatID, "У вас уже привязан аккаунт к этому Telegram.\nОткройте «Профиль» или воспользуйтесь меню /start — вход и регистрация больше не нужны.", kb)
 		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+		_ = s.sendHomeMenu(chatID, tgid, "У вас уже привязан аккаунт к этому Telegram — вход и регистрация не нужны.")
 		return true, nil
 	}
 	return false, nil
@@ -46,7 +42,7 @@ func (s *Service) beginLoginFlow(chatID int64, sender *tele.User) error {
 				"• <b>игровой ник</b> — если он уже есть в базе;\n"+
 				"• иначе <b>логин</b>, которым вы входили на сайте, или <b>e-mail</b> учётки.\n\n"+
 				"<i>Один ответ — одно сообщение, без лишнего текста.</i>"),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) beginRegisterFlow(chatID int64, sender *tele.User) error {
@@ -61,7 +57,7 @@ func (s *Service) beginRegisterFlow(chatID int64, sender *tele.User) error {
 		"<b>Регистрация, шаг 1</b>\n\n"+
 			"Придумайте <b>логин</b> (в игре и на сайте будет тот же ник, пока админ не сменит): латиница, цифры или символ <code>_</code>, от 3 до 32 символов.\n\n"+
 			"<i>Пример: <code>my_player_01</code></i>"),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleRegUsername(chatID int64, sender *tele.User, text string) error {
@@ -87,7 +83,7 @@ func (s *Service) handleRegUsername(chatID int64, sender *tele.User, text string
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"<b>Шаг 2</b>: укажите <b>e-mail</b> — на него будут завязаны уведомления и восстановление.\n\n"+
 			"Одна строка, формат как в обычной почте: <code>имя@домен</code>"),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleRegEmail(chatID int64, sender *tele.User, payload repo.DialoguePayload, text string) error {
@@ -118,7 +114,7 @@ func (s *Service) handleRegEmail(chatID int64, sender *tele.User, payload repo.D
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"<b>Шаг 3</b>: придумайте <b>пароль</b> (от 8 символов, максимум 72) одним сообщением.\n\n"+
 			"<i>После отправки сообщение с паролем будет удалено из чата.</i>"),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleRegPassword(chatID int64, messageID int, sender *tele.User, payload repo.DialoguePayload, text string) error {
@@ -160,7 +156,7 @@ func (s *Service) handleRegPassword(chatID int64, messageID int, sender *tele.Us
 		"<b>Шаг 4</b>: подтвердите регистрацию кодом из этого чата (действует <b>%d мин.</b>).\n"+
 			"Введите шесть цифр отдельным сообщением.\n\n<code>%s</code>",
 		otpMinutes, escHTML(code),
-	)), keyboardRemove())
+	)), homeReplyKeyboardMarkup())
 	return nil
 }
 
@@ -201,12 +197,5 @@ func (s *Service) handleRegOTP(chatID int64, sender *tele.User, payload repo.Dia
 	_ = repo.InsertAuthLog(s.ctx(), s.DB, &uid, uname, "telegram-bot-register", true, strPtr("registered_and_linked"))
 
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUserID(sender))
-	if err != nil {
-		return err
-	}
-	return s.notifyHTML(chatID,
-		"<b>Аккаунт создан</b> и сразу привязан к вашему Telegram.\n\n"+
-			"Откройте «Профиль», при необходимости настройте «2FA» для лаунчера. Команды: /help.",
-		kb)
+	return s.sendHomeMenu(chatID, telegramUserID(sender), "✅ <b>Аккаунт создан и привязан.</b> Добро пожаловать!")
 }

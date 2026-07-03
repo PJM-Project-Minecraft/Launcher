@@ -67,8 +67,6 @@ func escHTMLAttr(t string) string {
 	return strings.NewReplacer("&", "&amp;", `"`, "&quot;").Replace(t)
 }
 
-func keyboardRemove() map[string]any { return map[string]any{"remove_keyboard": true} }
-
 func otpPlain() (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(900000))
 	if err != nil {
@@ -165,16 +163,8 @@ func (s *Service) linkedUID(telegramUID int64) (*string, error) {
 }
 
 func (s *Service) forbidNotLinked(chatID int64, telegramUID int64) error {
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
-	return s.notifyHTML(chatID,
-		"Чтобы пользоваться профилем, паролем и 2FA, сначала <b>привяжите аккаунт</b>:\n"+
-			"• «🔑 Войти» — если учётка уже есть.\n"+
-			"• «📋 Регистрация» — если создаёте новую.\n\n"+
-			"<i>После привязки снова откроется полное меню с кнопками.</i>",
-		kb)
+	return s.sendHomeMenu(chatID, telegramUID,
+		"⚠ Раздел доступен после привязки аккаунта — «Войти» или «Регистрация».")
 }
 
 func (s *Service) resolveAdmin(telegramUID int64) (*adminContext, error) {
@@ -189,70 +179,6 @@ func (s *Service) resolveAdmin(telegramUID int64) (*adminContext, error) {
 		return nil, nil
 	}
 	return &adminContext{user: *me}, nil
-}
-
-func (s *Service) btnWithIconFallback(text, style, explicitIcon string) telegram.KeyboardBtn {
-	b := telegram.KeyboardBtn{Text: text, Style: style}
-	if ex := strings.TrimSpace(explicitIcon); ex != "" {
-		b.IconCustomEmojiID = ex
-		return b
-	}
-	switch style {
-	case "primary":
-		b.IconCustomEmojiID = s.Cfg.ButtonEmojiPrimary
-	case "success":
-		b.IconCustomEmojiID = s.Cfg.ButtonEmojiSuccess
-	case "danger":
-		b.IconCustomEmojiID = s.Cfg.ButtonEmojiDanger
-	}
-	return b
-}
-
-func (s *Service) linkedFlag(telegramUID int64) (bool, error) {
-	u, err := repo.FindUserByTelegram(s.ctx(), s.DB, telegramUID)
-	return u != nil, err
-}
-
-func (s *Service) mainKeyboardMarkup(chatID int64, telegramUID int64) (map[string]any, error) {
-	linked, err := s.linkedFlag(telegramUID)
-	if err != nil {
-		return nil, err
-	}
-	adm, err := s.resolveAdmin(telegramUID)
-	if err != nil {
-		return nil, err
-	}
-	loginBtn := s.btnWithIconFallback("🔑 Войти", "primary", "")
-	regBtn := s.btnWithIconFallback("📋 Регистрация", "success", "")
-	profile := s.btnWithIconFallback(labelBtnProfile, "primary", s.Cfg.ButtonEmojiProfile)
-	pwd := s.btnWithIconFallback(labelBtnChangePassword, "primary", s.Cfg.ButtonEmojiChangePass)
-	emailBtn := s.btnWithIconFallback(labelBtnEmail, "primary", s.Cfg.ButtonEmojiChangeEmail)
-	twofaBtn := s.btnWithIconFallback(labelBtn2FA, "primary", s.Cfg.ButtonEmoji2FA)
-	admk := s.btnWithIconFallback("🛠 Админка", "danger", "")
-	donateBtn := s.btnWithIconFallback(donateKeyboardLabel, "success", s.Cfg.ButtonEmojiDonate)
-	var shopRow []telegram.KeyboardBtn
-	shopRow = append(shopRow, donateBtn)
-	if s.launcherExePath() != "" {
-		launcherBtn := s.btnWithIconFallback(launcherKeyboardLabel, "primary", s.Cfg.ButtonEmojiLauncher)
-		shopRow = append(shopRow, launcherBtn)
-	}
-
-	var rows [][]telegram.KeyboardBtn
-	placeholder := "Напишите ответ боту или нажмите кнопку снизу"
-	if !linked {
-		rows = [][]telegram.KeyboardBtn{{loginBtn, regBtn}, shopRow}
-		placeholder = "Начните с «Войти» или «Регистрация»"
-	} else {
-		row1 := []telegram.KeyboardBtn{profile, pwd}
-		row2 := []telegram.KeyboardBtn{emailBtn, twofaBtn}
-		rows = [][]telegram.KeyboardBtn{row1, row2, shopRow}
-		placeholder = "Выберите действие кнопкой или напишите команду (список: /help)"
-		if adm != nil {
-			rows = append(rows, []telegram.KeyboardBtn{admk})
-		}
-	}
-	k := &telegram.ReplyKeyboardStyled{Rows: rows, Resize: true, InputPlaceholder: placeholder}
-	return k.ToReplyMarkup(), nil
 }
 
 func maskEmailUnsafe(mail string) string {
@@ -273,10 +199,7 @@ func maskEmailUnsafe(mail string) string {
 func (s *Service) launcherExePath() string { return strings.TrimSpace(s.Cfg.LauncherExePath) }
 
 func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
+	kb := homeReplyKeyboardMarkup()
 	raw := s.launcherExePath()
 	if raw == "" {
 		return s.notifyWarn(chatID, "Лаунчер не настроен (LAUNCHER_EXE_PATH). Обратитесь к администратору проекта.")
@@ -327,10 +250,7 @@ func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 }
 
 func (s *Service) replyDonateShop(chatID int64, telegramUID int64) error {
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
+	kb := homeReplyKeyboardMarkup()
 	url := strings.TrimSpace(s.Cfg.DonateShopURL)
 	if url == "" {
 		url = "https://shop.likonchik.xyz"

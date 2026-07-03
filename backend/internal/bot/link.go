@@ -24,7 +24,7 @@ func (s *Service) handleLinkLogin(chatID int64, text string) error {
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"<b>Шаг 2</b>: отправьте <b>пароль</b> от этой учётной записи одним сообщением.\n\n"+
 			"<i>Сообщение с паролем бот удалит из чата и заменит заглушкой со спойлером — так безопаснее.</i>"),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 }
 
 func (s *Service) handleLinkPassword(chatID int64, messageID int, sender *tele.User, payload repo.DialoguePayload, text string) (repo.DialoguePayload, error) {
@@ -91,7 +91,7 @@ func (s *Service) handleLinkPassword(chatID int64, messageID int, sender *tele.U
 		"<b>Шаг 3</b>: в чат пришёл одноразовый код (действует <b>%d мин.</b>).\n"+
 			"Введите <b>ровно эти 6 цифр</b> отдельным сообщением — так мы убедимся, что это ваш Telegram.\n\n<code>%s</code>",
 		otpMinutes, escHTML(code),
-	)), keyboardRemove())
+	)), homeReplyKeyboardMarkup())
 
 	dp := payload
 	dp.OtpUserID = &ui
@@ -123,15 +123,8 @@ func (s *Service) handleLinkOTP(chatID int64, sender *tele.User, payload repo.Di
 	_ = repo.BindTelegram(s.ctx(), s.DB, uid, telegramUserID(sender), ptrStrOrNil(uname))
 	_ = repo.InsertAuthLog(s.ctx(), s.DB, &uid, "?", "telegram-bot-link", true, strPtr("linked"))
 
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUserID(sender))
-	if err != nil {
-		return err
-	}
-	_ = s.notifyHTML(chatID,
-		"<b>Готово.</b> Аккаунт привязан к вашему Telegram.\n\n"+
-			"Дальше: «Профиль», при желании «2FA» для лаунчера, смена пароля или почты — кнопками внизу. Справка: /help.",
-		kb)
-	return repo.ClearDialogue(s.ctx(), s.DB, chatID)
+	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+	return s.sendHomeMenu(chatID, telegramUserID(sender), "✅ <b>Аккаунт привязан.</b> Теперь доступны профиль, пароль, почта и 2FA.")
 }
 
 func strPtr(s string) *string { return &s }
