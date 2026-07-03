@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, errorMessage } from '../lib/api';
-import type { AccountBan, CheatSignature, Detection, HwidBan, Screenshot, SignatureStat } from '../lib/types';
+import type {
+  AccountBan,
+  CheatSignature,
+  Detection,
+  HwidBan,
+  OnlineSession,
+  Screenshot,
+  SignatureStat
+} from '../lib/types';
 import { Tabs } from '../../components/ui/tabs';
 import { useToast } from '../../components/ui/toast';
 import { DetectionsTab } from '../../components/anticheat/detections-tab';
@@ -23,6 +31,11 @@ export default function AnticheatPage() {
   const [stats, setStats] = useState<SignatureStat[]>([]);
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
 
+  // Онлайн-сессии нужны и «Скриншотам», и «Детектам» (кнопка камеры) —
+  // поэтому живут на уровне страницы.
+  const [online, setOnline] = useState<OnlineSession[]>([]);
+  const [onlineLoading, setOnlineLoading] = useState(false);
+
   const reload = useCallback(async () => {
     try {
       const [det, ab, hb, sigs, st, shots] = await Promise.all([
@@ -31,7 +44,7 @@ export default function AnticheatPage() {
         api<HwidBan[]>('/api/admin/anticheat/bans/hwid'),
         api<CheatSignature[]>('/api/admin/anticheat/signatures'),
         api<SignatureStat[]>('/api/admin/anticheat/stats?days=7'),
-        api<Screenshot[]>('/api/admin/anticheat/screenshots?limit=100')
+        api<Screenshot[]>('/api/admin/anticheat/screenshots?limit=500')
       ]);
       setDetections(det ?? []);
       setAccountBans(ab ?? []);
@@ -46,9 +59,22 @@ export default function AnticheatPage() {
     }
   }, [toast]);
 
+  const reloadOnline = useCallback(async () => {
+    setOnlineLoading(true);
+    try {
+      const list = await api<OnlineSession[]>('/api/admin/anticheat/sessions/online');
+      setOnline(list ?? []);
+    } catch (e) {
+      toast('error', errorMessage(e));
+    } finally {
+      setOnlineLoading(false);
+    }
+  }, [toast]);
+
   useEffect(() => {
     void reload();
-  }, [reload]);
+    void reloadOnline();
+  }, [reload, reloadOnline]);
 
   return (
     <div className="flex flex-col gap-5">
@@ -74,7 +100,17 @@ export default function AnticheatPage() {
         <BansTab accountBans={accountBans} hwidBans={hwidBans} loading={loading} onReload={reload} />
       )}
       {tab === 'signatures' && <SignaturesTab signatures={signatures} loading={loading} onReload={reload} />}
-      {tab === 'screenshots' && <ScreenshotsTab screenshots={screenshots} loading={loading} onReload={reload} />}
+      {tab === 'screenshots' && (
+        <ScreenshotsTab
+          screenshots={screenshots}
+          loading={loading}
+          onReload={reload}
+          online={online}
+          onlineLoading={onlineLoading}
+          onReloadOnline={reloadOnline}
+          onOpenDetections={() => setTab('detections')}
+        />
+      )}
       {tab === 'stats' && <StatsTab stats={stats} loading={loading} />}
     </div>
   );
