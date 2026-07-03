@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"launcher-backend/internal/models"
+	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
 )
 
@@ -168,4 +169,69 @@ func homeReplyKeyboardMarkup() map[string]any {
 		InputPlaceholder: "«🏠 Меню» — главный экран, /help — команды",
 	}
 	return k.ToReplyMarkup()
+}
+
+// menuViewFor собирает данные экрана для пользователя Telegram.
+func (s *Service) menuViewFor(telegramUID int64) (menuView, error) {
+	u, err := repo.FindUserByTelegram(s.ctx(), s.DB, telegramUID)
+	if err != nil {
+		return menuView{}, err
+	}
+	adm, err := s.resolveAdmin(telegramUID)
+	if err != nil {
+		return menuView{}, err
+	}
+	return menuView{
+		User:            u,
+		Admin:           adm != nil,
+		Brand:           s.Cfg.BrandPublicName,
+		Tagline:         s.Cfg.BrandTagline,
+		DonateURL:       s.Cfg.DonateShopURL,
+		LauncherURL:     s.Cfg.LauncherDirectDownloadURL(),
+		HasLauncherFile: s.launcherExePath() != "",
+	}, nil
+}
+
+// bannerPreview — link_preview_options меню (nil нельзя: пустой URL отключает превью).
+func (s *Service) bannerPreview() map[string]any {
+	return telegram.LinkPreviewBanner(strings.TrimSpace(s.Cfg.BotBannerURL))
+}
+
+// sendHomeMenu шлёт свежее меню-сообщение (главный экран) внизу чата,
+// удаляет предыдущее меню и запоминает новый message_id.
+func (s *Service) sendHomeMenu(chatID, telegramUID int64, notice string) error {
+	v, err := s.menuViewFor(telegramUID)
+	if err != nil {
+		return err
+	}
+	text, markup := buildHomeScreen(v, notice)
+	if old, err := repo.ReadMenuMessage(s.ctx(), s.DB, chatID); err == nil && old > 0 {
+		// Старое меню убираем, чтобы в истории не жило два «живых» меню.
+		_ = telegram.DeleteMessage(s.HTTP, s.Cfg.TelegramBotToken, chatID, old)
+	}
+	id, err := telegram.SendMessageHTMLWithID(s.HTTP, s.Cfg.TelegramBotToken, chatID, text, markup, s.bannerPreview())
+	if err != nil {
+		return err
+	}
+	return repo.SaveMenuMessage(s.ctx(), s.DB, chatID, id)
+}
+
+// editMenuScreen редактирует меню на месте; если сообщение протухло
+// (удалено/слишком старое) — шлёт новое и обновляет сохранённый id.
+func (s *Service) editMenuScreen(chatID int64, messageID int, text string, markup map[string]any) error {
+	err := telegram.EditMessageTextHTML(s.HTTP, s.Cfg.TelegramBotToken, chatID, messageID, text, markup, s.bannerPreview())
+	if err == nil {
+		return repo.SaveMenuMessage(s.ctx(), s.DB, chatID, messageID)
+	}
+	if strings.Contains(err.Error(), "message is not modified") {
+		return nil // повторное нажатие того же экрана — не ошибка
+	}
+	if s.Log != nil {
+		s.Log.Warn("edit меню, пересоздаю", "err", err)
+	}
+	id, sendErr := telegram.SendMessageHTMLWithID(s.HTTP, s.Cfg.TelegramBotToken, chatID, text, markup, s.bannerPreview())
+	if sendErr != nil {
+		return sendErr
+	}
+	return repo.SaveMenuMessage(s.ctx(), s.DB, chatID, id)
 }

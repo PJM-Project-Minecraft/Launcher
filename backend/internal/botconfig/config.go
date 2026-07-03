@@ -37,6 +37,7 @@ type Config struct {
 	LauncherExePath           string
 	LauncherDownloadPublicURL string
 	PublicOrigin              string
+	BotBannerURL              string
 }
 
 // Load читает настройки бота из переменных окружения (.env уже загружен backend-конфигом).
@@ -68,6 +69,7 @@ func Load() (*Config, error) {
 		LauncherExePath:        envTrim("LAUNCHER_EXE_PATH"),
 		LauncherDownloadPublicURL: envTrim("LAUNCHER_DOWNLOAD_URL"),
 		PublicOrigin:              strings.TrimRight(envTrim("PUBLIC_BASE_URL"), "/"),
+		BotBannerURL:              envTrim("BOT_BANNER_URL"),
 	}
 	return cfg, nil
 }
