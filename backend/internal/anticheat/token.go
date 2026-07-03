@@ -73,7 +73,10 @@ func (s TokenSigner) Verify(token string, now time.Time) (LaunchClaims, error) {
 		return LaunchClaims{}, ErrTokenMalformed
 	}
 	if now.Unix() > claims.Expires {
-		return LaunchClaims{}, ErrTokenExpired
+		// Подпись сошлась — claims подлинные, просто старые. Возвращаем их вместе
+		// с ошибкой: VerifySessionToken по claims.Nonce проверяет, жива ли ещё
+		// игровая сессия (in-game-эндпоинты работают дольше 120с TTL токена).
+		return claims, ErrTokenExpired
 	}
 	return claims, nil
 }

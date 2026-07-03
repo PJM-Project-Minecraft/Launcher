@@ -218,6 +218,93 @@ func TestBlacklistETagAndRulesHTTP(t *testing.T) {
 	}
 }
 
+// TestScreenshotPollSurvivesLaunchTokenTTL — регрессия бага «таймаут ожидания
+// лаунчера»: launch-token живёт 120с, а лаунчер опрашивает /screenshot/pending этим
+// токеном ВСЮ игровую сессию. Через 2 минуты игры каждый опрос получал 401, pending
+// никто не забирал → reaper писал таймаут. Требование: пока игровая сессия жива
+// (Verified, продлевается keepalive/heartbeat), просроченный токен обязан проходить
+// на in-game-эндпоинтах; после гибели сессии — снова 401.
+func TestScreenshotPollSurvivesLaunchTokenTTL(t *testing.T) {
+	const jwtSecret = "test-jwt"
+	const acSecret = "test-ac"
+
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&models.User{}, &models.Screenshot{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	user := models.User{ID: uuid.NewString(), Login: "LikoShot", ProviderUUID: "88888888-2222-3333-4444-555555555555", Role: "user"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	keys, _ := yggdrasil.LoadOrCreateKey("/tmp/ac_shot_key.pem")
+	ygg := yggdrasil.NewService(db, keys, "http://example.com", "Test", "")
+
+	app := fiber.New()
+	authSvc := auth.NewService(db, auth.NewHTTPProvider(""), jwtSecret, nil, "test", 0)
+	yggdrasil.NewHandler(ygg).RegisterRoutes(app, authSvc.RequireAuth())
+	ss := NewScreenshotService(db, t.TempDir())
+	NewHandler(NewService(db, acSecret, false, ygg.Store(), "")).
+		WithScreenshots(ss, ygg.Store()).
+		RegisterRoutes(app, authSvc.RequireAuth())
+
+	jwtToken := mintJWT(t, jwtSecret, user.ID)
+
+	// Игровая сессия: init → launcher-session → confirm (Verified).
+	var initRes struct {
+		LaunchToken string `json:"launchToken"`
+		Nonce       string `json:"nonce"`
+	}
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"hw-s"}`, http.StatusOK, &initRes)
+	var sess struct {
+		AccessToken string `json:"accessToken"`
+	}
+	doJSON(t, app, "POST", "/api/yggdrasil/launcher-session", jwtToken, `{"nonce":"`+initRes.Nonce+`"}`, http.StatusOK, &sess)
+	if status, body := do(t, app, "POST", "/api/anticheat/handshake/confirm", "", `{"launchToken":"`+initRes.LaunchToken+`"}`); status != http.StatusNoContent {
+		t.Fatalf("confirm должен быть 204, получено %d (%s)", status, body)
+	}
+
+	// «Долго в игре»: тот же nonce, но токен уже просрочен (выдан 10 минут назад).
+	past := time.Now().Add(-10 * time.Minute)
+	expiredToken, err := NewTokenSigner(acSecret).Sign(LaunchClaims{
+		UUID:     user.ProviderUUID,
+		Login:    user.Login,
+		HwidHash: "hw-s",
+		Nonce:    initRes.Nonce,
+		IssuedAt: past.Unix(),
+		Expires:  past.Add(120 * time.Second).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("sign expired token: %v", err)
+	}
+
+	// Админ запросил скриншот.
+	if _, err := ss.RequestScreenshot(t.Context(), user.ProviderUUID, user.Login, initRes.Nonce, "admin"); err != nil {
+		t.Fatalf("request screenshot: %v", err)
+	}
+
+	// Лаунчер опрашивает pending просроченным токеном при ЖИВОЙ сессии → обязан
+	// получить запрос (200), а не 401.
+	req := httptest.NewRequest("GET", "/api/anticheat/screenshot/pending", nil)
+	req.Header.Set("X-Launch-Token", expiredToken)
+	resp, _ := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pending при живой сессии должен отдаваться и по просроченному токену: ожидался 200, получено %d (%s)", resp.StatusCode, body)
+	}
+
+	// Сессия погашена (игра закрыта) → просроченный токен снова недействителен.
+	ygg.Store().InvalidateByNonce(initRes.Nonce)
+	req2 := httptest.NewRequest("GET", "/api/anticheat/screenshot/pending", nil)
+	req2.Header.Set("X-Launch-Token", expiredToken)
+	resp2, _ := app.Test(req2, fiber.TestConfig{Timeout: 5 * time.Second})
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("после гибели сессии просроченный токен должен давать 401, получено %d", resp2.StatusCode)
+	}
+}
+
 func mintJWT(t *testing.T, secret, sub string) string {
 	t.Helper()
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{

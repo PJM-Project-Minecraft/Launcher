@@ -218,7 +218,7 @@ func (h Handler) detect(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
 	}
-	claims, err := h.service.VerifyToken(launchTokenFromBody(c, req.LaunchToken))
+	claims, err := h.service.VerifySessionToken(launchTokenFromBody(c, req.LaunchToken))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -250,7 +250,7 @@ func (h Handler) heartbeat(c fiber.Ctx) error {
 		LaunchToken string `json:"launchToken"`
 	}
 	_ = c.Bind().Body(&req)
-	claims, err := h.service.VerifyToken(launchTokenFromBody(c, req.LaunchToken))
+	claims, err := h.service.VerifySessionToken(launchTokenFromBody(c, req.LaunchToken))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -276,7 +276,7 @@ func (h Handler) diag(c fiber.Ctx) error {
 		Detail      string `json:"detail"`
 	}
 	_ = c.Bind().Body(&req)
-	claims, err := h.service.VerifyToken(launchTokenFromBody(c, req.LaunchToken))
+	claims, err := h.service.VerifySessionToken(launchTokenFromBody(c, req.LaunchToken))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -299,7 +299,7 @@ func truncate(s string, max int) string {
 }
 
 func (h Handler) rules(c fiber.Ctx) error {
-	if _, err := h.service.VerifyToken(launchTokenFromHeader(c)); err != nil {
+	if _, err := h.service.VerifySessionToken(launchTokenFromHeader(c)); err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
 	rules, err := h.service.Rules(c.Context())
@@ -584,7 +584,7 @@ func (h Handler) screenshotPending(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNoContent).Send(nil)
 	}
-	claims, err := h.service.VerifyToken(launchTokenFromHeader(c))
+	claims, err := h.service.VerifySessionToken(launchTokenFromHeader(c))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -617,7 +617,7 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, err := h.service.VerifyToken(launchTokenFromHeader(c))
+	claims, err := h.service.VerifySessionToken(launchTokenFromHeader(c))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -658,7 +658,7 @@ func (h Handler) screenshotFail(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, err := h.service.VerifyToken(launchTokenFromHeader(c))
+	claims, err := h.service.VerifySessionToken(launchTokenFromHeader(c))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}

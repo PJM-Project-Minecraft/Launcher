@@ -32,9 +32,15 @@ func TestTokenRoundTrip(t *testing.T) {
 func TestTokenExpired(t *testing.T) {
 	signer := NewTokenSigner("secret-key")
 	now := time.Unix(1_700_000_000, 0)
-	token, _ := signer.Sign(LaunchClaims{UUID: "u", Expires: now.Add(120 * time.Second).Unix()})
-	if _, err := signer.Verify(token, now.Add(200*time.Second)); err != ErrTokenExpired {
+	token, _ := signer.Sign(LaunchClaims{UUID: "u", Nonce: "n1", Expires: now.Add(120 * time.Second).Unix()})
+	claims, err := signer.Verify(token, now.Add(200*time.Second))
+	if err != ErrTokenExpired {
 		t.Fatalf("ожидалось ErrTokenExpired, получено %v", err)
+	}
+	// Просроченный (но корректно подписанный) токен обязан возвращать claims:
+	// VerifySessionToken по claims.Nonce решает, жива ли ещё игровая сессия.
+	if claims.UUID != "u" || claims.Nonce != "n1" {
+		t.Fatalf("при ErrTokenExpired claims должны быть заполнены, получено %+v", claims)
 	}
 }
 

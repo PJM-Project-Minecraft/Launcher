@@ -157,6 +157,51 @@ func TestConfirmMarksSessionVerified(t *testing.T) {
 	}
 }
 
+// TestVerifySessionToken — in-game-эндпоинты (heartbeat/detect/rules/screenshot)
+// аутентифицируются launch-token'ом всю игровую сессию, а его TTL — 120с. Просроченный
+// токен обязан приниматься, пока сессия по его nonce жива, и отклоняться после её гибели.
+// Подпись проверяется всегда — истечение не ослабляет криптографию.
+func TestVerifySessionToken(t *testing.T) {
+	verifier := &fakeVerifier{verified: map[string]bool{}}
+	svc := NewService(newTestDB(t), "secret", false, verifier, "")
+
+	res, _ := svc.InitHandshake(context.Background(), "uuid-vs", "Liko", "hwid-vs", nil)
+	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+
+	past := time.Now().Add(-10 * time.Minute)
+	expired, _ := NewTokenSigner("secret").Sign(LaunchClaims{
+		UUID: "uuid-vs", Login: "Liko", Nonce: res.Nonce,
+		IssuedAt: past.Unix(), Expires: past.Add(120 * time.Second).Unix(),
+	})
+
+	// Живой токен проходит как раньше.
+	if _, err := svc.VerifySessionToken(res.LaunchToken); err != nil {
+		t.Fatalf("живой токен должен проходить: %v", err)
+	}
+	// Просроченный токен при живой сессии — проходит.
+	claims, err := svc.VerifySessionToken(expired)
+	if err != nil {
+		t.Fatalf("просроченный токен при живой сессии должен проходить: %v", err)
+	}
+	if claims.Nonce != res.Nonce {
+		t.Fatalf("claims.Nonce не совпал: %s vs %s", claims.Nonce, res.Nonce)
+	}
+	// Просроченный токен с чужой подписью — нет, даже при живой сессии.
+	forged, _ := NewTokenSigner("attacker").Sign(LaunchClaims{
+		Nonce: res.Nonce, Expires: past.Unix(),
+	})
+	if _, err := svc.VerifySessionToken(forged); err == nil {
+		t.Fatal("токен с чужой подписью не должен проходить")
+	}
+	// Сессия погашена → просроченный токен снова недействителен.
+	verifier.InvalidateByNonce(res.Nonce)
+	if _, err := svc.VerifySessionToken(expired); err == nil {
+		t.Fatal("после гибели сессии просроченный токен должен отклоняться")
+	}
+}
+
 func TestConfirmRejectsBadToken(t *testing.T) {
 	svc := NewService(newTestDB(t), "secret", false, &fakeVerifier{verified: map[string]bool{}}, "")
 	if err := svc.Confirm("garbage.token", ConfirmProof{}); err == nil {

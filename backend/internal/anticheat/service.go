@@ -670,6 +670,21 @@ func (s *Service) VerifyToken(token string) (LaunchClaims, error) {
 	return s.signer.Verify(token, s.now())
 }
 
+// VerifySessionToken проверяет launch-token для in-game-эндпоинтов (heartbeat,
+// detect, rules, скриншоты): лаунчер и агенты предъявляют один и тот же токен всю
+// игровую сессию, а его TTL — 120с (узкое окно init→confirm). Поэтому просроченный,
+// но корректно подписанный токен принимается, пока игровая сессия по его nonce жива
+// (Verified и продлевается keepalive/heartbeat). Игра закрылась / сессию погасил
+// kick → токен снова недействителен. Confirm остаётся на строгом VerifyToken:
+// короткое окно — анти-replay-свойство attestation-handshake.
+func (s *Service) VerifySessionToken(token string) (LaunchClaims, error) {
+	claims, err := s.signer.Verify(token, s.now())
+	if errors.Is(err, ErrTokenExpired) && s.verifier != nil && s.verifier.IsActiveByNonce(claims.Nonce) {
+		return claims, nil
+	}
+	return claims, err
+}
+
 // RecordDetection пишет обнаружение, аутентифицированное launch-token, и возвращает
 // СЕРВЕРНУЮ severity и confidence детекта (используются для решения о kick). Клиентская
 // severity из запроса игнорируется — её нельзя занизить.
