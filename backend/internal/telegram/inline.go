@@ -78,7 +78,10 @@ func postBotAPIResult(client *http.Client, token, method string, payload map[str
 		Result      json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		return nil, fmt.Errorf("telegram %s: разбор ответа: %v (HTTP %d)", method, err, resp.StatusCode)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("telegram %s HTTP %d: %s", method, resp.StatusCode, buf.String())
+		}
+		return nil, fmt.Errorf("telegram %s: не удалось разобрать ответ: %v", method, err)
 	}
 	if !env.OK {
 		return nil, fmt.Errorf("telegram %s: %s", method, env.Description)
