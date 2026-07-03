@@ -82,6 +82,16 @@ func main() {
 		})
 	})
 
+	// Баннер Telegram-бота (link-preview шапка меню). Файл кладётся в data/ руками
+	// (scp на прод, как агенты античита); нет файла — 404, бот работает без баннера.
+	app.Get("/api/public/bot-banner.png", func(c fiber.Ctx) error {
+		const p = "data/bot-banner.png"
+		if _, err := os.Stat(p); err != nil {
+			return c.SendStatus(fiber.StatusNotFound)
+		}
+		return c.SendFile(p)
+	})
+
 	// Выбор источника аутентификации: local — проверка в общей БД (bcrypt+TOTP),
 	// http — внешний GML-провайдер (обратная совместимость).
 	var provider auth.Provider

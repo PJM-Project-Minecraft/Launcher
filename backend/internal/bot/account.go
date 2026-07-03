@@ -49,7 +49,7 @@ func (s *Service) handlePasswordOld(chatID int64, messageID int, telegramUID int
 	_ = s.notifyHTML(chatID, s.msgWithCancelHint(fmt.Sprintf(
 		"На смену пароля отправлен <b>одноразовый код</b> (около %d мин.):\n<code>%s</code>\n\n"+
 			"Введите эти <b>6 цифр</b> следующим сообщением.",
-		otpMinutes, escHTML(code))), keyboardRemove())
+		otpMinutes, escHTML(code))), homeReplyKeyboardMarkup())
 
 	dp := payload
 	dp.OtpUserID = &uid
@@ -72,7 +72,7 @@ func (s *Service) handlePasswordAfterOTP(chatID int64, _telegramUID int64, text 
 	_ = s.notifyHTML(chatID, s.msgWithCancelHint(
 		"Код принят. Теперь пришлите <b>новый пароль</b> одним сообщением (8–128 символов).\n\n"+
 			"<i>Сообщение с паролем будет удалено из чата.</i>"),
-		keyboardRemove())
+		homeReplyKeyboardMarkup())
 
 	dp := repo.DialoguePayload{}
 	dp.OtpUserID = &uid
@@ -98,16 +98,8 @@ func (s *Service) handlePasswordNew(chatID int64, messageID int, telegramUID int
 	if err := repo.SetPassword(s.ctx(), s.DB, uid, string(hash)); err != nil {
 		return err
 	}
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
-	if err := s.notifyHTML(chatID,
-		"<b>Пароль обновлён.</b>\nИспользуйте новый пароль в лаунчере и при входе «Войти» в боте.",
-		kb); err != nil {
-		return err
-	}
-	return repo.ClearDialogue(s.ctx(), s.DB, chatID)
+	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+	return s.sendHomeMenu(chatID, telegramUID, "✅ <b>Пароль обновлён.</b> Используйте его в лаунчере и при входе.")
 }
 
 func (s *Service) handleChangeEmailAsk(chatID int64, telegramUID int64, payload repo.DialoguePayload, text string) (repo.DialoguePayload, error) {
@@ -150,7 +142,7 @@ func (s *Service) handleChangeEmailAsk(chatID int64, telegramUID int64, payload 
 	_ = s.notifyHTML(chatID, s.msgWithCancelHint(fmt.Sprintf(
 		"Чтобы подтвердить новую почту, введите код из сообщения ниже (около %d мин.):\n<code>%s</code>\n\n"+
 			"<i>Код только для этого чата — пересылать другим не нужно.</i>",
-		otpMinutes, escHTML(code))), keyboardRemove())
+		otpMinutes, escHTML(code))), homeReplyKeyboardMarkup())
 
 	ui := u.ID
 	dp.OtpUserID = &ui
@@ -183,16 +175,6 @@ func (s *Service) handleChangeEmailOTP(chatID int64, telegramUID int64, text str
 	if err := repo.SetEmail(s.ctx(), s.DB, uid, newMail); err != nil {
 		return err
 	}
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
-	msg := fmt.Sprintf(
-		"<b>Почта обновлена.</b> Новый адрес:\n<code>%s</code>\n\n"+
-			"Используйте его при входе «Войти», если входите по e-mail.",
-		escHTML(newMail))
-	if err := s.notifyHTML(chatID, msg, kb); err != nil {
-		return err
-	}
-	return repo.ClearDialogue(s.ctx(), s.DB, chatID)
+	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+	return s.sendHomeMenu(chatID, telegramUID, fmt.Sprintf("✅ <b>Почта обновлена:</b> <code>%s</code>", escHTML(newMail)))
 }

@@ -303,6 +303,28 @@ func ClearDialogue(ctx context.Context, db *gorm.DB, chatID int64) error {
 	return db.WithContext(ctx).Where("chat_id = ?", chatID).Delete(&models.BotDialogue{}).Error
 }
 
+// --- Меню-сообщение бота ---
+
+func SaveMenuMessage(ctx context.Context, db *gorm.DB, chatID int64, messageID int) error {
+	m := models.BotMenuMessage{ChatID: chatID, MessageID: messageID, UpdatedAt: time.Now().UTC()}
+	return db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "chat_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"message_id", "updated_at"}),
+	}).Create(&m).Error
+}
+
+func ReadMenuMessage(ctx context.Context, db *gorm.DB, chatID int64) (int, error) {
+	var m models.BotMenuMessage
+	err := db.WithContext(ctx).Where("chat_id = ?", chatID).First(&m).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return m.MessageID, nil
+}
+
 // isUniqueViolation распознаёт конфликт уникальности для Postgres (23505) и SQLite.
 func isUniqueViolation(err error) bool {
 	if err == nil {

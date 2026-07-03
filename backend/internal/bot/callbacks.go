@@ -1,0 +1,132 @@
+package bot
+
+import (
+	"strings"
+
+	"launcher-backend/internal/repo"
+	"launcher-backend/internal/telegram"
+
+	tele "gopkg.in/telebot.v3"
+)
+
+// normalizeCallbackData срезает служебный префикс "\f" telebot и пробелы.
+func normalizeCallbackData(raw string) string {
+	return strings.TrimSpace(strings.TrimPrefix(raw, "\f"))
+}
+
+// callbackNeedsLink — экраны, доступные только привязанному аккаунту.
+func callbackNeedsLink(data string) bool {
+	switch data {
+	case cbProfile, cbPwd, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin:
+		return true
+	}
+	return false
+}
+
+// answerCb снимает «часики»; ошибки только в лог — это не повод ронять обработку.
+func (s *Service) answerCb(id, text string, alert bool) {
+	if err := telegram.AnswerCallbackQuery(s.HTTP, s.Cfg.TelegramBotToken, id, text, alert); err != nil && s.Log != nil {
+		s.Log.Warn("answerCallbackQuery", "err", err)
+	}
+}
+
+// HandleCallback — диспетчер нажатий inline-кнопок меню.
+func (s *Service) HandleCallback(c tele.Context) error {
+	cb := c.Callback()
+	if cb == nil || cb.Message == nil || c.Chat() == nil || c.Sender() == nil {
+		return nil
+	}
+	chatID := c.Chat().ID
+	telegramUID := telegramUserID(c.Sender())
+	msgID := cb.Message.ID
+	data := normalizeCallbackData(cb.Data)
+
+	v, err := s.menuViewFor(telegramUID)
+	if err != nil {
+		s.answerCb(cb.ID, "Ошибка, попробуйте ещё раз", false)
+		return err
+	}
+
+	if callbackNeedsLink(data) && v.User == nil {
+		s.answerCb(cb.ID, "Сначала привяжите аккаунт: «Войти» или «Регистрация».", true)
+		text, markup := buildHomeScreen(v, "")
+		return s.editMenuScreen(chatID, msgID, text, markup)
+	}
+
+	switch data {
+	case cbHome:
+		s.answerCb(cb.ID, "", false)
+		text, markup := buildHomeScreen(v, "")
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cbProfile:
+		s.answerCb(cb.ID, "", false)
+		text, markup := buildProfileScreen(v)
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cb2FA:
+		s.answerCb(cb.ID, "", false)
+		text, markup := build2FAScreen(v)
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cbDonate:
+		s.answerCb(cb.ID, "", false)
+		text, markup := buildDonateScreen(v)
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cbLauncher:
+		s.answerCb(cb.ID, "", false)
+		text, markup := buildLauncherScreen(v)
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cbLauncherFile:
+		s.answerCb(cb.ID, "Отправляю файл…", false)
+		return s.replyLauncherDownload(chatID, telegramUID)
+
+	case cbPwd:
+		s.answerCb(cb.ID, "", false)
+		return s.beginPasswordFlow(chatID, telegramUID)
+
+	case cbEmail:
+		s.answerCb(cb.ID, "", false)
+		return s.beginEmailFlow(chatID, telegramUID)
+
+	case cb2FAOn, cb2FAOff:
+		// beginTotpFlow сам перечитывает состояние — защита от протухшей кнопки.
+		s.answerCb(cb.ID, "", false)
+		return s.beginTotpFlow(chatID, telegramUID)
+
+	case cbLogin:
+		s.answerCb(cb.ID, "", false)
+		return s.beginLoginFlow(chatID, c.Sender())
+
+	case cbRegister:
+		s.answerCb(cb.ID, "", false)
+		return s.beginRegisterFlow(chatID, c.Sender())
+
+	case cbAdmin:
+		adm, err := s.resolveAdmin(telegramUID)
+		if err != nil {
+			s.answerCb(cb.ID, "Ошибка, попробуйте ещё раз", false)
+			return err
+		}
+		if adm == nil {
+			s.answerCb(cb.ID, "Панель только для модераторов.", true)
+			return nil
+		}
+		s.answerCb(cb.ID, "", false)
+		ep := repo.EmptyPayload()
+		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminMenu, &ep)
+		return s.notifyHTML(chatID,
+			"<b>Панель администратора</b>\n"+
+				"• «🔍 Поиск» — найти игрока по нику, логину, почте или id.\n"+
+				"• «📡 OPS» — краткий дайджест сервисов (если настроено в .env).\n"+
+				"• «⬅ Выйти» — вернуться к обычному меню.",
+			s.adminOpsKeyboardMarkup())
+
+	default:
+		// Кнопка из старой версии меню — просто пересоздаём главный экран.
+		s.answerCb(cb.ID, "Меню обновилось", false)
+		return s.sendHomeMenu(chatID, telegramUID, "")
+	}
+}

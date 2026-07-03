@@ -1,10 +1,10 @@
 package bot
 
 import (
-	"fmt"
 	"strings"
 
 	"launcher-backend/internal/repo"
+	"launcher-backend/internal/telegram"
 
 	tele "gopkg.in/telebot.v3"
 )
@@ -13,6 +13,12 @@ func (s *Service) Attach(bot *tele.Bot) {
 	bot.Handle(tele.OnText, func(c tele.Context) error {
 		if err := s.HandleText(c); err != nil && s.Log != nil {
 			s.Log.Error("handler", "err", err)
+		}
+		return nil
+	})
+	bot.Handle(tele.OnCallback, func(c tele.Context) error {
+		if err := s.HandleCallback(c); err != nil && s.Log != nil {
+			s.Log.Error("callback", "err", err)
 		}
 		return nil
 	})
@@ -35,7 +41,7 @@ func (s *Service) HandleText(c tele.Context) error {
 	if text == "/cancel" || strings.EqualFold(text, "отмена") {
 		return s.onCancel(chatID, sender)
 	}
-	if text == "/start" || text == "/menu" {
+	if text == "/start" || text == "/menu" || text == menuButtonLabel {
 		return s.welcome(chatID, telegramUserID(sender))
 	}
 	if text == "/help" {
@@ -127,36 +133,14 @@ func (s *Service) HandleText(c tele.Context) error {
 
 func (s *Service) onCancel(chatID int64, sender *tele.User) error {
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUserID(sender))
-	if err != nil {
-		return err
-	}
-	return s.notifyHTML(chatID,
-		"Сценарий <b>сброшен</b>. Можно начать заново:\n"+
-			"• <code>/start</code> — меню и кнопки\n"+
-			"• <code>/help</code> — что умеет бот\n\n"+
-			"<i>Подсказка: во время любого шага можно снова написать /cancel.</i>",
-		kb)
+	return s.sendHomeMenu(chatID, telegramUserID(sender), "Сценарий сброшен — вы в главном меню.")
 }
 
 func (s *Service) welcome(chatID int64, telegramUID int64) error {
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
-	txt := fmt.Sprintf(
-		"<b>%s</b>\n<i>%s</i>\n\n%s\n\n"+
-			"<b>Чем пользоваться</b>\n"+
-			"• Уже есть аккаунт — «🔑 Войти»: ник в игре, логин или почта, затем пароль.\n"+
-			"• Новый игрок — «📋 Регистрация»: логин сайта, почта, пароль, код из чата.\n"+
-			"• После входа — «Профиль», смена пароля/почты, «2FA» для лаунчера.\n"+
-			"• «Донат» — магазин и поддержка проекта (shop).\n"+
-			"• «Скачать лаунчер» — бот пришлёт .exe в чат (если файл задан на сервере бота).\n\n"+
-			"Клавиатура внизу. Команды: введите «/» или кнопку «Меню». Полный список: /help. Прервать шаг: /cancel.",
-		escHTML(s.Cfg.BrandPublicName), escHTML(s.Cfg.BrandTagline), escHTML(s.Cfg.WelcomeExtra),
-	)
-	return s.notifyHTML(chatID, txt, kb)
+	// Меню несёт inline-клавиатуру; persistent-кнопка «🏠 Меню» выставится
+	// первым же обычным сообщением (подсказка сценария, /help и т.п.).
+	return s.sendHomeMenu(chatID, telegramUID, "")
 }
 
 func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, text string, adminOpt *adminContext) error {
@@ -185,33 +169,10 @@ func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, t
 		return s.beginRegisterFlow(chatID, _tg)
 
 	case "Сменить пароль", "/password":
-		if uidPtr, err := s.linkedUID(telegramUID); err != nil {
-			return err
-		} else if uidPtr == nil {
-			return s.forbidNotLinked(chatID, telegramUID)
-		}
-		ep := repo.EmptyPayload()
-		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangePwdOld, &ep)
-		return s.notifyHTML(chatID, s.msgWithCancelHint(
-			"Смена пароля в два шага:\n"+
-				"1) Сейчас пришлите <b>текущий пароль</b> (его сообщение будет удалено из чата и заменено заглушкой).\n"+
-				"2) Затем бот пришлёт <b>шестизначный код</b> в этот чат — введите его.\n"+
-				"3) После этого пришлите <b>новый пароль</b> (8–128 символов).\n\n"+
-				"<i>Если забыли пароль — обратитесь к администратору проекта.</i>"),
-			keyboardRemove())
+		return s.beginPasswordFlow(chatID, telegramUID)
 
 	case "Email", "/email":
-		if uidPtr, err := s.linkedUID(telegramUID); err != nil {
-			return err
-		} else if uidPtr == nil {
-			return s.forbidNotLinked(chatID, telegramUID)
-		}
-		ep := repo.EmptyPayload()
-		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangeEmailAsk, &ep)
-		return s.notifyHTML(chatID, s.msgWithCancelHint(
-			"Укажите новый <b>адрес e-mail</b> одним сообщением (тот, который будет храниться в аккаунте).\n\n"+
-				"После этого бот пришлёт код в чат — его нужно будет ввести, чтобы подтвердить смену."),
-			keyboardRemove())
+		return s.beginEmailFlow(chatID, telegramUID)
 
 	case "2FA", "/2fa", "/totp":
 		return s.beginTotpFlow(chatID, telegramUID)
@@ -235,7 +196,7 @@ func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, t
 		return s.notifyWarn(chatID, "/ops доступна только модераторам. Список команд для игроков: /help.")
 
 	default:
-		return s.notifyWarn(chatID, "Не распознал сообщение.\nНажмите /start — покажу кнопки меню, или /help — список команд и подсказки.")
+		return s.notifyWarn(chatID, "Не распознал сообщение.\nНажмите «🏠 Меню» или /start.")
 	}
 }
 
@@ -249,41 +210,33 @@ func (s *Service) profileCard(chatID int64, telegramUID int64) error {
 			"• Есть аккаунт — нажмите «🔑 Войти» и пройдите проверку паролем.\n"+
 			"• Нет аккаунта — «📋 Регистрация».")
 	}
-
-	totpLine := "<b>2FA для лаунчера</b>: выключена. Включите кнопкой «2FA» — при входе в лаунчер понадобится код из приложения."
-	if me.TOTPEnabled {
-		totpLine = "<b>2FA для лаунчера</b>: включена. Код запрашивается при авторизации в лаунчере; отключить можно там же «2FA»."
-	}
-	lines := []string{
-		fmt.Sprintf("<b>UUID</b>: <code>%s</code>", escHTML(me.ProviderUUID)),
-		fmt.Sprintf("<b>Логин</b>: %s", escHTML(me.Login)),
-		fmt.Sprintf("<b>Почта</b>: %s", escHTML(maskEmailUnsafe(me.Email))),
-		fmt.Sprintf("<b>Роль</b>: %s", escHTML(me.Role)),
-		fmt.Sprintf("<b>Регистрация</b>: %s", escHTML(me.CreatedAt.UTC().Format("2006-01-02 15:04:05"))),
-		totpLine,
-		"",
-		"<b>Дальше</b> — кнопки ниже: пароль, почта, 2FA для входа в лаунчер.",
-	}
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
+	v, err := s.menuViewFor(telegramUID)
 	if err != nil {
 		return err
 	}
-	return s.notifyHTML(chatID, strings.Join(lines, "\n"), kb)
+	text, markup := buildProfileScreen(v)
+	if old, err2 := repo.ReadMenuMessage(s.ctx(), s.DB, chatID); err2 == nil && old > 0 {
+		_ = telegram.DeleteMessage(s.HTTP, s.Cfg.TelegramBotToken, chatID, old)
+	}
+	id, err := telegram.SendMessageHTMLWithID(s.HTTP, s.Cfg.TelegramBotToken, chatID, text, markup, s.bannerPreview())
+	if err != nil {
+		return err
+	}
+	return repo.SaveMenuMessage(s.ctx(), s.DB, chatID, id)
 }
 
-func (s *Service) cmdHelp(chatID int64, telegramUID int64) error {
-	kb, err := s.mainKeyboardMarkup(chatID, telegramUID)
-	if err != nil {
-		return err
-	}
+func (s *Service) cmdHelp(chatID int64, _ int64) error {
+	kb := homeReplyKeyboardMarkup()
 	txt := strings.Join([]string{
 		"<b>Справка по боту</b>",
 		"",
 		"<b>Базовые команды</b>",
-		"<code>/start</code> — главное меню и клавиатура",
-		"<code>/menu</code> — снова показать клавиатуру",
+		"<code>/start</code> или «🏠 Меню» — показать живое меню",
+		"<code>/menu</code> — показать живое меню",
 		"<code>/help</code> — этот текст",
 		"<code>/cancel</code> — отменить текущий шаг (ввод логина, пароля, кода и т.д.)",
+		"",
+		"<i>Нажмите кнопку «🏠 Меню» в нижней клавиатуре — откроется главный экран с кнопками навигации.</i>",
 		"",
 		"<b>Аккаунт</b>",
 		"<code>/profile</code> — ваш профиль (UUID, логин, ник, 2FA)",
@@ -297,4 +250,37 @@ func (s *Service) cmdHelp(chatID int64, telegramUID int64) error {
 		"<code>/admin</code> — панель модератора (только при роли и allowlist)",
 	}, "\n")
 	return s.notifyHTML(chatID, txt, kb)
+}
+
+// beginPasswordFlow запускает сценарий смены пароля (текстовые шаги как раньше).
+func (s *Service) beginPasswordFlow(chatID, telegramUID int64) error {
+	if uidPtr, err := s.linkedUID(telegramUID); err != nil {
+		return err
+	} else if uidPtr == nil {
+		return s.forbidNotLinked(chatID, telegramUID)
+	}
+	ep := repo.EmptyPayload()
+	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangePwdOld, &ep)
+	return s.notifyHTML(chatID, s.msgWithCancelHint(
+		"Смена пароля в два шага:\n"+
+			"1) Сейчас пришлите <b>текущий пароль</b> (его сообщение будет удалено из чата и заменено заглушкой).\n"+
+			"2) Затем бот пришлёт <b>шестизначный код</b> в этот чат — введите его.\n"+
+			"3) После этого пришлите <b>новый пароль</b> (8–128 символов).\n\n"+
+			"<i>Если забыли пароль — обратитесь к администратору проекта.</i>"),
+		homeReplyKeyboardMarkup())
+}
+
+// beginEmailFlow запускает сценарий смены почты.
+func (s *Service) beginEmailFlow(chatID, telegramUID int64) error {
+	if uidPtr, err := s.linkedUID(telegramUID); err != nil {
+		return err
+	} else if uidPtr == nil {
+		return s.forbidNotLinked(chatID, telegramUID)
+	}
+	ep := repo.EmptyPayload()
+	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangeEmailAsk, &ep)
+	return s.notifyHTML(chatID, s.msgWithCancelHint(
+		"Укажите новый <b>адрес e-mail</b> одним сообщением (тот, который будет храниться в аккаунте).\n\n"+
+			"После этого бот пришлёт код в чат — его нужно будет ввести, чтобы подтвердить смену."),
+		homeReplyKeyboardMarkup())
 }

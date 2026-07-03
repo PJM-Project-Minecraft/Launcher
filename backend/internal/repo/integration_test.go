@@ -94,3 +94,25 @@ func TestDialoguePersistence(t *testing.T) {
 		t.Fatalf("state mismatch: got %v", st)
 	}
 }
+
+// TestMenuMessagePersistence: upsert id меню-сообщения по chat_id и чтение;
+// отсутствие записи — 0 без ошибки.
+func TestMenuMessagePersistence(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	got, err := repo.ReadMenuMessage(ctx, db, 77)
+	if err != nil || got != 0 {
+		t.Fatalf("пустое чтение: got=%d err=%v", got, err)
+	}
+	if err := repo.SaveMenuMessage(ctx, db, 77, 1001); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := repo.SaveMenuMessage(ctx, db, 77, 1002); err != nil {
+		t.Fatalf("save-2 (upsert): %v", err)
+	}
+	got, err = repo.ReadMenuMessage(ctx, db, 77)
+	if err != nil || got != 1002 {
+		t.Fatalf("после upsert: got=%d err=%v", got, err)
+	}
+}
