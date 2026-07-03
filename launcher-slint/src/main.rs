@@ -2819,7 +2819,7 @@ fn fetch_sha1_bytes(
     Ok(data)
 }
 
-fn ensure_executable(path: &Path, executable: bool) -> Result<(), String> {
+fn ensure_executable(#[cfg_attr(not(unix), allow(unused_variables))] path: &Path, executable: bool) -> Result<(), String> {
     if !executable {
         return Ok(());
     }

@@ -199,19 +199,19 @@ fn capture_raw() -> Result<(Vec<u8>, u32, u32), String> {
         if hdc_screen.is_invalid() {
             return Err("GetDC не удался".to_string());
         }
-        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
         if hdc_mem.is_invalid() {
             ReleaseDC(None, hdc_screen);
             return Err("CreateCompatibleDC не удался".to_string());
         }
         let hbmp = CreateCompatibleBitmap(hdc_screen, width as i32, height as i32);
         if hbmp.is_invalid() {
-            DeleteDC(hdc_mem);
+            let _ = DeleteDC(hdc_mem);
             ReleaseDC(None, hdc_screen);
             return Err("CreateCompatibleBitmap не удался".to_string());
         }
-        let old = SelectObject(hdc_mem, hbmp);
-        let _ = BitBlt(hdc_mem, 0, 0, width as i32, height as i32, hdc_screen, 0, 0, SRCCOPY);
+        let old = SelectObject(hdc_mem, hbmp.into());
+        let _ = BitBlt(hdc_mem, 0, 0, width as i32, height as i32, Some(hdc_screen), 0, 0, SRCCOPY);
 
         let mut bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -237,8 +237,8 @@ fn capture_raw() -> Result<(Vec<u8>, u32, u32), String> {
         );
         if n == 0 {
             SelectObject(hdc_mem, old);
-            DeleteObject(hbmp);
-            DeleteDC(hdc_mem);
+            let _ = DeleteObject(hbmp.into());
+            let _ = DeleteDC(hdc_mem);
             ReleaseDC(None, hdc_screen);
             return Err("GetDIBits не удался".to_string());
         }
@@ -247,8 +247,8 @@ fn capture_raw() -> Result<(Vec<u8>, u32, u32), String> {
             px.swap(0, 2); // B<->R
         }
         SelectObject(hdc_mem, old);
-        DeleteObject(hbmp);
-        DeleteDC(hdc_mem);
+        let _ = DeleteObject(hbmp.into());
+        let _ = DeleteDC(hdc_mem);
         ReleaseDC(None, hdc_screen);
         Ok((rgba, width, height))
     }
