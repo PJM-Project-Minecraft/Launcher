@@ -46,6 +46,15 @@ type BotDialogue struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// BotMenuMessage — id последнего «живого» меню-сообщения бота в чате.
+// Отдельно от BotDialogue: ClearDialogue удаляет строку диалога целиком,
+// а меню должно переживать завершение сценария.
+type BotMenuMessage struct {
+	ChatID    int64     `gorm:"primaryKey" json:"chatId"`
+	MessageID int       `gorm:"not null" json:"messageId"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 // Session — сессии веб-аутентификации (зарезервировано, перенос из бота).
 type Session struct {
 	ID           string    `gorm:"type:uuid;primaryKey" json:"id"`

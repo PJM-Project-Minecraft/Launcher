@@ -50,6 +50,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.TelegramOTP{},
 		&models.BotAuditLog{},
 		&models.BotDialogue{},
+		&models.BotMenuMessage{},
 		&models.Session{},
 		// Yggdrasil: игровые сессии переживают рестарт backend.
 		&models.YggdrasilSession{},
