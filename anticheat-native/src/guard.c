@@ -38,8 +38,9 @@ static const char *ALLOW_FRAGMENTS[] = {
     "fontconfig", "freetype", "harfbuzz", "libx11", "libxcb", "libwayland", "pulse",
     "discord_game_sdk", "nahimic", "wallpaper engine",
     /* Нативки легитимных модов, распаковываемые JNI во временные папки (/tmp и т.п.):
-     * Axiom (imgui от moulberry), Simple Voice Chat (opus/rnnoise через javacpp). */
-    "imgui", "moulberry", "opus", "rnnoise", "javacpp"
+     * Axiom (imgui от moulberry), Simple Voice Chat (opus/rnnoise через javacpp),
+     * Plasmo Voice (кодеки plasmoverse: opus4j/rnnoise4j/speex4j/lame4j). */
+    "imgui", "moulberry", "opus", "rnnoise", "javacpp", "speex", "lame4j"
 };
 static const int ALLOW_COUNT = (int)(sizeof(ALLOW_FRAGMENTS) / sizeof(ALLOW_FRAGMENTS[0]));
 
