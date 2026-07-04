@@ -3,6 +3,7 @@ package bot
 import (
 	"strings"
 
+	"launcher-backend/internal/policy"
 	"launcher-backend/internal/telegram"
 
 	tele "gopkg.in/telebot.v3"
@@ -55,6 +56,14 @@ func (s *Service) HandleCallback(c tele.Context) error {
 	if callbackNeedsLink(data) && v.User == nil {
 		s.answerCb(cb.ID, "Сначала привяжите аккаунт: «Войти» или «Регистрация».", true)
 		text, markup := buildHomeScreen(v, "")
+		return s.editMenuScreen(chatID, msgID, text, markup)
+	}
+
+	// Гейт политики: привязанный пользователь без актуального согласия
+	// с любой кнопки попадает на экран политики.
+	if policyGateApplies(v, data) {
+		s.answerCb(cb.ID, "Сначала примите политику конфиденциальности.", false)
+		text, markup := buildPolicyScreen(s.policyURL())
 		return s.editMenuScreen(chatID, msgID, text, markup)
 	}
 
@@ -129,6 +138,28 @@ func (s *Service) HandleCallback(c tele.Context) error {
 		}
 		s.answerCb(cb.ID, "", false)
 		return s.adminPanelIntro(chatID)
+
+	case cbPolicyAccept:
+		if v.User == nil {
+			s.answerCb(cb.ID, "Аккаунт не привязан.", true)
+			text, markup := buildHomeScreen(v, "")
+			return s.editMenuScreen(chatID, msgID, text, markup)
+		}
+		if err := policy.RecordConsent(s.ctx(), s.DB, v.User.ID, policy.SourceBot, ""); err != nil {
+			s.answerCb(cb.ID, "Ошибка, попробуйте ещё раз", false)
+			return err
+		}
+		s.answerCb(cb.ID, "Спасибо!", false)
+		nv, err := s.menuViewFor(telegramUID)
+		if err != nil {
+			return err
+		}
+		text, markup := buildHomeScreen(nv, "✅ Политика конфиденциальности принята.")
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cbPolicyRegAccept:
+		s.answerCb(cb.ID, "", false)
+		return s.startRegisterSteps(chatID, c.Sender())
 
 	default:
 		// Кнопка из старой версии меню — просто пересоздаём главный экран.

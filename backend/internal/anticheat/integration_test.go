@@ -11,6 +11,7 @@ import (
 
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/models"
+	"launcher-backend/internal/policy"
 	"launcher-backend/internal/yggdrasil"
 
 	"github.com/gofiber/fiber/v3"
@@ -29,7 +30,7 @@ func TestEnforcementFlow(t *testing.T) {
 	if err := db.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("migrate user: %v", err)
 	}
-	user := models.User{ID: uuid.NewString(), Login: "Liko", ProviderUUID: "11111111-2222-3333-4444-555555555555", Role: "user"}
+	user := models.User{ID: uuid.NewString(), Login: "Liko", ProviderUUID: "11111111-2222-3333-4444-555555555555", Role: "user", PolicyAcceptedVersion: policy.Version}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestServerKickRevokesSession(t *testing.T) {
 	if err := db.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("migrate user: %v", err)
 	}
-	user := models.User{ID: uuid.NewString(), Login: "LikoKick", ProviderUUID: "99999999-2222-3333-4444-555555555555", Role: "user"}
+	user := models.User{ID: uuid.NewString(), Login: "LikoKick", ProviderUUID: "99999999-2222-3333-4444-555555555555", Role: "user", PolicyAcceptedVersion: policy.Version}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestBlacklistETagAndRulesHTTP(t *testing.T) {
 	if err := db.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("migrate user: %v", err)
 	}
-	user := models.User{ID: uuid.NewString(), Login: "LikoRules", ProviderUUID: "77777777-2222-3333-4444-555555555555", Role: "user"}
+	user := models.User{ID: uuid.NewString(), Login: "LikoRules", ProviderUUID: "77777777-2222-3333-4444-555555555555", Role: "user", PolicyAcceptedVersion: policy.Version}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestScreenshotPollSurvivesLaunchTokenTTL(t *testing.T) {
 	if err := db.AutoMigrate(&models.User{}, &models.Screenshot{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	user := models.User{ID: uuid.NewString(), Login: "LikoShot", ProviderUUID: "88888888-2222-3333-4444-555555555555", Role: "user"}
+	user := models.User{ID: uuid.NewString(), Login: "LikoShot", ProviderUUID: "88888888-2222-3333-4444-555555555555", Role: "user", PolicyAcceptedVersion: policy.Version}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}

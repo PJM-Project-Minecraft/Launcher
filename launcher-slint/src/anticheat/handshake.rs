@@ -45,8 +45,13 @@ pub enum InitOutcome {
     },
     Blocked(String),
     UpdateRequired(String),
+    /// 451: пользователь не принял актуальную Политику конфиденциальности.
+    PolicyRequired,
     Unavailable,
 }
+
+/// Сентинел-ошибка: по ней main показывает экран политики вместо текста.
+pub const POLICY_REQUIRED_ERR: &str = "__policy_required__";
 
 /// Тянет блэклист сигнатур (с auth). Err — недоступен (тогда скан пустой).
 pub fn fetch_blacklist(config: &AppConfig, token: &str) -> Result<Vec<Signature>, String> {
@@ -114,6 +119,10 @@ pub fn init(
             })
             .unwrap_or_else(|| "Требуется обновление лаунчера.".to_string());
         return InitOutcome::UpdateRequired(message);
+    }
+    // 451 = не принята Политика конфиденциальности: launch-token не выдан.
+    if status.as_u16() == 451 {
+        return InitOutcome::PolicyRequired;
     }
     // 403 = заблокирован (allowed:false с причиной); success = разрешён.
     if status.as_u16() == 403 || status.is_success() {

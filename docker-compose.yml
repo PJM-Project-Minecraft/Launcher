@@ -70,6 +70,8 @@ services:
       LAUNCHER_EXE_PATH: "${LAUNCHER_EXE_PATH:-}"
       # Баннер inline-меню (link-preview). Пусто — меню без картинки.
       BOT_BANNER_URL: "${BOT_BANNER_URL:-}"
+      # Страница /privacy для кнопки «Читать полностью» в гейте политики.
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
     depends_on:
       postgres:
         condition: service_healthy

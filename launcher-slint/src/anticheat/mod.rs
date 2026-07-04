@@ -21,6 +21,8 @@ use std::time::Duration;
 use crate::AppConfig;
 use manifest::IntegrityManifest;
 
+pub use handshake::POLICY_REQUIRED_ERR;
+
 /// Интервал in-game скана процессов во время игры.
 const INGAME_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -61,6 +63,7 @@ impl LaunchGuard {
             }),
             handshake::InitOutcome::Blocked(reason) => Err(reason),
             handshake::InitOutcome::UpdateRequired(message) => Err(message),
+            handshake::InitOutcome::PolicyRequired => Err(handshake::POLICY_REQUIRED_ERR.to_string()),
             // fail-open: недоступность бэкенда не блокирует игрока.
             handshake::InitOutcome::Unavailable => Ok(Self {
                 launch_token: String::new(),

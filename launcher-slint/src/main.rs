@@ -229,6 +229,15 @@ struct AuthUser {
     login: String,
     provider_uuid: String,
     is_slim: bool,
+    #[serde(default)]
+    policy_accepted_version: i32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PolicyInfo {
+    version: i32,
+    text: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -419,6 +428,7 @@ struct SessionData {
     profiles: Vec<ProfileSummary>,
     selected_profile_id: Option<String>,
     news: Vec<NewsSummary>,
+    policy: Option<PolicyInfo>,
 }
 
 struct ProfilePaths {
@@ -472,6 +482,7 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_install_folder_label(&app, &state);
 
     register_login_handler(&app, config.clone(), state.clone(), session_generation.clone());
+    register_policy_accept_handler(&app, config.clone(), state.clone());
     register_logout_handler(&app, state.clone(), session_generation.clone());
     register_settings_handler(&app, state.clone());
     register_play_handler(&app, config.clone(), state.clone());
@@ -547,6 +558,60 @@ fn register_login_handler(
     });
 }
 
+fn register_policy_accept_handler(
+    app: &AppWindow,
+    config: AppConfig,
+    state: Arc<Mutex<RuntimeState>>,
+) {
+    let app_weak = app.as_weak();
+    let state = state.clone();
+    app.on_policy_accept_requested(move || {
+        let Some(app) = app_weak.upgrade() else { return };
+        // Защита от двойного клика: игнорируем повторный вызов пока запрос выполняется.
+        if app.get_policy_accepting() {
+            return;
+        }
+        app.set_policy_accepting(true);
+        let token = state
+            .lock()
+            .ok()
+            .map(|s| s.token.clone())
+            .unwrap_or_default();
+        let version = app.get_policy_version();
+        app.set_message("Сохраняю согласие…".into());
+        let config = config.clone();
+        let app_weak = app_weak.clone();
+        thread::spawn(move || {
+            let result = accept_policy(&config, &token, version);
+            let refreshed = if result.is_err() {
+                // Возможен 409: версия сменилась — перечитываем текст.
+                fetch_policy(&config).ok()
+            } else {
+                None
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = app_weak.upgrade() else { return };
+                match result {
+                    Ok(()) => {
+                        app.set_policy_accepting(false);
+                        app.set_policy_visible(false);
+                        app.set_message("Политика принята. Приятной игры!".into());
+                    }
+                    Err(message) => {
+                        app.set_policy_accepting(false);
+                        if let Some(p) = refreshed {
+                            app.set_policy_text(p.text.into());
+                            app.set_policy_version_label(format!("Версия {}", p.version).into());
+                            app.set_policy_version(p.version);
+                        }
+                        app.set_message(message.into());
+                    }
+                }
+            });
+        });
+    });
+}
+
 fn register_logout_handler(
     app: &AppWindow,
     state: Arc<Mutex<RuntimeState>>,
@@ -578,6 +643,7 @@ fn register_logout_handler(
             app.set_is_syncing(false);
             app.set_download_panel_visible(false);
             app.set_settings_visible(false);
+            app.set_policy_visible(false);
             apply_install_folder_label(&app, &state);
             app.set_message("Сессия завершена.".into());
         }
@@ -810,6 +876,31 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                                 app.set_download_panel_visible(false);
                                 app.set_message(SharedString::default());
                                 app.set_anticheat_alert(alert.into());
+                            } else if message == anticheat::POLICY_REQUIRED_ERR {
+                                // Редкий случай (окно раскатки): сервер требует согласие —
+                                // показываем экран политики вместо сырого текста ошибки.
+                                app.set_download_panel_visible(false);
+                                let config_bg = config.clone();
+                                let app_weak_bg = app_weak.clone();
+                                thread::spawn(move || {
+                                    let policy = fetch_policy(&config_bg);
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        let Some(app) = app_weak_bg.upgrade() else { return };
+                                        if let Ok(p) = policy {
+                                            app.set_policy_text(p.text.into());
+                                            app.set_policy_version_label(
+                                                format!("Версия {}", p.version).into(),
+                                            );
+                                            app.set_policy_version(p.version);
+                                        } else if app.get_policy_text().is_empty() {
+                                            // Fallback: текст не загрузился — не оставляем оверлей пустым.
+                                            app.set_policy_text(
+                                                "Не удалось загрузить текст политики. Проверьте соединение и попробуйте снова.".into(),
+                                            );
+                                        }
+                                        app.set_policy_visible(true);
+                                    });
+                                });
                             } else {
                                 app.set_download_phase("Ошибка".into());
                                 app.set_download_file(message.clone().into());
@@ -907,6 +998,13 @@ fn bootstrap_session(
     let selected_profile_id = choose_profile_for_user(&user.provider_uuid, &profiles)?;
     // Новости не критичны для входа: при сбое лента просто остаётся пустой.
     let news = fetch_news(config, &token);
+    // Политика конфиденциальности: если пользователь не принимал текущую
+    // версию — экран согласия. Сбой запроса = fail-open на клиенте
+    // (сервер всё равно не выдаст launch-token без согласия).
+    let policy = match fetch_policy(config) {
+        Ok(p) if p.version > user.policy_accepted_version => Some(p),
+        _ => None,
+    };
     Ok(SessionData {
         token,
         user,
@@ -915,6 +1013,7 @@ fn bootstrap_session(
         profiles,
         selected_profile_id,
         news,
+        policy,
     })
 }
 
@@ -947,6 +1046,16 @@ fn apply_session(
     app.set_password_value(SharedString::default());
     app.set_totp_value(SharedString::default());
     app.set_message(session.message.into());
+
+    match &session.policy {
+        Some(p) => {
+            app.set_policy_text(p.text.clone().into());
+            app.set_policy_version_label(format!("Версия {}", p.version).into());
+            app.set_policy_version(p.version);
+            app.set_policy_visible(true);
+        }
+        None => app.set_policy_visible(false),
+    }
 
     set_profile_ui(app, selected.as_ref());
 
@@ -1213,6 +1322,34 @@ fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>
         .send()
         .map_err(|_| "Не удалось получить профили проекта.".to_string())?;
     parse_json_response(response, "Backend вернул некорректный список профилей")
+}
+
+// Текст и версия Политики конфиденциальности (публичный эндпоинт, без auth).
+fn fetch_policy(config: &AppConfig) -> Result<PolicyInfo, String> {
+    let client = http_client()?;
+    let response = client
+        .get(format!("{}/api/policy", config.api_url.trim_end_matches('/')))
+        .send()
+        .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
+    parse_json_response(response, "Backend вернул некорректную политику")
+}
+
+// Фиксирует согласие на сервере. 409 = версия успела смениться.
+fn accept_policy(config: &AppConfig, token: &str, version: i32) -> Result<(), String> {
+    let client = http_client()?;
+    let response = client
+        .post(format!(
+            "{}/api/policy/accept",
+            config.api_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "version": version }))
+        .send()
+        .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    Err("Не удалось сохранить согласие. Попробуйте ещё раз.".to_string())
 }
 
 fn fetch_news(config: &AppConfig, token: &str) -> Vec<NewsSummary> {
