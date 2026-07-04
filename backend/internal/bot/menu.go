@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"launcher-backend/internal/models"
+	"launcher-backend/internal/policy"
 	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
 )
@@ -23,9 +24,11 @@ const (
 	cbDonate       = "m:donate"
 	cbLauncher     = "m:launcher"
 	cbLauncherFile = "m:launcher:file"
-	cbLogin        = "m:login"
-	cbRegister     = "m:register"
-	cbAdmin        = "m:admin"
+	cbLogin           = "m:login"
+	cbRegister        = "m:register"
+	cbAdmin           = "m:admin"
+	cbPolicyAccept    = "m:policy:ok"
+	cbPolicyRegAccept = "m:policy:reg"
 )
 
 const menuButtonLabel = "🏠 Меню"
@@ -193,6 +196,57 @@ func buildLauncherScreen(v menuView) (string, map[string]any) {
 	}
 	rows = append(rows, backRow())
 	return text, telegram.InlineMarkup(rows...)
+}
+
+// buildPolicyScreen — блокирующий экран согласия для привязанного пользователя:
+// пока политика не принята, все действия меню ведут сюда.
+func buildPolicyScreen(privacyURL string) (string, map[string]any) {
+	text := "🔒 <b>Политика конфиденциальности</b>\n\n" +
+		"Мы обновили правила работы с данными. Чтобы продолжить пользоваться " +
+		"ботом и играть на сервере, примите Политику конфиденциальности.\n\n" +
+		"Мы собираем: логин, e-mail, Telegram ID, идентификатор оборудования (HWID), " +
+		"IP-адрес, данные игровых сессий и античита, включая <b>скриншоты экрана " +
+		"во время игры</b> (по запросу администрации).\n\n" +
+		"<i>Полный текст — по кнопке ниже.</i>"
+	return text, telegram.InlineMarkup(
+		[]telegram.InlineBtn{{Text: "📄 Читать полностью", URL: privacyURL}},
+		[]telegram.InlineBtn{{Text: "✅ Принимаю", Data: cbPolicyAccept}},
+	)
+}
+
+// policyGateApplies — нужно ли вместо запрошенного экрана показать политику.
+// Непривязанных (User == nil) не трогаем: их ограничивает callbackNeedsLink.
+func policyGateApplies(v menuView, data string) bool {
+	if v.User == nil || !policy.NeedsConsent(v.User) {
+		return false
+	}
+	return data != cbPolicyAccept
+}
+
+// policyURL — публичная страница полного текста политики.
+func (s *Service) policyURL() string {
+	return strings.TrimRight(s.Cfg.PublicOrigin, "/") + "/privacy"
+}
+
+// policyGateText — гейт для текстовых сценариев привязанного пользователя:
+// если согласия нет, шлёт экран политики новым меню-сообщением и возвращает true.
+func (s *Service) policyGateText(chatID, telegramUID int64) (bool, error) {
+	u, err := repo.FindUserByTelegram(s.ctx(), s.DB, telegramUID)
+	if err != nil || u == nil {
+		return false, err // непривязанных ловят существующие проверки linkedUID
+	}
+	if !policy.NeedsConsent(u) {
+		return false, nil
+	}
+	text, markup := buildPolicyScreen(s.policyURL())
+	if old, err2 := repo.ReadMenuMessage(s.ctx(), s.DB, chatID); err2 == nil && old > 0 {
+		_ = telegram.DeleteMessage(s.HTTP, s.Cfg.TelegramBotToken, chatID, old)
+	}
+	id, err := telegram.SendMessageHTMLWithID(s.HTTP, s.Cfg.TelegramBotToken, chatID, text, markup, s.bannerPreview())
+	if err != nil {
+		return true, err
+	}
+	return true, repo.SaveMenuMessage(s.ctx(), s.DB, chatID, id)
 }
 
 // homeReplyKeyboardMarkup — постоянная reply-клавиатура из одной кнопки «🏠 Меню».

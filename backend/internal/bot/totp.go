@@ -22,6 +22,9 @@ func (s *Service) beginTotpFlow(chatID int64, telegramUID int64) error {
 	if uidPtr == nil {
 		return s.forbidNotLinked(chatID, telegramUID)
 	}
+	if blocked, err := s.policyGateText(chatID, telegramUID); err != nil || blocked {
+		return err
+	}
 	u, err := repo.FindUserByID(s.ctx(), s.DB, *uidPtr)
 	if err != nil {
 		return err

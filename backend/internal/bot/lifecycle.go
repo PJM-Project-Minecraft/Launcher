@@ -244,6 +244,9 @@ func (s *Service) beginPasswordFlow(chatID, telegramUID int64) error {
 	} else if uidPtr == nil {
 		return s.forbidNotLinked(chatID, telegramUID)
 	}
+	if blocked, err := s.policyGateText(chatID, telegramUID); err != nil || blocked {
+		return err
+	}
 	ep := repo.EmptyPayload()
 	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangePwdOld, &ep)
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
@@ -261,6 +264,9 @@ func (s *Service) beginEmailFlow(chatID, telegramUID int64) error {
 		return err
 	} else if uidPtr == nil {
 		return s.forbidNotLinked(chatID, telegramUID)
+	}
+	if blocked, err := s.policyGateText(chatID, telegramUID); err != nil || blocked {
+		return err
 	}
 	ep := repo.EmptyPayload()
 	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowChangeEmailAsk, &ep)
