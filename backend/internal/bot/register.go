@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"launcher-backend/internal/policy"
 	"launcher-backend/internal/repo"
 
 	"golang.org/x/crypto/bcrypt"
@@ -45,7 +46,18 @@ func (s *Service) beginLoginFlow(chatID int64, sender *tele.User) error {
 		homeReplyKeyboardMarkup())
 }
 
+// beginRegisterFlow — вход в регистрацию: сперва обязательный шаг согласия
+// с политикой. Сами шаги регистрации стартуют из cbPolicyRegAccept.
 func (s *Service) beginRegisterFlow(chatID int64, sender *tele.User) error {
+	if ok, err := s.alreadyLinkedChat(chatID, sender); err != nil || ok {
+		return err
+	}
+	text, markup := buildRegPolicyScreen(s.policyURL())
+	return s.notifyHTML(chatID, text, markup)
+}
+
+// startRegisterSteps — шаги регистрации после принятия политики.
+func (s *Service) startRegisterSteps(chatID int64, sender *tele.User) error {
 	if ok, err := s.alreadyLinkedChat(chatID, sender); err != nil || ok {
 		return err
 	}
@@ -195,6 +207,12 @@ func (s *Service) handleRegOTP(chatID int64, sender *tele.User, payload repo.Dia
 	tgU := sender.Username
 	_ = repo.BindTelegram(s.ctx(), s.DB, uid, telegramUserID(sender), ptrStrOrNil(tgU))
 	_ = repo.InsertAuthLog(s.ctx(), s.DB, &uid, uname, "telegram-bot-register", true, strPtr("registered_and_linked"))
+
+	// Пользователь дошёл сюда только через кнопку «Принимаю» (beginRegisterFlow
+	// стартует шаги лишь из cbPolicyRegAccept) — фиксируем согласие аккаунту.
+	if err := policy.RecordConsent(s.ctx(), s.DB, uid, policy.SourceBot, ""); err != nil && s.Log != nil {
+		s.Log.Warn("policy consent при регистрации", "err", err)
+	}
 
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
 	return s.sendHomeMenu(chatID, telegramUserID(sender), "✅ <b>Аккаунт создан и привязан.</b> Добро пожаловать!")

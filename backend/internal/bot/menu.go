@@ -218,6 +218,26 @@ func buildPolicyScreen(privacyURL string) (string, map[string]any) {
 	return text, telegram.InlineMarkup(rows...)
 }
 
+// buildRegPolicyScreen — шаг согласия перед регистрацией нового аккаунта.
+// «Назад» ведёт на главный экран: без принятия регистрация не стартует.
+func buildRegPolicyScreen(privacyURL string) (string, map[string]any) {
+	text := "🔒 <b>Политика конфиденциальности</b>\n\n" +
+		"Для создания аккаунта примите Политику конфиденциальности.\n\n" +
+		"Мы собираем: логин, e-mail, Telegram ID, идентификатор оборудования (HWID), " +
+		"IP-адрес, данные игровых сессий и античита, включая <b>скриншоты экрана " +
+		"во время игры</b> (по запросу администрации).\n\n" +
+		"<i>Полный текст — по кнопке ниже.</i>"
+	// Graceful degradation: без валидного URL кнопка чтения не добавляется
+	// (иначе Telegram отклонит сообщение с невалидным URL BUTTON_URL_INVALID).
+	var rows [][]telegram.InlineBtn
+	if strings.HasPrefix(privacyURL, "http://") || strings.HasPrefix(privacyURL, "https://") {
+		rows = append(rows, []telegram.InlineBtn{{Text: "📄 Читать полностью", URL: privacyURL}})
+	}
+	rows = append(rows, []telegram.InlineBtn{{Text: "✅ Принимаю и продолжаю", Data: cbPolicyRegAccept}})
+	rows = append(rows, backRow())
+	return text, telegram.InlineMarkup(rows...)
+}
+
 // policyGateApplies — нужно ли вместо запрошенного экрана показать политику.
 // Непривязанных (User == nil) не трогаем: их ограничивает callbackNeedsLink.
 func policyGateApplies(v menuView, data string) bool {

@@ -157,6 +157,10 @@ func (s *Service) HandleCallback(c tele.Context) error {
 		text, markup := buildHomeScreen(nv, "✅ Политика конфиденциальности принята.")
 		return s.editMenuScreen(chatID, msgID, text, markup)
 
+	case cbPolicyRegAccept:
+		s.answerCb(cb.ID, "", false)
+		return s.startRegisterSteps(chatID, c.Sender())
+
 	default:
 		// Кнопка из старой версии меню — просто пересоздаём главный экран.
 		s.answerCb(cb.ID, "Меню обновилось", false)

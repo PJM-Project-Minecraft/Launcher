@@ -65,3 +65,17 @@ func TestBuildPolicyScreenNoURL(t *testing.T) {
 		t.Errorf("URL-кнопка не должна быть добавлена при пустом URL: %s", raw)
 	}
 }
+
+func TestBuildRegPolicyScreen(t *testing.T) {
+	text, markup := buildRegPolicyScreen("https://example.com/privacy")
+	if !strings.Contains(text, "скриншоты экрана") {
+		t.Error("выжимка должна упоминать скриншоты экрана")
+	}
+	raw := markupString(t, markup)
+	if !strings.Contains(raw, cbPolicyRegAccept) {
+		t.Errorf("нет кнопки принятия для регистрации: %s", raw)
+	}
+	if !strings.Contains(raw, cbHome) {
+		t.Errorf("нет кнопки «Назад»: %s", raw)
+	}
+}
