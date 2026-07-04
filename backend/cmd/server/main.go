@@ -14,6 +14,7 @@ import (
 	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/middleware"
 	"launcher-backend/internal/news"
+	"launcher-backend/internal/policy"
 	"launcher-backend/internal/profiles"
 	"launcher-backend/internal/yggdrasil"
 
@@ -105,6 +106,7 @@ func main() {
 
 	authService := auth.NewService(db, provider, cfg.JWTSecret, cfg.AdminLogins, cfg.AppEnv, cfg.TokenTTL)
 	auth.NewHandler(authService).RegisterRoutes(app)
+	policy.NewHandler(db).RegisterRoutes(app, authService.RequireAuth(), auth.CurrentUser)
 	adminapi.NewHandler(db).RegisterRoutes(app, authService.RequireAuth())
 	profilesBroker := events.NewBroker()
 	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot), profilesBroker).
