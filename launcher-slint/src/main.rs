@@ -482,6 +482,7 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_install_folder_label(&app, &state);
 
     register_login_handler(&app, config.clone(), state.clone(), session_generation.clone());
+    register_policy_accept_handler(&app, config.clone(), state.clone());
     register_logout_handler(&app, state.clone(), session_generation.clone());
     register_settings_handler(&app, state.clone());
     register_play_handler(&app, config.clone(), state.clone());
@@ -557,6 +558,53 @@ fn register_login_handler(
     });
 }
 
+fn register_policy_accept_handler(
+    app: &AppWindow,
+    config: AppConfig,
+    state: Arc<Mutex<RuntimeState>>,
+) {
+    let app_weak = app.as_weak();
+    let state = state.clone();
+    app.on_policy_accept_requested(move || {
+        let Some(app) = app_weak.upgrade() else { return };
+        let token = state
+            .lock()
+            .ok()
+            .map(|s| s.token.clone())
+            .unwrap_or_default();
+        let version = app.get_policy_version();
+        app.set_message("Сохраняю согласие…".into());
+        let config = config.clone();
+        let app_weak = app_weak.clone();
+        thread::spawn(move || {
+            let result = accept_policy(&config, &token, version);
+            let refreshed = if result.is_err() {
+                // Возможен 409: версия сменилась — перечитываем текст.
+                fetch_policy(&config).ok()
+            } else {
+                None
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = app_weak.upgrade() else { return };
+                match result {
+                    Ok(()) => {
+                        app.set_policy_visible(false);
+                        app.set_message("Политика принята. Приятной игры!".into());
+                    }
+                    Err(message) => {
+                        if let Some(p) = refreshed {
+                            app.set_policy_text(p.text.into());
+                            app.set_policy_version_label(format!("Версия {}", p.version).into());
+                            app.set_policy_version(p.version);
+                        }
+                        app.set_message(message.into());
+                    }
+                }
+            });
+        });
+    });
+}
+
 fn register_logout_handler(
     app: &AppWindow,
     state: Arc<Mutex<RuntimeState>>,
@@ -588,6 +636,7 @@ fn register_logout_handler(
             app.set_is_syncing(false);
             app.set_download_panel_visible(false);
             app.set_settings_visible(false);
+            app.set_policy_visible(false);
             apply_install_folder_label(&app, &state);
             app.set_message("Сессия завершена.".into());
         }
@@ -798,6 +847,8 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
         thread::spawn(move || {
             let result = sync_and_launch(&config, &token, &user, &profile, &app_weak);
             let nick_for_rpc = nick_for_rpc.clone();
+            // Клонируем config для возможной подгрузки политики в invoke_from_event_loop.
+            let config_for_policy = config.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
                     discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
@@ -820,6 +871,26 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                                 app.set_download_panel_visible(false);
                                 app.set_message(SharedString::default());
                                 app.set_anticheat_alert(alert.into());
+                            } else if message == anticheat::POLICY_REQUIRED_ERR {
+                                // Редкий случай (окно раскатки): сервер требует согласие —
+                                // показываем экран политики вместо сырого текста ошибки.
+                                app.set_download_panel_visible(false);
+                                let config_bg = config_for_policy.clone();
+                                let app_weak_bg = app_weak.clone();
+                                thread::spawn(move || {
+                                    let policy = fetch_policy(&config_bg);
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        let Some(app) = app_weak_bg.upgrade() else { return };
+                                        if let Ok(p) = policy {
+                                            app.set_policy_text(p.text.into());
+                                            app.set_policy_version_label(
+                                                format!("Версия {}", p.version).into(),
+                                            );
+                                            app.set_policy_version(p.version);
+                                        }
+                                        app.set_policy_visible(true);
+                                    });
+                                });
                             } else {
                                 app.set_download_phase("Ошибка".into());
                                 app.set_download_file(message.clone().into());
@@ -965,6 +1036,16 @@ fn apply_session(
     app.set_password_value(SharedString::default());
     app.set_totp_value(SharedString::default());
     app.set_message(session.message.into());
+
+    match &session.policy {
+        Some(p) => {
+            app.set_policy_text(p.text.clone().into());
+            app.set_policy_version_label(format!("Версия {}", p.version).into());
+            app.set_policy_version(p.version);
+            app.set_policy_visible(true);
+        }
+        None => app.set_policy_visible(false),
+    }
 
     set_profile_ui(app, selected.as_ref());
 
