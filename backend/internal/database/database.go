@@ -38,6 +38,7 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&models.User{},
+		&models.PolicyConsent{},
 		&models.Profile{},
 		&models.GameFile{},
 		&models.Detection{},

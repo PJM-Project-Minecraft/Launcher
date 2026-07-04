@@ -33,6 +33,11 @@ type User struct {
 	HardwareID   string `gorm:"size:512" json:"-"`
 	IPAddress    string `gorm:"size:64" json:"-"`
 
+	// Согласие с Политикой конфиденциальности: версия принятого документа
+	// (0 — не принимал) и момент принятия. История — в PolicyConsent.
+	PolicyAcceptedVersion int        `gorm:"not null;default:0" json:"policyAcceptedVersion"`
+	PolicyAcceptedAt      *time.Time `json:"policyAcceptedAt,omitempty"`
+
 	LastLoginAt *time.Time `json:"lastLoginAt"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	UpdatedAt   time.Time  `json:"updatedAt"`
