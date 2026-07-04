@@ -423,6 +423,25 @@ func FetchUserStats(ctx context.Context, db *gorm.DB) (UserStats, error) {
 	return st, nil
 }
 
+// --- Релизы лаунчера ---
+
+// GetLatestLauncherRelease — возвращает последний активный релиз лаунчера со всеми файлами.
+func GetLatestLauncherRelease(ctx context.Context, db *gorm.DB) (*models.LauncherRelease, error) {
+	var rel models.LauncherRelease
+	err := db.WithContext(ctx).
+		Preload("Files").
+		Where("is_active = ?", true).
+		Order("created_at DESC").
+		First(&rel).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rel, nil
+}
+
 // isUniqueViolation распознаёт конфликт уникальности для Postgres (23505) и SQLite.
 func isUniqueViolation(err error) bool {
 	if err == nil {
