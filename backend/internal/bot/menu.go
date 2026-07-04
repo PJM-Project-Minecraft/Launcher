@@ -43,6 +43,21 @@ func backRow() []telegram.InlineBtn {
 	return []telegram.InlineBtn{{Text: "← Назад", Data: cbHome}}
 }
 
+// roleDisplay — человекочитаемая роль для шапки меню; неизвестные значения как есть.
+func roleDisplay(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "admin":
+		return "админ"
+	case "moderator":
+		return "модератор"
+	case "user":
+		return "игрок"
+	}
+	return role
+}
+
+const menuDivider = "──────────────────"
+
 // buildHomeScreen — главный экран. notice выводится первой строкой
 // (результат завершённого сценария: «Пароль обновлён» и т.п.).
 func buildHomeScreen(v menuView, notice string) (string, map[string]any) {
@@ -50,30 +65,32 @@ func buildHomeScreen(v menuView, notice string) (string, map[string]any) {
 	if notice != "" {
 		b.WriteString(notice + "\n\n")
 	}
-	b.WriteString("🎮 <b>" + escHTML(v.Brand) + "</b>\n")
+	b.WriteString("⛏ <b>" + escHTML(v.Brand) + "</b>\n")
 	if v.Tagline != "" {
 		b.WriteString("<i>" + escHTML(v.Tagline) + "</i>\n")
 	}
-	b.WriteString("\n")
+	b.WriteString(menuDivider + "\n\n")
 
 	if v.User == nil {
-		b.WriteString("Привяжите аккаунт, чтобы управлять паролем, почтой и 2FA:\n" +
-			"• <b>Войти</b> — учётка уже есть.\n" +
-			"• <b>Регистрация</b> — создать новую.\n\n" +
-			"<i>Кнопки ниже. Список команд: /help</i>")
+		b.WriteString("Добро пожаловать! 👋\n" +
+			"Привяжи аккаунт — и управляй паролем, почтой и 2FA прямо здесь:\n\n" +
+			"🔑 <b>Войти</b> — учётка уже есть\n" +
+			"📋 <b>Регистрация</b> — создать новую\n\n" +
+			"<i>Всё управление — кнопками ниже 👇</i>")
 		return b.String(), telegram.InlineMarkup(
 			[]telegram.InlineBtn{{Text: "🔑 Войти", Data: cbLogin}, {Text: "📋 Регистрация", Data: cbRegister}},
 			[]telegram.InlineBtn{{Text: "💎 Донат", Data: cbDonate}, {Text: "⬇ Лаунчер", Data: cbLauncher}},
 		)
 	}
 
-	totp := "❌"
+	totp := "❌ выключена"
 	if v.User.TOTPEnabled {
-		totp = "✅"
+		totp = "✅ включена"
 	}
-	b.WriteString(fmt.Sprintf("👋 Привет, <b>%s</b>!\n", escHTML(v.User.Login)))
-	b.WriteString(fmt.Sprintf("👤 %s · 🛡 2FA %s · %s\n\n", escHTML(v.User.Login), totp, escHTML(v.User.Role)))
-	b.WriteString("<i>Выберите раздел кнопкой ниже. Список команд: /help</i>")
+	b.WriteString(fmt.Sprintf("👋 Привет, <b>%s</b>!\n\n", escHTML(v.User.Login)))
+	b.WriteString(fmt.Sprintf("🛡 2FA · %s\n", totp))
+	b.WriteString(fmt.Sprintf("⭐ Роль · %s\n\n", escHTML(roleDisplay(v.User.Role))))
+	b.WriteString("<i>Выбери раздел кнопками ниже 👇</i>")
 
 	rows := [][]telegram.InlineBtn{
 		{{Text: "👤 Профиль", Data: cbProfile}, {Text: "🔑 Пароль", Data: cbPwd}},
@@ -167,7 +184,7 @@ func homeReplyKeyboardMarkup() map[string]any {
 	k := &telegram.ReplyKeyboardStyled{
 		Rows:             [][]telegram.KeyboardBtn{{{Text: menuButtonLabel, Style: "primary"}}},
 		Resize:           true,
-		InputPlaceholder: "«🏠 Меню» — главный экран, /help — команды",
+		InputPlaceholder: "«🏠 Меню» — вернуться на главный экран",
 	}
 	return k.ToReplyMarkup()
 }

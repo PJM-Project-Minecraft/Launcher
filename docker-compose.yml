@@ -63,6 +63,9 @@ services:
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       ADMIN_TELEGRAM_IDS: "${ADMIN_TELEGRAM_IDS:-}"
       TOTP_ISSUER: "${TOTP_ISSUER:-Launcher Accounts}"
+      # Брендинг шапки inline-меню (иначе дефолтный «Launcher Accounts»).
+      BOT_PUBLIC_NAME: "${BOT_PUBLIC_NAME:-}"
+      BOT_BRAND_LINE: "${BOT_BRAND_LINE:-}"
       DONATE_SHOP_URL: "${DONATE_SHOP_URL:-https://shop.likonchik.xyz}"
       LAUNCHER_EXE_PATH: "${LAUNCHER_EXE_PATH:-}"
       # Баннер inline-меню (link-preview). Пусто — меню без картинки.
