@@ -567,6 +567,11 @@ fn register_policy_accept_handler(
     let state = state.clone();
     app.on_policy_accept_requested(move || {
         let Some(app) = app_weak.upgrade() else { return };
+        // Защита от двойного клика: игнорируем повторный вызов пока запрос выполняется.
+        if app.get_policy_accepting() {
+            return;
+        }
+        app.set_policy_accepting(true);
         let token = state
             .lock()
             .ok()
@@ -588,10 +593,12 @@ fn register_policy_accept_handler(
                 let Some(app) = app_weak.upgrade() else { return };
                 match result {
                     Ok(()) => {
+                        app.set_policy_accepting(false);
                         app.set_policy_visible(false);
                         app.set_message("Политика принята. Приятной игры!".into());
                     }
                     Err(message) => {
+                        app.set_policy_accepting(false);
                         if let Some(p) = refreshed {
                             app.set_policy_text(p.text.into());
                             app.set_policy_version_label(format!("Версия {}", p.version).into());
@@ -847,8 +854,6 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
         thread::spawn(move || {
             let result = sync_and_launch(&config, &token, &user, &profile, &app_weak);
             let nick_for_rpc = nick_for_rpc.clone();
-            // Клонируем config для возможной подгрузки политики в invoke_from_event_loop.
-            let config_for_policy = config.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
                     discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
@@ -875,7 +880,7 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                                 // Редкий случай (окно раскатки): сервер требует согласие —
                                 // показываем экран политики вместо сырого текста ошибки.
                                 app.set_download_panel_visible(false);
-                                let config_bg = config_for_policy.clone();
+                                let config_bg = config.clone();
                                 let app_weak_bg = app_weak.clone();
                                 thread::spawn(move || {
                                     let policy = fetch_policy(&config_bg);
@@ -887,6 +892,11 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                                                 format!("Версия {}", p.version).into(),
                                             );
                                             app.set_policy_version(p.version);
+                                        } else if app.get_policy_text().is_empty() {
+                                            // Fallback: текст не загрузился — не оставляем оверлей пустым.
+                                            app.set_policy_text(
+                                                "Не удалось загрузить текст политики. Проверьте соединение и попробуйте снова.".into(),
+                                            );
                                         }
                                         app.set_policy_visible(true);
                                     });

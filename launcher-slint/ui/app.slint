@@ -428,7 +428,9 @@ export component AppWindow inherits Window {
     in property <string> update-status;
 
     // Политика конфиденциальности: видимость оверлея, текст и версия.
+    // policy-accepting: true пока in-flight запрос accept — блокирует повторный клик.
     in property <bool> policy-visible;
+    in property <bool> policy-accepting;
     in property <string> policy-text;
     in property <string> policy-version-label;
     in property <int> policy-version;
@@ -2145,7 +2147,8 @@ export component AppWindow inherits Window {
             x: 48px; y: parent.height - 76px;
             width: 250px; height: 42px;
             border-radius: 8px;
-            background: accept-ta.has-hover ? #d8b45a : #c9a44a;
+            // Приглушаем кнопку пока идёт in-flight запрос принятия.
+            background: root.policy-accepting ? #8a7a45 : (accept-ta.has-hover ? #d8b45a : #c9a44a);
 
             Text {
                 x: 0; y: 0;
@@ -2158,11 +2161,13 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
             }
             accept-ta := TouchArea {
+                // Блокируем повторный клик пока запрос ещё выполняется.
+                enabled: !root.policy-accepting;
                 clicked => { root.policy-accept-requested(); }
             }
         }
 
-        exit-btn := Rectangle {
+        Rectangle {
             x: 48px + 266px; y: parent.height - 76px;
             width: 120px; height: 42px;
             border-radius: 8px;
@@ -2183,7 +2188,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        browser-link := Text {
+        Text {
             x: parent.width - 48px - 220px; y: parent.height - 66px;
             width: 220px;
             text: "Открыть в браузере ↗";
