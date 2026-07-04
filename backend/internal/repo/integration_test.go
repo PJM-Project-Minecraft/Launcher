@@ -116,3 +116,51 @@ func TestMenuMessagePersistence(t *testing.T) {
 		t.Fatalf("после upsert: got=%d err=%v", got, err)
 	}
 }
+
+// TestPwdResetLifecycle: создание заявки, дедуп pending, решение и защита от двойного клика.
+func TestPwdResetLifecycle(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("pw12345678"), 10)
+	uid, err := repo.RegisterNewUser(ctx, db, "ResetGuy", "reset@example.com", string(hash))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	id1, created, err := repo.CreatePwdReset(ctx, db, uid, 500)
+	if err != nil || !created {
+		t.Fatalf("create: id=%d created=%v err=%v", id1, created, err)
+	}
+	// Повторная заявка того же пользователя — дедуп на pending.
+	id2, created2, err := repo.CreatePwdReset(ctx, db, uid, 500)
+	if err != nil || created2 || id2 != id1 {
+		t.Fatalf("dedup: id2=%d created2=%v err=%v", id2, created2, err)
+	}
+
+	pending, err := repo.ListPendingPwdResets(ctx, db)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending: %d err=%v", len(pending), err)
+	}
+
+	ok, err := repo.DecidePwdReset(ctx, db, id1, "approved", "rootadmin")
+	if err != nil || !ok {
+		t.Fatalf("decide: ok=%v err=%v", ok, err)
+	}
+	// Второй клик по той же заявке — уже решена.
+	ok2, err := repo.DecidePwdReset(ctx, db, id1, "rejected", "other")
+	if err != nil || ok2 {
+		t.Fatalf("double decide: ok2=%v err=%v", ok2, err)
+	}
+
+	r, err := repo.GetPwdReset(ctx, db, id1)
+	if err != nil || r == nil || r.Status != "approved" || r.DecidedBy != "rootadmin" {
+		t.Fatalf("get: %+v err=%v", r, err)
+	}
+
+	// После решения можно подать новую заявку.
+	_, created3, err := repo.CreatePwdReset(ctx, db, uid, 500)
+	if err != nil || !created3 {
+		t.Fatalf("re-create: created3=%v err=%v", created3, err)
+	}
+}

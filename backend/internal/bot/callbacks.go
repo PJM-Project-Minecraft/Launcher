@@ -3,7 +3,6 @@ package bot
 import (
 	"strings"
 
-	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
 
 	tele "gopkg.in/telebot.v3"
@@ -15,9 +14,10 @@ func normalizeCallbackData(raw string) string {
 }
 
 // callbackNeedsLink — экраны, доступные только привязанному аккаунту.
+// Решения по заявкам (pr:*) сюда не входят: у них своя админ-проверка.
 func callbackNeedsLink(data string) bool {
 	switch data {
-	case cbProfile, cbPwd, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin:
+	case cbProfile, cbPwd, cbPwdChange, cbPwdReset, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin:
 		return true
 	}
 	return false
@@ -40,6 +40,11 @@ func (s *Service) HandleCallback(c tele.Context) error {
 	telegramUID := telegramUserID(c.Sender())
 	msgID := cb.Message.ID
 	data := normalizeCallbackData(cb.Data)
+
+	// Решения по заявкам на сброс пароля — отдельная админ-ветка (pr:ok:<id> / pr:no:<id>).
+	if strings.HasPrefix(data, "pr:") {
+		return s.handlePwdResetDecision(cb, chatID, telegramUID, msgID, data)
+	}
 
 	v, err := s.menuViewFor(telegramUID)
 	if err != nil {
@@ -85,7 +90,15 @@ func (s *Service) HandleCallback(c tele.Context) error {
 
 	case cbPwd:
 		s.answerCb(cb.ID, "", false)
+		text, markup := buildPasswordScreen(v)
+		return s.editMenuScreen(chatID, msgID, text, markup)
+
+	case cbPwdChange:
+		s.answerCb(cb.ID, "", false)
 		return s.beginPasswordFlow(chatID, telegramUID)
+
+	case cbPwdReset:
+		return s.requestPwdReset(cb, chatID, msgID, v)
 
 	case cbEmail:
 		s.answerCb(cb.ID, "", false)
@@ -115,14 +128,7 @@ func (s *Service) HandleCallback(c tele.Context) error {
 			return nil
 		}
 		s.answerCb(cb.ID, "", false)
-		ep := repo.EmptyPayload()
-		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminMenu, &ep)
-		return s.notifyHTML(chatID,
-			"<b>Панель администратора</b>\n"+
-				"• «🔍 Поиск» — найти игрока по нику, логину, почте или id.\n"+
-				"• «📡 OPS» — краткий дайджест сервисов (если настроено в .env).\n"+
-				"• «⬅ Выйти» — вернуться к обычному меню.",
-			s.adminOpsKeyboardMarkup())
+		return s.adminPanelIntro(chatID)
 
 	default:
 		// Кнопка из старой версии меню — просто пересоздаём главный экран.

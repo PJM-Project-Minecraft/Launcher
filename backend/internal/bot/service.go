@@ -202,14 +202,14 @@ func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 	kb := homeReplyKeyboardMarkup()
 	raw := s.launcherExePath()
 	if raw == "" {
-		return s.notifyWarn(chatID, "Лаунчер не настроен (LAUNCHER_EXE_PATH). Обратитесь к администратору проекта.")
+		return s.notifyWarn(chatID, "Скачивание лаунчера временно недоступно. Напишите команде проекта.")
 	}
 	path := filepath.Clean(raw)
 	if _, err := os.Stat(path); err != nil {
 		if s.Log != nil {
 			s.Log.Warn("launcher exe", "path", path, "err", err)
 		}
-		return s.notifyWarn(chatID, "Файл лаунчера сейчас недоступен на сервере бота. Попробуйте позже или напишите администратору.")
+		return s.notifyWarn(chatID, "Файл лаунчера сейчас недоступен. Попробуйте позже.")
 	}
 
 	sendPath, attachName, cleanup, gz, err := prepareLauncherForTelegram(path)
@@ -217,7 +217,7 @@ func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 		if s.Log != nil {
 			s.Log.Error("launcher prepare", "err", err)
 		}
-		return s.notifyWarn(chatID, "Не удалось подготовить файл лаунчера: "+err.Error())
+		return s.notifyWarn(chatID, "Не удалось подготовить файл лаунчера. Попробуйте позже.")
 	}
 	defer cleanup()
 
@@ -244,7 +244,7 @@ func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 		if s.Log != nil {
 			s.Log.Error("sendDocument launcher", "err", err)
 		}
-		return s.notifyWarn(chatID, "Не удалось отправить файл в Telegram. Проверьте логи бота и сеть.")
+		return s.notifyWarn(chatID, "Не удалось отправить файл. Попробуйте позже или скачайте по прямой ссылке из раздела «Лаунчер».")
 	}
 	return nil
 }

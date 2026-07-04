@@ -89,7 +89,7 @@ func (s *Service) handlePasswordNew(chatID int64, messageID int, telegramUID int
 		s.redactPasswordMessage(chatID, messageID, pw)
 	}
 	if !validators.IsValidPassword(pw) {
-		return s.notifyWarn(chatID, "Новый пароль: от 8 до 128 символов. Уточните требования у админа или попробуйте другой.")
+		return s.notifyWarn(chatID, "Новый пароль должен быть от 8 до 128 символов — попробуйте другой.")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(pw), 10)
 	if err != nil {

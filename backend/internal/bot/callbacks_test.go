@@ -19,7 +19,7 @@ func TestNormalizeCallbackData(t *testing.T) {
 
 // TestCallbackNeedsLink: приватные экраны требуют привязки, публичные — нет.
 func TestCallbackNeedsLink(t *testing.T) {
-	private := []string{cbProfile, cbPwd, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin}
+	private := []string{cbProfile, cbPwd, cbPwdChange, cbPwdReset, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin}
 	public := []string{cbHome, cbDonate, cbLauncher, cbLauncherFile, cbLogin, cbRegister}
 	for _, d := range private {
 		if !callbackNeedsLink(d) {

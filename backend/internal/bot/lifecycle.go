@@ -147,17 +147,9 @@ func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, t
 	switch text {
 	case "/admin":
 		if adminOpt != nil {
-			ep := repo.EmptyPayload()
-			_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminMenu, &ep)
-			return s.notifyHTML(chatID,
-				"<b>Панель администратора</b>\n"+
-					"• «🔍 Поиск» — найти игрока по нику, логину, почте или id.\n"+
-					"• «📡 OPS» — краткий дайджест сервисов (если настроено в .env).\n"+
-					"• «⬅ Выйти» — вернуться к обычному меню.\n\n"+
-					"Доступ только у ролей admin/moderator и при вашем id в allowlist (если список задан).",
-				s.adminOpsKeyboardMarkup())
+			return s.adminPanelIntro(chatID)
 		}
-		return s.notifyWarn(chatID, "Админка недоступна: нужна роль admin или moderator в базе и, если задан ADMIN_TELEGRAM_IDS, ваш Telegram id должен входить в него.")
+		return s.notifyWarn(chatID, "Эта команда доступна только команде проекта.")
 
 	case "Профиль", "/profile":
 		return s.profileCard(chatID, telegramUID)
@@ -228,26 +220,19 @@ func (s *Service) profileCard(chatID int64, telegramUID int64) error {
 func (s *Service) cmdHelp(chatID int64, _ int64) error {
 	kb := homeReplyKeyboardMarkup()
 	txt := strings.Join([]string{
-		"<b>Справка по боту</b>",
+		"ℹ️ <b>Справка</b>",
 		"",
-		"<b>Базовые команды</b>",
-		"<code>/start</code> или «🏠 Меню» — показать живое меню",
-		"<code>/menu</code> — показать живое меню",
-		"<code>/help</code> — этот текст",
-		"<code>/cancel</code> — отменить текущий шаг (ввод логина, пароля, кода и т.д.)",
+		"Вся навигация — в живом меню: нажмите «🏠 Меню» внизу или /menu.",
 		"",
-		"<i>Нажмите кнопку «🏠 Меню» в нижней клавиатуре — откроется главный экран с кнопками навигации.</i>",
-		"",
-		"<b>Аккаунт</b>",
-		"<code>/profile</code> — ваш профиль (UUID, логин, ник, 2FA)",
-		"<code>/bind</code> или «Войти» — связать Telegram с уже существующей учёткой",
-		"<code>/register</code> — новая учётка: логин сайта, почта, пароль, подтверждение кодом",
-		"<code>/password</code> — смена пароля (нужна привязка)",
-		"<code>/email</code> — смена почты: новый e-mail → код из чата",
-		"<code>/2fa</code> — включить или выключить двухфакторку для <b>лаунчера</b>",
-		"<code>/donate</code> — ссылка на магазин и донат",
-		"<code>/launcher</code> — получить файл лаунчера в чат (если настроен LAUNCHER_EXE_PATH)",
-		"<code>/admin</code> — панель модератора (только при роли и allowlist)",
+		"<b>Команды</b>",
+		"<code>/menu</code> — главное меню",
+		"<code>/cancel</code> — отменить текущий шаг (ввод логина, пароля, кода)",
+		"<code>/profile</code> — профиль",
+		"<code>/password</code> — пароль",
+		"<code>/email</code> — почта",
+		"<code>/2fa</code> — двухфакторка для лаунчера",
+		"<code>/donate</code> — магазин и донат",
+		"<code>/launcher</code> — скачать лаунчер",
 	}, "\n")
 	return s.notifyHTML(chatID, txt, kb)
 }
@@ -266,7 +251,7 @@ func (s *Service) beginPasswordFlow(chatID, telegramUID int64) error {
 			"1) Сейчас пришлите <b>текущий пароль</b> (его сообщение будет удалено из чата и заменено заглушкой).\n"+
 			"2) Затем бот пришлёт <b>шестизначный код</b> в этот чат — введите его.\n"+
 			"3) После этого пришлите <b>новый пароль</b> (8–128 символов).\n\n"+
-			"<i>Если забыли пароль — обратитесь к администратору проекта.</i>"),
+			"<i>Не помните текущий пароль? «🏠 Меню» → «Пароль» → «🆘 Забыл пароль».</i>"),
 		homeReplyKeyboardMarkup())
 }
 

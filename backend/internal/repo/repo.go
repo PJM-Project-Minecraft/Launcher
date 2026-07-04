@@ -325,6 +325,104 @@ func ReadMenuMessage(ctx context.Context, db *gorm.DB, chatID int64) (int, error
 	return m.MessageID, nil
 }
 
+// --- Заявки на сброс пароля («забыл пароль») ---
+
+// CreatePwdReset создаёт заявку; если у пользователя уже есть pending-заявка,
+// возвращает её id и created=false (повторная отправка не плодит дубли).
+func CreatePwdReset(ctx context.Context, db *gorm.DB, userID string, chatID int64) (uint, bool, error) {
+	var existing models.BotPasswordReset
+	err := db.WithContext(ctx).
+		Where("user_id = ? AND status = ?", userID, models.PwdResetPending).
+		First(&existing).Error
+	if err == nil {
+		return existing.ID, false, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, false, err
+	}
+	req := models.BotPasswordReset{UserID: userID, ChatID: chatID, Status: models.PwdResetPending}
+	if err := db.WithContext(ctx).Create(&req).Error; err != nil {
+		return 0, false, err
+	}
+	return req.ID, true, nil
+}
+
+func GetPwdReset(ctx context.Context, db *gorm.DB, id uint) (*models.BotPasswordReset, error) {
+	var r models.BotPasswordReset
+	err := db.WithContext(ctx).Where("id = ?", id).First(&r).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// DecidePwdReset переводит pending-заявку в approved/rejected; возвращает false,
+// если заявка уже решена (защита от двойного клика и гонки двух админов).
+func DecidePwdReset(ctx context.Context, db *gorm.DB, id uint, status, decidedBy string) (bool, error) {
+	res := db.WithContext(ctx).Model(&models.BotPasswordReset{}).
+		Where("id = ? AND status = ?", id, models.PwdResetPending).
+		Updates(map[string]any{"status": status, "decided_by": decidedBy, "updated_at": time.Now().UTC()})
+	return res.RowsAffected > 0, res.Error
+}
+
+func ListPendingPwdResets(ctx context.Context, db *gorm.DB) ([]models.BotPasswordReset, error) {
+	var out []models.BotPasswordReset
+	err := db.WithContext(ctx).
+		Where("status = ?", models.PwdResetPending).
+		Order("created_at ASC").Limit(20).Find(&out).Error
+	return out, err
+}
+
+// ListPrivilegedWithTelegram — админы/модераторы с привязанным Telegram
+// (кандидаты на уведомление о заявках).
+func ListPrivilegedWithTelegram(ctx context.Context, db *gorm.DB) ([]models.User, error) {
+	var out []models.User
+	err := db.WithContext(ctx).
+		Where("role IN ? AND telegram_id IS NOT NULL", []string{models.RoleAdmin, models.RoleModerator}).
+		Find(&out).Error
+	return out, err
+}
+
+// UserStats — сводные счётчики для админ-панели бота.
+type UserStats struct {
+	Total     int64
+	Linked    int64
+	TotpOn    int64
+	Banned    int64
+	NewWeek   int64
+	PwdReqs   int64
+}
+
+func FetchUserStats(ctx context.Context, db *gorm.DB) (UserStats, error) {
+	var st UserStats
+	q := func(dst *int64, tx *gorm.DB) error { return tx.Count(dst).Error }
+	base := func() *gorm.DB { return db.WithContext(ctx).Model(&models.User{}) }
+	if err := q(&st.Total, base()); err != nil {
+		return st, err
+	}
+	if err := q(&st.Linked, base().Where("telegram_id IS NOT NULL")); err != nil {
+		return st, err
+	}
+	if err := q(&st.TotpOn, base().Where("totp_enabled = ?", true)); err != nil {
+		return st, err
+	}
+	if err := q(&st.Banned, base().Where("is_banned = ? OR is_hwid_banned = ?", true, true)); err != nil {
+		return st, err
+	}
+	weekAgo := time.Now().UTC().AddDate(0, 0, -7)
+	if err := q(&st.NewWeek, base().Where("created_at >= ?", weekAgo)); err != nil {
+		return st, err
+	}
+	if err := q(&st.PwdReqs, db.WithContext(ctx).Model(&models.BotPasswordReset{}).
+		Where("status = ?", models.PwdResetPending)); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
 // isUniqueViolation распознаёт конфликт уникальности для Postgres (23505) и SQLite.
 func isUniqueViolation(err error) bool {
 	if err == nil {

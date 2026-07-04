@@ -180,3 +180,14 @@ func TestHomeReplyKeyboardSingleButton(t *testing.T) {
 		t.Errorf("клавиатура должна быть persistent")
 	}
 }
+
+// TestBuildPasswordScreen: раздел «Пароль» несёт смену, заявку админу и Назад.
+func TestBuildPasswordScreen(t *testing.T) {
+	_, markup := buildPasswordScreen(menuView{User: testUser()})
+	btns := flatButtons(t, markup)
+	for _, want := range []string{cbPwdChange, cbPwdReset, cbHome} {
+		if !hasCallback(btns, want) {
+			t.Errorf("нет кнопки %s", want)
+		}
+	}
+}

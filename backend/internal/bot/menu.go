@@ -14,6 +14,8 @@ const (
 	cbHome         = "m:home"
 	cbProfile      = "m:profile"
 	cbPwd          = "m:pwd"
+	cbPwdChange    = "m:pwd:change"
+	cbPwdReset     = "m:pwd:reset"
 	cbEmail        = "m:email"
 	cb2FA          = "m:2fa"
 	cb2FAOn        = "m:2fa:on"
@@ -123,6 +125,20 @@ func buildProfileScreen(v menuView) (string, map[string]any) {
 	return text, telegram.InlineMarkup(backRow())
 }
 
+// buildPasswordScreen — раздел «Пароль»: смена по старому паролю или заявка
+// администратору («забыл пароль»).
+func buildPasswordScreen(v menuView) (string, map[string]any) {
+	text := "🔑 <b>Пароль</b>\n\n" +
+		"🔄 <b>Сменить пароль</b> — если помните текущий: старый пароль → код → новый.\n\n" +
+		"🆘 <b>Забыл пароль</b> — отправим заявку администратору; после одобрения " +
+		"бот пришлёт новый пароль прямо в этот чат."
+	return text, telegram.InlineMarkup(
+		[]telegram.InlineBtn{{Text: "🔄 Сменить пароль", Data: cbPwdChange}},
+		[]telegram.InlineBtn{{Text: "🆘 Забыл пароль", Data: cbPwdReset}},
+		backRow(),
+	)
+}
+
 // build2FAScreen — статус 2FA и контекстная кнопка включения/выключения.
 func build2FAScreen(v menuView) (string, map[string]any) {
 	u := v.User
@@ -173,7 +189,7 @@ func buildLauncherScreen(v menuView) (string, map[string]any) {
 		rows = append(rows, []telegram.InlineBtn{{Text: "📩 Прислать файл в чат", Data: cbLauncherFile}})
 	}
 	if v.LauncherURL == "" && !v.HasLauncherFile {
-		text = "⬇ <b>Лаунчер</b>\n\nРаздача лаунчера сейчас не настроена. Обратитесь к администратору проекта."
+		text = "⬇ <b>Лаунчер</b>\n\nСкачивание сейчас недоступно — загляните позже."
 	}
 	rows = append(rows, backRow())
 	return text, telegram.InlineMarkup(rows...)

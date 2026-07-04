@@ -57,7 +57,8 @@ func (s *Service) ensureCanManageTarget(chatID int64, telegramUID int64, targetI
 func (s *Service) adminOpsKeyboardMarkup() map[string]any {
 	k := &telegram.ReplyKeyboardStyled{
 		Rows: [][]telegram.KeyboardBtn{
-			{{Text: "🔍 Поиск", Style: "primary"}, {Text: "📡 OPS", Style: "success"}},
+			{{Text: "🔍 Поиск", Style: "primary"}, {Text: "📊 Статистика", Style: "success"}},
+			{{Text: "🆘 Заявки", Style: "primary"}, {Text: "📡 OPS", Style: "success"}},
 			{{Text: "⬅ Выйти из админки", Style: "danger"}},
 		},
 		Resize:           true,
@@ -70,11 +71,26 @@ func (s *Service) adminUserKeyboardMarkup() map[string]any {
 	k := &telegram.ReplyKeyboardStyled{
 		Rows: [][]telegram.KeyboardBtn{
 			{{Text: "📧 Изменить email цели", Style: "primary"}, {Text: "🔓 Сгенерировать пароль", Style: "danger"}},
-			{{Text: "ℹ Инфо пользователя", Style: "success"}, {Text: "⬅ К списку поиска", Style: "primary"}},
+			{{Text: "🚫 Бан / разбан", Style: "danger"}, {Text: "ℹ Инфо пользователя", Style: "success"}},
+			{{Text: "⬅ К списку поиска", Style: "primary"}},
 		},
 		Resize: true,
 	}
 	return k.ToReplyMarkup()
+}
+
+// adminPanelIntro — вход в панель: ставит FlowAdminMenu и показывает разделы.
+func (s *Service) adminPanelIntro(chatID int64) error {
+	ep := repo.EmptyPayload()
+	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminMenu, &ep)
+	return s.notifyHTML(chatID,
+		"🛠 <b>Панель администратора</b>\n"+
+			"• «🔍 Поиск» — найти игрока (ник, логин, почта, id) и управлять аккаунтом.\n"+
+			"• «📊 Статистика» — сводка по базе игроков.\n"+
+			"• «🆘 Заявки» — очередь запросов на сброс пароля.\n"+
+			"• «📡 OPS» — дайджест сервисов.\n"+
+			"• «⬅ Выйти из админки» — вернуться в обычное меню.",
+		s.adminOpsKeyboardMarkup())
 }
 
 func (s *Service) adminMenuActions(chatID int64, telegramUID int64, text string, _ *adminContext) error {
@@ -97,15 +113,63 @@ func (s *Service) adminMenuActions(chatID int64, telegramUID int64, text string,
 		d := opsFormatDigest(s.HTTP, s.Cfg)
 		return s.notifyHTML(chatID, "<pre>"+escHTML(d)+"</pre>", s.adminOpsKeyboardMarkup())
 
+	case "📊 Статистика":
+		return s.adminStats(chatID)
+
+	case "🆘 Заявки":
+		return s.adminPendingPwdResets(chatID)
+
 	case "⬅ Выйти из админки":
 		if err := repo.ClearDialogue(s.ctx(), s.DB, chatID); err != nil {
 			return err
 		}
-		return s.sendHomeMenu(chatID, telegramUID, "Вы вышли из панели администратора.")
+		// Сначала возвращаем обычную reply-клавиатуру (иначе админские кнопки залипают),
+		// затем свежее меню.
+		_ = s.notifyHTML(chatID, "Вы вышли из панели администратора.", homeReplyKeyboardMarkup())
+		return s.sendHomeMenu(chatID, telegramUID, "")
 
 	default:
-		return s.notifyWarn(chatID, "Выберите кнопку на админ-клавиатуре («Поиск», «OPS», «Выйти») или /cancel.")
+		return s.notifyWarn(chatID, "Выберите кнопку на админ-клавиатуре («Поиск», «Статистика», «Заявки», «OPS», «Выйти») или /cancel.")
 	}
+}
+
+// adminStats — сводка по базе игроков для панели.
+func (s *Service) adminStats(chatID int64) error {
+	st, err := repo.FetchUserStats(s.ctx(), s.DB)
+	if err != nil {
+		return err
+	}
+	body := fmt.Sprintf(
+		"📊 <b>Статистика</b>\n\n"+
+			"👥 Аккаунтов всего: <b>%d</b>\n"+
+			"🔗 Привязано к Telegram: <b>%d</b>\n"+
+			"🛡 Со включённой 2FA: <b>%d</b>\n"+
+			"🚫 В бане (акк или HWID): <b>%d</b>\n"+
+			"🆕 Новых за 7 дней: <b>%d</b>\n"+
+			"🆘 Заявок на пароль в очереди: <b>%d</b>",
+		st.Total, st.Linked, st.TotpOn, st.Banned, st.NewWeek, st.PwdReqs)
+	return s.notifyHTML(chatID, body, s.adminOpsKeyboardMarkup())
+}
+
+// adminPendingPwdResets — очередь заявок «забыл пароль»: карточка с кнопками на каждую.
+func (s *Service) adminPendingPwdResets(chatID int64) error {
+	reqs, err := repo.ListPendingPwdResets(s.ctx(), s.DB)
+	if err != nil {
+		return err
+	}
+	if len(reqs) == 0 {
+		return s.notifyHTML(chatID, "🆘 Ожидающих заявок на сброс пароля нет.", s.adminOpsKeyboardMarkup())
+	}
+	for _, r := range reqs {
+		u, err := repo.FindUserByID(s.ctx(), s.DB, r.UserID)
+		if err != nil || u == nil {
+			continue
+		}
+		if err := s.notifyHTML(chatID, pwdResetAdminCard(r.ID, u), pwdResetAdminMarkup(r.ID)); err != nil && s.Log != nil {
+			s.Log.Warn("очередь заявок: карточка", "id", r.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) adminSearch(chatID int64, query string, adminOpt *adminContext) error {
@@ -199,16 +263,25 @@ func (s *Service) fetchUserSummary(userID string) (string, error) {
 	if strings.TrimSpace(u.TelegramUsername) != "" {
 		tgUsername = "@" + escHTML(strings.TrimPrefix(strings.TrimSpace(u.TelegramUsername), "@"))
 	}
+	ban := "нет"
+	if u.IsBanned {
+		ban = "🚫 да"
+	}
+	if u.IsHwidBanned {
+		ban += " (+HWID)"
+	}
 	return fmt.Sprintf(
 		"<b>%s</b> / %s\n"+
 			"<b>UUID аккаунта</b>: <code>%s</code>\n"+
 			"<b>Роль</b>: %s\n"+
+			"<b>Бан</b>: %s\n"+
 			"<b>Telegram ID</b>: %s\n"+
 			"<b>TG username</b>: %s\n"+
 			"<b>Создан</b>: %s",
 		escHTML(u.Login), escHTML(maskEmailUnsafe(u.Email)),
 		escHTML(u.ProviderUUID),
 		escHTML(u.Role),
+		ban,
 		tgID, tgUsername,
 		escHTML(u.CreatedAt.UTC().Format("2006-01-02 15:04:05")),
 	), nil
@@ -258,6 +331,31 @@ func (s *Service) adminManage(chatID int64, telegramUIDFrom int64, text string) 
 		_ = repo.InsertAudit(s.ctx(), s.DB, &td, nil, &target, "admin_generate_password", strPtr("hash_rotated"))
 		msg := fmt.Sprintf("Временный пароль отправлен здесь же (передайте игроку вручную): <code>%s</code>", escHTML(pwd))
 		return s.notifyHTML(chatID, msg, s.adminUserKeyboardMarkup())
+
+	case "🚫 Бан / разбан":
+		if ok, err := s.ensureCanManageTarget(chatID, admT, target); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		u, err := repo.FindUserByID(s.ctx(), s.DB, target)
+		if err != nil {
+			return err
+		}
+		if u == nil {
+			return s.notifyWarn(chatID, "Пользователь не найден — повторите поиск.")
+		}
+		newBanned := !u.IsBanned
+		if _, err := repo.SetBan(s.ctx(), s.DB, target, newBanned); err != nil {
+			return err
+		}
+		action, verdict := "admin_unban", "✅ Аккаунт <b>разбанен</b>."
+		if newBanned {
+			action, verdict = "admin_ban", "🚫 Аккаунт <b>забанен</b> (вход в лаунчер закрыт)."
+		}
+		td := admT
+		_ = repo.InsertAudit(s.ctx(), s.DB, &td, nil, &target, action, nil)
+		return s.notifyHTML(chatID, fmt.Sprintf("%s\nИгрок: <b>%s</b>", verdict, escHTML(u.Login)), s.adminUserKeyboardMarkup())
 
 	case "ℹ Инфо пользователя":
 		card, err := s.fetchUserSummary(target)

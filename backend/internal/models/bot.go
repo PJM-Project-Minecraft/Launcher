@@ -55,6 +55,25 @@ type BotMenuMessage struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Статусы заявки на сброс пароля через бота.
+const (
+	PwdResetPending  = "pending"
+	PwdResetApproved = "approved"
+	PwdResetRejected = "rejected"
+)
+
+// BotPasswordReset — заявка игрока на сброс пароля («забыл пароль»).
+// Создаётся из inline-меню, решается администратором inline-кнопками.
+type BotPasswordReset struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	UserID    string    `gorm:"type:uuid;index;not null" json:"userId"`
+	ChatID    int64     `gorm:"not null" json:"chatId"` // чат игрока — куда прислать новый пароль
+	Status    string    `gorm:"size:16;not null;default:pending;index" json:"status"`
+	DecidedBy string    `gorm:"size:64" json:"decidedBy"` // логин администратора, принявшего решение
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 // Session — сессии веб-аутентификации (зарезервировано, перенос из бота).
 type Session struct {
 	ID           string    `gorm:"type:uuid;primaryKey" json:"id"`
