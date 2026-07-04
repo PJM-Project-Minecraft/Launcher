@@ -83,7 +83,7 @@ func (s *Service) beginTotpSetup(chatID int64, telegramUID int64, u *models.User
 			"<i>Пока вы не введёте верный код, 2FA для лаунчера не включится.</i>",
 		escHTML(key.Secret()), safeHref,
 	)
-	return s.notifyHTML(chatID, s.msgWithCancelHint(body), homeReplyKeyboardMarkup())
+	return s.notifyHTML(chatID, s.msgWithCancelHint(body), keyboardDismiss())
 }
 
 func (s *Service) handleTotpConfirm(chatID int64, messageID int, telegramUID int64, text string) error {
@@ -151,7 +151,7 @@ func (s *Service) beginTotpDisable(chatID int64, telegramUID int64) error {
 		"<b>Отключение 2FA</b>\n\n"+
 			"Введите <b>пароль от аккаунта</b> (как для входа). Сообщение с паролем бот скроет и удалит из линии чата.\n\n"+
 			"Затем попросим код из приложения — это защита от случайного отключения."),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
 
 func (s *Service) handleTotpDisablePwd(chatID int64, messageID int, telegramUID int64, text string) error {
@@ -189,7 +189,7 @@ func (s *Service) handleTotpDisablePwd(chatID int64, messageID int, telegramUID 
 	}
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"Пароль принят. Введите <b>текущий шестизначный код</b> из приложения 2FA — тем самым подтверждаете отключение."),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
 
 func (s *Service) handleTotpDisableOTP(chatID int64, messageID int, telegramUID int64, text string) error {

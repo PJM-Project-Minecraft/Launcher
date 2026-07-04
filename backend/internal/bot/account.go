@@ -49,7 +49,7 @@ func (s *Service) handlePasswordOld(chatID int64, messageID int, telegramUID int
 	_ = s.notifyHTML(chatID, s.msgWithCancelHint(fmt.Sprintf(
 		"На смену пароля отправлен <b>одноразовый код</b> (около %d мин.):\n<code>%s</code>\n\n"+
 			"Введите эти <b>6 цифр</b> следующим сообщением.",
-		otpMinutes, escHTML(code))), homeReplyKeyboardMarkup())
+		otpMinutes, escHTML(code))), keyboardDismiss())
 
 	dp := payload
 	dp.OtpUserID = &uid
@@ -72,7 +72,7 @@ func (s *Service) handlePasswordAfterOTP(chatID int64, _telegramUID int64, text 
 	_ = s.notifyHTML(chatID, s.msgWithCancelHint(
 		"Код принят. Теперь пришлите <b>новый пароль</b> одним сообщением (8–128 символов).\n\n"+
 			"<i>Сообщение с паролем будет удалено из чата.</i>"),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 
 	dp := repo.DialoguePayload{}
 	dp.OtpUserID = &uid
@@ -142,7 +142,7 @@ func (s *Service) handleChangeEmailAsk(chatID int64, telegramUID int64, payload 
 	_ = s.notifyHTML(chatID, s.msgWithCancelHint(fmt.Sprintf(
 		"Чтобы подтвердить новую почту, введите код из сообщения ниже (около %d мин.):\n<code>%s</code>\n\n"+
 			"<i>Код только для этого чата — пересылать другим не нужно.</i>",
-		otpMinutes, escHTML(code))), homeReplyKeyboardMarkup())
+		otpMinutes, escHTML(code))), keyboardDismiss())
 
 	ui := u.ID
 	dp.OtpUserID = &ui

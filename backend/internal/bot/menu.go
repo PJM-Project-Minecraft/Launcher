@@ -308,14 +308,51 @@ func (s *Service) policyGateText(chatID, telegramUID int64) (bool, error) {
 	return true, repo.SaveMenuMessage(s.ctx(), s.DB, chatID, id)
 }
 
-// homeReplyKeyboardMarkup — постоянная reply-клавиатура из одной кнопки «🏠 Меню».
-func homeReplyKeyboardMarkup() map[string]any {
-	k := &telegram.ReplyKeyboardStyled{
-		Rows:             [][]telegram.KeyboardBtn{{{Text: menuButtonLabel, Style: "primary"}}},
-		Resize:           true,
-		InputPlaceholder: "«🏠 Меню» — вернуться на главный экран",
+// launcherCard показывает inline-экран «Лаунчер» новым меню-сообщением. Точка
+// входа для команды /launcher и устаревшей reply-кнопки «Скачать лаунчер»
+// (вместо прежней прямой отправки локального .exe, который на проде мог быть
+// недоступен). Дальше игрок выбирает платформу кнопками экрана.
+func (s *Service) launcherCard(chatID int64, telegramUID int64) error {
+	v, err := s.menuViewFor(telegramUID)
+	if err != nil {
+		return err
 	}
-	return k.ToReplyMarkup()
+	text, markup := buildLauncherScreen(v)
+	if old, err2 := repo.ReadMenuMessage(s.ctx(), s.DB, chatID); err2 == nil && old > 0 {
+		_ = telegram.DeleteMessage(s.HTTP, s.Cfg.TelegramBotToken, chatID, old)
+	}
+	id, err := telegram.SendMessageHTMLWithID(s.HTTP, s.Cfg.TelegramBotToken, chatID, text, markup, s.bannerPreview())
+	if err != nil {
+		return err
+	}
+	return repo.SaveMenuMessage(s.ctx(), s.DB, chatID, id)
+}
+
+// clearLegacyKeyboard снимает устаревшую нижнюю reply-клавиатуру: шлёт служебное
+// сообщение с remove_keyboard и тут же удаляет его. Нужно на входе в меню, т.к.
+// inline-меню reply-клавиатуру не сбрасывает, а у части игроков осталась старая
+// клавиатура на пол-экрана (до редизайна).
+func (s *Service) clearLegacyKeyboard(chatID int64) {
+	id, err := telegram.SendMessageHTMLWithID(
+		s.HTTP, s.Cfg.TelegramBotToken, chatID, "🏠",
+		telegram.ReplyKeyboardRemove(), telegram.LinkPreviewBanner(""))
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("clear legacy keyboard", "err", err)
+		}
+		return
+	}
+	if id > 0 {
+		_ = telegram.DeleteMessage(s.HTTP, s.Cfg.TelegramBotToken, chatID, id)
+	}
+}
+
+// keyboardDismiss — reply_markup, снимающий нижнюю reply-клавиатуру. Навигация
+// живёт в inline-меню и команде /menu (синяя кнопка «☰» Telegram), поэтому
+// постоянную клавиатуру на пол-экрана мы не показываем, а у кого осталась
+// старая (до редизайна) — снимаем этим markup при любом ответе.
+func keyboardDismiss() map[string]any {
+	return telegram.ReplyKeyboardRemove()
 }
 
 // menuViewFor собирает данные экрана для пользователя Telegram.

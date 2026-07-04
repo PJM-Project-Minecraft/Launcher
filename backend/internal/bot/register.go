@@ -43,7 +43,7 @@ func (s *Service) beginLoginFlow(chatID int64, sender *tele.User) error {
 				"• <b>игровой ник</b> — если он уже есть в базе;\n"+
 				"• иначе <b>логин</b>, которым вы входили на сайте, или <b>e-mail</b> учётки.\n\n"+
 				"<i>Один ответ — одно сообщение, без лишнего текста.</i>"),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
 
 // beginRegisterFlow — вход в регистрацию: сперва обязательный шаг согласия
@@ -69,7 +69,7 @@ func (s *Service) startRegisterSteps(chatID int64, sender *tele.User) error {
 		"<b>Регистрация, шаг 1</b>\n\n"+
 			"Придумайте <b>логин</b> (в игре и на сайте будет тот же ник, пока админ не сменит): латиница, цифры или символ <code>_</code>, от 3 до 32 символов.\n\n"+
 			"<i>Пример: <code>my_player_01</code></i>"),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
 
 func (s *Service) handleRegUsername(chatID int64, sender *tele.User, text string) error {
@@ -95,7 +95,7 @@ func (s *Service) handleRegUsername(chatID int64, sender *tele.User, text string
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"<b>Шаг 2</b>: укажите <b>e-mail</b> — на него будут завязаны уведомления и восстановление.\n\n"+
 			"Одна строка, формат как в обычной почте: <code>имя@домен</code>"),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
 
 func (s *Service) handleRegEmail(chatID int64, sender *tele.User, payload repo.DialoguePayload, text string) error {
@@ -105,7 +105,7 @@ func (s *Service) handleRegEmail(chatID int64, sender *tele.User, payload repo.D
 	if payload.PendingRegUsername == nil || *payload.PendingRegUsername == "" {
 		ep := repo.EmptyPayload()
 		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowIdle, &ep)
-		return s.notifyWarn(chatID, "Прервана регистрация или сессия устарела. Нажмите «Регистрация» снова или /start.")
+		return s.notifyWarn(chatID, "Прервана регистрация или сессия устарела. Начните заново: /menu → «Регистрация».")
 	}
 	email := strings.TrimSpace(text)
 	if len(email) > 254 || !strings.Contains(email, "@") {
@@ -116,7 +116,7 @@ func (s *Service) handleRegEmail(chatID int64, sender *tele.User, payload repo.D
 		return err
 	}
 	if taken {
-		return s.notifyWarn(chatID, "Этот e-mail уже зарегистрирован. Нажмите «Войти», если это ваша почта, или укажите другую.")
+		return s.notifyWarn(chatID, "Этот e-mail уже зарегистрирован. Откройте /menu → «Войти», если это ваша почта, или укажите другую.")
 	}
 	dp := payload
 	dp.PendingRegEmail = strPtr(email)
@@ -126,7 +126,7 @@ func (s *Service) handleRegEmail(chatID int64, sender *tele.User, payload repo.D
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"<b>Шаг 3</b>: придумайте <b>пароль</b> (от 8 символов, максимум 72) одним сообщением.\n\n"+
 			"<i>После отправки сообщение с паролем будет удалено из чата.</i>"),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
 
 func (s *Service) handleRegPassword(chatID int64, messageID int, sender *tele.User, payload repo.DialoguePayload, text string) error {
@@ -136,7 +136,7 @@ func (s *Service) handleRegPassword(chatID int64, messageID int, sender *tele.Us
 	if payload.PendingRegUsername == nil || payload.PendingRegEmail == nil {
 		ep := repo.EmptyPayload()
 		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowIdle, &ep)
-		return s.notifyWarn(chatID, "Прервана регистрация или сессия устарела. Нажмите «Регистрация» снова или /start.")
+		return s.notifyWarn(chatID, "Прервана регистрация или сессия устарела. Начните заново: /menu → «Регистрация».")
 	}
 	raw := strings.TrimSpace(text)
 	if raw != "" && messageID > 0 {
@@ -168,7 +168,7 @@ func (s *Service) handleRegPassword(chatID int64, messageID int, sender *tele.Us
 		"<b>Шаг 4</b>: подтвердите регистрацию кодом из этого чата (действует <b>%d мин.</b>).\n"+
 			"Введите шесть цифр отдельным сообщением.\n\n<code>%s</code>",
 		otpMinutes, escHTML(code),
-	)), homeReplyKeyboardMarkup())
+	)), keyboardDismiss())
 	return nil
 }
 
@@ -180,13 +180,13 @@ func (s *Service) handleRegOTP(chatID int64, sender *tele.User, payload repo.Dia
 		payload.PendingRegPwdHash == nil || payload.PendingRegOTPHash == nil {
 		ep := repo.EmptyPayload()
 		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowIdle, &ep)
-		return s.notifyWarn(chatID, "Прервана регистрация или сессия устарела. Нажмите «Регистрация» снова или /start.")
+		return s.notifyWarn(chatID, "Прервана регистрация или сессия устарела. Начните заново: /menu → «Регистрация».")
 	}
 	if len(strings.TrimSpace(code)) != 6 {
 		return s.notifyWarn(chatID, "Нужны ровно 6 цифр кода, как в сообщении бота выше.")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*payload.PendingRegOTPHash), []byte(strings.TrimSpace(code))); err != nil {
-		_ = s.notifyWarn(chatID, "Код не подошёл. Проверьте цифры или запросите новую регистрацию: /cancel и снова «Регистрация».")
+		_ = s.notifyWarn(chatID, "Код не подошёл. Проверьте цифры или запросите новую регистрацию: /cancel, затем /menu → «Регистрация».")
 		return nil
 	}
 

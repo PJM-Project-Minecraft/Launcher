@@ -195,24 +195,22 @@ func TestBuild2FAScreenToggle(t *testing.T) {
 	}
 }
 
-// TestHomeReplyKeyboardSingleButton: reply-клавиатура — ровно одна кнопка «🏠 Меню».
-func TestHomeReplyKeyboardSingleButton(t *testing.T) {
-	raw, _ := json.Marshal(homeReplyKeyboardMarkup())
+// TestKeyboardDismissRemovesKeyboard: keyboardDismiss снимает нижнюю
+// reply-клавиатуру (навигация переехала в inline-меню + команду /menu).
+func TestKeyboardDismissRemovesKeyboard(t *testing.T) {
+	raw, _ := json.Marshal(keyboardDismiss())
 	var parsed struct {
-		Keyboard     [][]map[string]any `json:"keyboard"`
-		IsPersistent bool               `json:"is_persistent"`
+		RemoveKeyboard bool               `json:"remove_keyboard"`
+		Keyboard       [][]map[string]any `json:"keyboard"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(parsed.Keyboard) != 1 || len(parsed.Keyboard[0]) != 1 {
-		t.Fatalf("должна быть одна кнопка: %v", parsed.Keyboard)
+	if !parsed.RemoveKeyboard {
+		t.Errorf("keyboardDismiss должен нести remove_keyboard: true, got %s", raw)
 	}
-	if parsed.Keyboard[0][0]["text"] != menuButtonLabel {
-		t.Errorf("текст кнопки: %v", parsed.Keyboard[0][0]["text"])
-	}
-	if !parsed.IsPersistent {
-		t.Errorf("клавиатура должна быть persistent")
+	if len(parsed.Keyboard) != 0 {
+		t.Errorf("не должно быть кнопок клавиатуры: %v", parsed.Keyboard)
 	}
 }
 

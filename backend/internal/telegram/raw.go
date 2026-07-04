@@ -54,6 +54,13 @@ func (k *ReplyKeyboardStyled) ToReplyMarkup() map[string]any {
 	}
 }
 
+// ReplyKeyboardRemove — reply_markup, снимающий постоянную reply-клавиатуру.
+// Нужен, чтобы согнать устаревшую нижнюю клавиатуру (Telegram держит её, пока
+// не придёт сообщение с этим markup; inline-меню её не сбрасывает).
+func ReplyKeyboardRemove() map[string]any {
+	return map[string]any{"remove_keyboard": true}
+}
+
 // SendHTTPMessageHTML вызывает Bot API sendMessage с произвольным reply_markup (Bot API 9.4).
 func SendHTTPMessageHTML(client *http.Client, token string, chatID int64, text string, replyMarkup map[string]any, parseHTML bool) error {
 	if client == nil {

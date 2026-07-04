@@ -96,7 +96,8 @@ func (s *Service) notifyHTML(chatID int64, html string, markup map[string]any) e
 }
 
 func (s *Service) notifyWarn(chatID int64, text string) error {
-	return s.notifyHTML(chatID, "⚠ "+escHTML(text), nil)
+	// keyboardDismiss заодно снимает устаревшую нижнюю reply-клавиатуру.
+	return s.notifyHTML(chatID, "⚠ "+escHTML(text), keyboardDismiss())
 }
 
 func (s *Service) msgWithCancelHint(html string) string {
@@ -233,7 +234,7 @@ func (s *Service) latestLauncherInfo(platform string) *launcherReleaseInfo {
 }
 
 func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
-	kb := homeReplyKeyboardMarkup()
+	kb := keyboardDismiss()
 	raw := s.launcherExePath()
 	if raw == "" {
 		return s.notifyWarn(chatID, "Скачивание лаунчера временно недоступно. Напишите команде проекта.")
@@ -287,7 +288,7 @@ func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 // релиза под указанную платформу (linux-x64 / windows-x64). Используется
 // кнопками «🐧 Linux» / «🪟 Windows» в разделе «Лаунчер».
 func (s *Service) replyLauncherReleaseDownload(chatID int64, platform string) error {
-	kb := homeReplyKeyboardMarkup()
+	kb := keyboardDismiss()
 	info := s.latestLauncherInfo(platform)
 	if info == nil {
 		return s.notifyWarn(chatID, "Файл лаунчера сейчас недоступен. Попробуйте позже.")
@@ -347,7 +348,7 @@ func (s *Service) replyLauncherReleaseDownload(chatID int64, platform string) er
 }
 
 func (s *Service) replyDonateShop(chatID int64, telegramUID int64) error {
-	kb := homeReplyKeyboardMarkup()
+	kb := keyboardDismiss()
 	url := strings.TrimSpace(s.Cfg.DonateShopURL)
 	if url == "" {
 		url = "https://shop.likonchik.xyz"

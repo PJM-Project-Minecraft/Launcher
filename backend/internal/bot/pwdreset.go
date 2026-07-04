@@ -162,7 +162,7 @@ func (s *Service) handlePwdResetDecision(cb *tele.Callback, chatID, telegramUID 
 		s.answerCb(cb.ID, "Заявка отклонена", false)
 		_ = s.notifyHTML(req.ChatID,
 			"❌ Заявка на сброс пароля <b>отклонена</b> администратором.\n"+
-				"Если это ошибка — свяжитесь с командой проекта.", homeReplyKeyboardMarkup())
+				"Если это ошибка — свяжитесь с командой проекта.", keyboardDismiss())
 		s.markPwdResetMessage(chatID, msgID, reqID, target, "❌ отклонена")
 		td := telegramUID
 		_ = repo.InsertAudit(s.ctx(), s.DB, &td, nil, &req.UserID, "pwd_reset_rejected", nil)
@@ -187,7 +187,7 @@ func (s *Service) handlePwdResetDecision(cb *tele.Callback, chatID, telegramUID 
 		"✅ <b>Заявка одобрена — вот новый пароль</b> (нажмите, чтобы показать):\n\n"+
 			"<tg-spoiler><code>"+escHTML(pwd)+"</code></tg-spoiler>\n\n"+
 			"<i>Войдите с ним в лаунчер и при желании смените в разделе «Пароль».</i>",
-		homeReplyKeyboardMarkup()); err != nil {
+		keyboardDismiss()); err != nil {
 		if s.Log != nil {
 			s.Log.Error("pwd-reset: отправка пароля игроку", "chat", req.ChatID, "err", err)
 		}

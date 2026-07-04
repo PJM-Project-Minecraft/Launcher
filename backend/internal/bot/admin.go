@@ -107,7 +107,7 @@ func (s *Service) adminMenuActions(chatID int64, telegramUID int64, text string,
 					"• или логин / фрагмент почты;\n"+
 					"• или <b>uuid</b> пользователя.\n\n"+
 					"Бот покажет до 10 совпадений — ответьте номером строки."),
-			homeReplyKeyboardMarkup())
+			keyboardDismiss())
 
 	case "📡 OPS":
 		d := opsFormatDigest(s.HTTP, s.Cfg)
@@ -125,7 +125,7 @@ func (s *Service) adminMenuActions(chatID int64, telegramUID int64, text string,
 		}
 		// Сначала возвращаем обычную reply-клавиатуру (иначе админские кнопки залипают),
 		// затем свежее меню.
-		_ = s.notifyHTML(chatID, "Вы вышли из панели администратора.", homeReplyKeyboardMarkup())
+		_ = s.notifyHTML(chatID, "Вы вышли из панели администратора.", keyboardDismiss())
 		return s.sendHomeMenu(chatID, telegramUID, "")
 
 	default:
@@ -305,7 +305,7 @@ func (s *Service) adminManage(chatID int64, telegramUIDFrom int64, text string) 
 		} else if !ok {
 			return nil
 		}
-		if err := s.notifyHTML(chatID, s.msgWithCancelHint("Введите новый <b>e-mail</b> аккаунта."), homeReplyKeyboardMarkup()); err != nil {
+		if err := s.notifyHTML(chatID, s.msgWithCancelHint("Введите новый <b>e-mail</b> аккаунта."), keyboardDismiss()); err != nil {
 			return err
 		}
 		return repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminAskNewEmail, &pl)
@@ -369,7 +369,7 @@ func (s *Service) adminManage(chatID int64, telegramUIDFrom int64, text string) 
 		if err := repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowAdminSearch, &ep); err != nil {
 			return err
 		}
-		return s.notifyHTML(chatID, s.msgWithCancelHint("Отправьте новый текст поиска."), homeReplyKeyboardMarkup())
+		return s.notifyHTML(chatID, s.msgWithCancelHint("Отправьте новый текст поиска."), keyboardDismiss())
 
 	default:
 		return s.notifyWarn(chatID, "Выберите кнопку из списка.")

@@ -51,7 +51,7 @@ func (s *Service) HandleText(c tele.Context) error {
 		return s.replyDonateShop(chatID, telegramUserID(sender))
 	}
 	if text == "/launcher" || text == launcherKeyboardLabel {
-		return s.replyLauncherDownload(chatID, telegramUserID(sender))
+		return s.launcherCard(chatID, telegramUserID(sender))
 	}
 
 	flow, payload, err := repo.ReadDialogue(s.ctx(), s.DB, chatID)
@@ -138,8 +138,9 @@ func (s *Service) onCancel(chatID int64, sender *tele.User) error {
 
 func (s *Service) welcome(chatID int64, telegramUID int64) error {
 	_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-	// Меню несёт inline-клавиатуру; persistent-кнопка «🏠 Меню» выставится
-	// первым же обычным сообщением (подсказка сценария, /help и т.п.).
+	// Меню инлайновое; на входе снимаем устаревшую нижнюю reply-клавиатуру
+	// (у части игроков осталась старая на пол-экрана — inline её не сбрасывает).
+	s.clearLegacyKeyboard(chatID)
 	return s.sendHomeMenu(chatID, telegramUID, "")
 }
 
@@ -178,7 +179,7 @@ func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, t
 					"<i>Обычные игроки этот раздел не видят.</i>",
 				s.adminOpsKeyboardMarkup())
 		}
-		return s.notifyWarn(chatID, "Эта панель только для модераторов. Вам доступны кнопки «Войти», «Регистрация» и после привязки — профиль, пароль, почта, 2FA.")
+		return s.notifyWarn(chatID, "Эта панель только для модераторов. В меню (/menu) — «Войти» и «Регистрация», после привязки — профиль, пароль, почта, 2FA.")
 
 	case "/ops":
 		if adminOpt != nil {
@@ -188,7 +189,7 @@ func (s *Service) idleActions(chatID int64, _tg *tele.User, telegramUID int64, t
 		return s.notifyWarn(chatID, "/ops доступна только модераторам. Список команд для игроков: /help.")
 
 	default:
-		return s.notifyWarn(chatID, "Не распознал сообщение.\nНажмите «🏠 Меню» или /start.")
+		return s.notifyWarn(chatID, "Не распознал сообщение.\nОткройте меню командой /menu.")
 	}
 }
 
@@ -199,7 +200,8 @@ func (s *Service) profileCard(chatID int64, telegramUID int64) error {
 	}
 	if me == nil {
 		return s.notifyWarn(chatID, "Профиль ещё не привязан к Telegram.\n\n"+
-			"• Есть аккаунт — нажмите «🔑 Войти» и пройдите проверку паролем.\n"+
+			"Откройте меню (/menu) и выберите:\n"+
+			"• Есть аккаунт — «🔑 Войти» и пройдите проверку паролем.\n"+
 			"• Нет аккаунта — «📋 Регистрация».")
 	}
 	v, err := s.menuViewFor(telegramUID)
@@ -218,11 +220,11 @@ func (s *Service) profileCard(chatID int64, telegramUID int64) error {
 }
 
 func (s *Service) cmdHelp(chatID int64, _ int64) error {
-	kb := homeReplyKeyboardMarkup()
+	kb := keyboardDismiss()
 	txt := strings.Join([]string{
 		"ℹ️ <b>Справка</b>",
 		"",
-		"Вся навигация — в живом меню: нажмите «🏠 Меню» внизу или /menu.",
+		"Вся навигация — в живом меню: команда /menu (или синяя кнопка «☰» слева от поля ввода).",
 		"",
 		"<b>Команды</b>",
 		"<code>/menu</code> — главное меню",
@@ -254,8 +256,8 @@ func (s *Service) beginPasswordFlow(chatID, telegramUID int64) error {
 			"1) Сейчас пришлите <b>текущий пароль</b> (его сообщение будет удалено из чата и заменено заглушкой).\n"+
 			"2) Затем бот пришлёт <b>шестизначный код</b> в этот чат — введите его.\n"+
 			"3) После этого пришлите <b>новый пароль</b> (8–128 символов).\n\n"+
-			"<i>Не помните текущий пароль? «🏠 Меню» → «Пароль» → «🆘 Забыл пароль».</i>"),
-		homeReplyKeyboardMarkup())
+			"<i>Не помните текущий пароль? /menu → «Пароль» → «🆘 Забыл пароль».</i>"),
+		keyboardDismiss())
 }
 
 // beginEmailFlow запускает сценарий смены почты.
@@ -273,5 +275,5 @@ func (s *Service) beginEmailFlow(chatID, telegramUID int64) error {
 	return s.notifyHTML(chatID, s.msgWithCancelHint(
 		"Укажите новый <b>адрес e-mail</b> одним сообщением (тот, который будет храниться в аккаунте).\n\n"+
 			"После этого бот пришлёт код в чат — его нужно будет ввести, чтобы подтвердить смену."),
-		homeReplyKeyboardMarkup())
+		keyboardDismiss())
 }
