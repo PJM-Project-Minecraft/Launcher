@@ -140,7 +140,7 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
   отвечает 426 клиентам ниже mandatory-версии (`X-Launcher-Version`).
 - `policy` — политика конфиденциальности. Роуты: `GET /api/policy` (текст + version-константа),
   `POST /api/policy/accept` (JWT, записывает PolicyConsent), `GET /privacy` (HTML-страница).
-  Enforcement: anticheat `handshake`/`init` возвращают 451 если согласие не дано; гейты в боте
+  Enforcement: `POST /api/anticheat/handshake/init` возвращает 451, если согласие не дано; гейты в боте
   блокируют любые действия до принятия политики.
 - `bot` / `telegram` / `botconfig` — Telegram-бот (регистрация аккаунтов, TOTP, донат).
 
