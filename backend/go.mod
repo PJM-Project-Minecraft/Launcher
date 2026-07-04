@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/pquerna/otp v1.4.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	github.com/yuin/goldmark v1.3.5
+	github.com/yuin/goldmark v1.7.8
 	golang.org/x/crypto v0.51.0
 	golang.org/x/net v0.54.0
 	gopkg.in/telebot.v3 v3.2.1

@@ -2,6 +2,8 @@ package policy
 
 import (
 	"bytes"
+	"errors"
+	"html"
 	"net/http"
 	"sync"
 
@@ -58,6 +60,9 @@ func (h Handler) accept(currentUser CurrentUserFn) fiber.Handler {
 			})
 		}
 		if err := RecordConsent(c.Context(), h.db, user.ID, SourceLauncher, c.IP()); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return c.Status(http.StatusNotFound).JSON(fiber.Map{"message": "Пользователь не найден"})
+			}
 			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"message": "Не удалось сохранить согласие"})
 		}
 		return c.SendStatus(http.StatusNoContent)
@@ -74,7 +79,7 @@ func renderPage() []byte {
 	var body bytes.Buffer
 	if err := goldmark.Convert([]byte(Text()), &body); err != nil {
 		body.Reset()
-		body.WriteString("<pre>" + Text() + "</pre>")
+		body.WriteString("<pre>" + html.EscapeString(Text()) + "</pre>")
 	}
 	var page bytes.Buffer
 	page.WriteString(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">` +

@@ -99,6 +99,45 @@ func TestAcceptPolicyStaleVersion(t *testing.T) {
 	if res.StatusCode != 409 {
 		t.Fatalf("status = %d, want 409", res.StatusCode)
 	}
+	// Проверь, что версия в ответе совпадает с актуальной Version.
+	var respBody struct {
+		Message string `json:"message"`
+		Version int    `json:"version"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if respBody.Version != Version {
+		t.Errorf("version in response = %d, want %d", respBody.Version, Version)
+	}
+}
+
+// TestAcceptPolicyUserGone проверяет, что если JWT выдан, но пользователь удалён из БД,
+// возвращается 404, а не 500.
+func TestAcceptPolicyUserGone(t *testing.T) {
+	db := openTestDB(t)
+	// Пользователь передан в currentUser, но не создан в БД.
+	u := &models.User{ID: "44444444-4444-4444-4444-444444444444", Login: "p4", ProviderUUID: "44444444-4444-4444-4444-444444444444"}
+	app := newTestApp(t, db, u)
+
+	req := httptest.NewRequest("POST", "/api/policy/accept", strings.NewReader(`{"version":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if res.StatusCode != 404 {
+		t.Fatalf("status = %d, want 404", res.StatusCode)
+	}
+	var respBody struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if respBody.Message == "" {
+		t.Errorf("response message is empty")
+	}
 }
 
 func TestPrivacyPage(t *testing.T) {
