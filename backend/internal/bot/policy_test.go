@@ -50,3 +50,18 @@ func TestBuildPolicyScreen(t *testing.T) {
 		t.Errorf("нет URL-кнопки полного текста: %s", raw)
 	}
 }
+
+func TestBuildPolicyScreenNoURL(t *testing.T) {
+	// Без PUBLIC_BASE_URL URL-кнопка не добавляется, но принятие работает.
+	text, markup := buildPolicyScreen("")
+	if !strings.Contains(text, "скриншоты экрана") {
+		t.Error("выжимка должна упоминать скриншоты экрана")
+	}
+	raw := markupString(t, markup)
+	if !strings.Contains(raw, cbPolicyAccept) {
+		t.Errorf("нет кнопки принятия при пустом URL: %s", raw)
+	}
+	if strings.Contains(raw, `"url"`) {
+		t.Errorf("URL-кнопка не должна быть добавлена при пустом URL: %s", raw)
+	}
+}

@@ -208,10 +208,14 @@ func buildPolicyScreen(privacyURL string) (string, map[string]any) {
 		"IP-адрес, данные игровых сессий и античита, включая <b>скриншоты экрана " +
 		"во время игры</b> (по запросу администрации).\n\n" +
 		"<i>Полный текст — по кнопке ниже.</i>"
-	return text, telegram.InlineMarkup(
-		[]telegram.InlineBtn{{Text: "📄 Читать полностью", URL: privacyURL}},
-		[]telegram.InlineBtn{{Text: "✅ Принимаю", Data: cbPolicyAccept}},
-	)
+	// Без PUBLIC_BASE_URL кнопка чтения выпадает, но принятие работает
+	// (иначе Telegram отклонит всё сообщение с невалидным URL BUTTON_URL_INVALID).
+	var rows [][]telegram.InlineBtn
+	if strings.HasPrefix(privacyURL, "http://") || strings.HasPrefix(privacyURL, "https://") {
+		rows = append(rows, []telegram.InlineBtn{{Text: "📄 Читать полностью", URL: privacyURL}})
+	}
+	rows = append(rows, []telegram.InlineBtn{{Text: "✅ Принимаю", Data: cbPolicyAccept}})
+	return text, telegram.InlineMarkup(rows...)
 }
 
 // policyGateApplies — нужно ли вместо запрошенного экрана показать политику.
