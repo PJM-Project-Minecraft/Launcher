@@ -36,6 +36,10 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Get("/update", h.checkUpdate)
 	group.Get("/download/:version/:platform", h.download)
 
+	// Публичная витрина скачивания для игроков (ссылка «Скачать с сайта» в боте).
+	app.Get("/download", h.downloadPage)
+	app.Get("/download/pjm.png", h.logo)
+
 	admin := app.Group("/api/admin/releases")
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/", h.list)

@@ -112,6 +112,7 @@ func main() {
 	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot), profilesBroker).
 		RegisterRoutes(app, authService.RequireAuth())
 	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot)
+	launcherrelease.SetLogger(slog.Warn)
 	launcherrelease.NewHandler(releaseService, profilesBroker).
 		RegisterRoutes(app, authService.RequireAuth())
 	news.NewHandler(news.NewService(cfg.TelegramChannel)).

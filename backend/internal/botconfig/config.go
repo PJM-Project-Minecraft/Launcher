@@ -74,14 +74,15 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// LauncherDirectDownloadURL — ссылка для пользователей «скачать с сервера». Пусто — только отправка файла в чат.
+// LauncherDirectDownloadURL — ссылка на публичную страницу скачивания лаунчера
+// (витрина /download на бэкенде: выбор платформы, актуальная версия). Пусто —
+// кнопка «Скачать с сайта» не показывается, остаётся отправка файла в чат.
 func (c *Config) LauncherDirectDownloadURL() string {
 	if ex := strings.TrimSpace(c.LauncherDownloadPublicURL); ex != "" {
 		return ex
 	}
-	o := strings.TrimSpace(c.PublicOrigin)
-	if o != "" && strings.TrimSpace(c.LauncherExePath) != "" {
-		return strings.TrimRight(o, "/") + "/launcher/download"
+	if o := strings.TrimSpace(c.PublicOrigin); o != "" {
+		return strings.TrimRight(o, "/") + "/download"
 	}
 	return ""
 }
