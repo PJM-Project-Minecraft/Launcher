@@ -79,3 +79,21 @@ func TestBuildRegPolicyScreen(t *testing.T) {
 		t.Errorf("нет кнопки «Назад»: %s", raw)
 	}
 }
+
+func TestBuildRegPolicyScreenNoURL(t *testing.T) {
+	// Без PUBLIC_BASE_URL URL-кнопка не добавляется, но принятие работает.
+	text, markup := buildRegPolicyScreen("")
+	if !strings.Contains(text, "скриншоты экрана") {
+		t.Error("выжимка должна упоминать скриншоты экрана")
+	}
+	raw := markupString(t, markup)
+	if !strings.Contains(raw, cbPolicyRegAccept) {
+		t.Errorf("нет кнопки принятия для регистрации при пустом URL: %s", raw)
+	}
+	if !strings.Contains(raw, cbHome) {
+		t.Errorf("нет кнопки «Назад» при пустом URL: %s", raw)
+	}
+	if strings.Contains(raw, `"url"`) {
+		t.Errorf("URL-кнопка не должна быть добавлена при пустом URL: %s", raw)
+	}
+}

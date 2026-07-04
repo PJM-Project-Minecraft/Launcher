@@ -208,8 +208,8 @@ func (s *Service) handleRegOTP(chatID int64, sender *tele.User, payload repo.Dia
 	_ = repo.BindTelegram(s.ctx(), s.DB, uid, telegramUserID(sender), ptrStrOrNil(tgU))
 	_ = repo.InsertAuthLog(s.ctx(), s.DB, &uid, uname, "telegram-bot-register", true, strPtr("registered_and_linked"))
 
-	// Пользователь дошёл сюда только через кнопку «Принимаю» (beginRegisterFlow
-	// стартует шаги лишь из cbPolicyRegAccept) — фиксируем согласие аккаунту.
+	// При штатном флоу шаги регистрации стартуют только из cbPolicyRegAccept
+	// (экран согласия), поэтому фиксируем согласие созданному аккаунту.
 	if err := policy.RecordConsent(s.ctx(), s.DB, uid, policy.SourceBot, ""); err != nil && s.Log != nil {
 		s.Log.Warn("policy consent при регистрации", "err", err)
 	}
