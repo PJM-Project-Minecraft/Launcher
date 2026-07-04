@@ -37,6 +37,11 @@ func TestStatusFor(t *testing.T) {
 	if !st.Required || st.Version != Version {
 		t.Errorf("StatusFor = %+v, want Required=true Version=%d", st, Version)
 	}
+	// Проверка для Required=false (версия уже принята)
+	st2 := StatusFor(&models.User{PolicyAcceptedVersion: Version})
+	if st2.Required || st2.Version != Version {
+		t.Errorf("StatusFor(accepted) = %+v, want Required=false Version=%d", st2, Version)
+	}
 }
 
 func TestRecordConsent(t *testing.T) {
@@ -64,6 +69,25 @@ func TestRecordConsent(t *testing.T) {
 	}
 	if len(consents) != 1 || consents[0].Source != SourceLauncher || consents[0].Version != Version || consents[0].IP != "1.2.3.4" {
 		t.Errorf("журнал = %+v, want одна запись launcher/v%d/1.2.3.4", consents, Version)
+	}
+}
+
+func TestRecordConsentNonExistent(t *testing.T) {
+	db := openTestDB(t)
+	nonExistentID := "99999999-9999-9999-9999-999999999999"
+
+	err := RecordConsent(context.Background(), db, nonExistentID, SourceLauncher, "1.2.3.4")
+	if err == nil {
+		t.Error("RecordConsent с несуществующим userID должен вернуть ошибку")
+	}
+
+	// Проверяем, что запись в журнал не добавилась
+	var consents []models.PolicyConsent
+	if err := db.Find(&consents).Error; err != nil {
+		t.Fatalf("read consents: %v", err)
+	}
+	if len(consents) != 0 {
+		t.Errorf("журнал должен быть пуст, но найдена %d запись(и)", len(consents))
 	}
 }
 

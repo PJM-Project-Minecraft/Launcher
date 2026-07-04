@@ -15,7 +15,7 @@ import (
 
 // Version — текущая версия политики. Содержательная правка privacy.md
 // обязана бампать версию: все пользователи пройдут согласие заново.
-const Version = 1
+const Version int = 1
 
 // Updated — дата последней редакции (показывается клиентам).
 const Updated = "2026-07-04"
@@ -53,11 +53,15 @@ func StatusFor(u *models.User) Status {
 func RecordConsent(ctx context.Context, db *gorm.DB, userID, source, ip string) error {
 	now := time.Now().UTC()
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		res := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
 			"policy_accepted_version": Version,
 			"policy_accepted_at":      now,
-		}).Error; err != nil {
-			return err
+		})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
 		}
 		return tx.Create(&models.PolicyConsent{
 			UserID:     userID,
