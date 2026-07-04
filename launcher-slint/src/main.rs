@@ -229,6 +229,15 @@ struct AuthUser {
     login: String,
     provider_uuid: String,
     is_slim: bool,
+    #[serde(default)]
+    policy_accepted_version: i32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PolicyInfo {
+    version: i32,
+    text: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -419,6 +428,7 @@ struct SessionData {
     profiles: Vec<ProfileSummary>,
     selected_profile_id: Option<String>,
     news: Vec<NewsSummary>,
+    policy: Option<PolicyInfo>,
 }
 
 struct ProfilePaths {
@@ -907,6 +917,13 @@ fn bootstrap_session(
     let selected_profile_id = choose_profile_for_user(&user.provider_uuid, &profiles)?;
     // Новости не критичны для входа: при сбое лента просто остаётся пустой.
     let news = fetch_news(config, &token);
+    // Политика конфиденциальности: если пользователь не принимал текущую
+    // версию — экран согласия. Сбой запроса = fail-open на клиенте
+    // (сервер всё равно не выдаст launch-token без согласия).
+    let policy = match fetch_policy(config) {
+        Ok(p) if p.version > user.policy_accepted_version => Some(p),
+        _ => None,
+    };
     Ok(SessionData {
         token,
         user,
@@ -915,6 +932,7 @@ fn bootstrap_session(
         profiles,
         selected_profile_id,
         news,
+        policy,
     })
 }
 
@@ -1213,6 +1231,34 @@ fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>
         .send()
         .map_err(|_| "Не удалось получить профили проекта.".to_string())?;
     parse_json_response(response, "Backend вернул некорректный список профилей")
+}
+
+// Текст и версия Политики конфиденциальности (публичный эндпоинт, без auth).
+fn fetch_policy(config: &AppConfig) -> Result<PolicyInfo, String> {
+    let client = http_client()?;
+    let response = client
+        .get(format!("{}/api/policy", config.api_url.trim_end_matches('/')))
+        .send()
+        .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
+    parse_json_response(response, "Backend вернул некорректную политику")
+}
+
+// Фиксирует согласие на сервере. 409 = версия успела смениться.
+fn accept_policy(config: &AppConfig, token: &str, version: i32) -> Result<(), String> {
+    let client = http_client()?;
+    let response = client
+        .post(format!(
+            "{}/api/policy/accept",
+            config.api_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "version": version }))
+        .send()
+        .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    Err("Не удалось сохранить согласие. Попробуйте ещё раз.".to_string())
 }
 
 fn fetch_news(config: &AppConfig, token: &str) -> Vec<NewsSummary> {
