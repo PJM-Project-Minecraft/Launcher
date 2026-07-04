@@ -33,6 +33,10 @@ func NewService(db *gorm.DB, storageRoot string) Service {
 	return Service{db: db, storageRoot: storageRoot}
 }
 
+// StorageRoot возвращает корень каталога релизов; пустая строка — сервис не
+// сконфигурирован (бот скрывает кнопки скачивания по платформам).
+func (s Service) StorageRoot() string { return s.storageRoot }
+
 type CreateRequest struct {
 	Version   string
 	Changelog string
@@ -273,6 +277,42 @@ func (s Service) MinMandatoryVersion(ctx context.Context) (string, error) {
 		}
 	}
 	return max, nil
+}
+
+// LatestFile — самый новый активный релиз с бинарником под платформу.
+// Возвращает релиз, файл и абсолютный путь к бинарнику. Если активных релизов
+// под платформу нет — gorm.ErrRecordNotFound. Используется ботом для раздачи
+// последнего релиза по кнопке «Скачать лаунчер».
+func (s Service) LatestFile(ctx context.Context, platform string) (models.LauncherRelease, models.LauncherReleaseFile, string, error) {
+	if !isAllowedPlatform(platform) {
+		return models.LauncherRelease{}, models.LauncherReleaseFile{}, "", errors.New("неизвестная платформа")
+	}
+	var releases []models.LauncherRelease
+	if err := s.db.WithContext(ctx).Preload("Files").
+		Where("is_active = ?", true).Find(&releases).Error; err != nil {
+		return models.LauncherRelease{}, models.LauncherReleaseFile{}, "", err
+	}
+	var latest *models.LauncherRelease
+	var latestFile models.LauncherReleaseFile
+	for i := range releases {
+		for _, file := range releases[i].Files {
+			if file.Platform != platform {
+				continue
+			}
+			if latest == nil || CompareVersions(releases[i].Version, latest.Version) > 0 {
+				latest = &releases[i]
+				latestFile = file
+			}
+		}
+	}
+	if latest == nil {
+		return models.LauncherRelease{}, models.LauncherReleaseFile{}, "", gorm.ErrRecordNotFound
+	}
+	abs, err := filepath.Abs(filepath.Join(s.storageRoot, latest.Version, platform, latestFile.FileName))
+	if err != nil {
+		return models.LauncherRelease{}, models.LauncherReleaseFile{}, "", err
+	}
+	return *latest, latestFile, abs, nil
 }
 
 // Download — абсолютный путь к бинарнику активного релиза. Версия проходит

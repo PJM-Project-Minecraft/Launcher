@@ -12,6 +12,7 @@ import (
 	"launcher-backend/internal/botconfig"
 	"launcher-backend/internal/config"
 	"launcher-backend/internal/database"
+	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/telegram"
 
 	tele "gopkg.in/telebot.v3"
@@ -59,7 +60,13 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	svc := &bot.Service{DB: db, Cfg: botCfg, HTTP: httpClient, Log: log}
+	svc := &bot.Service{
+		DB:       db,
+		Cfg:      botCfg,
+		HTTP:     httpClient,
+		Log:      log,
+		Releases: launcherrelease.NewService(db, cfg.LauncherReleaseRoot),
+	}
 	svc.Attach(teleBot)
 
 	log.Info("Telegram polling…")

@@ -122,7 +122,8 @@ func TestBuildDonateScreenURLButton(t *testing.T) {
 }
 
 // TestBuildLauncherScreen: URL-кнопка только при непустом LauncherURL,
-// кнопка «файл в чат» — только при HasLauncherFile.
+// кнопка «файл в чат» — только при HasLauncherFile без релизов,
+// кнопки платформ — когда есть соответствующий релиз.
 func TestBuildLauncherScreen(t *testing.T) {
 	v := menuView{User: testUser(), LauncherURL: "", HasLauncherFile: false}
 	_, markup := buildLauncherScreen(v)
@@ -140,7 +141,41 @@ func TestBuildLauncherScreen(t *testing.T) {
 	_, markup2 := buildLauncherScreen(v2)
 	btns2 := flatButtons(t, markup2)
 	if !hasCallback(btns2, cbLauncherFile) {
-		t.Errorf("нет кнопки файла")
+		t.Errorf("нет кнопки файла (фолбэк без релизов)")
+	}
+	if hasCallback(btns2, cbLauncherLinux) || hasCallback(btns2, cbLauncherWindows) {
+		t.Errorf("кнопки платформ не должны показываться без релизов")
+	}
+
+	// Есть релизы — показываем кнопки платформ, фолбэк «файл в чат» скрывается.
+	v3 := menuView{
+		User:            testUser(),
+		LauncherURL:     "https://dl.test/l.exe",
+		HasLauncherFile: true,
+		LauncherLinux:   &launcherReleaseInfo{Version: "0.3.8", FileName: "launcher", AbsPath: "/tmp/l", Size: 1},
+		LauncherWindows: &launcherReleaseInfo{Version: "0.3.8", FileName: "launcher.exe", AbsPath: "/tmp/w", Size: 1},
+	}
+	_, markup3 := buildLauncherScreen(v3)
+	btns3 := flatButtons(t, markup3)
+	if !hasCallback(btns3, cbLauncherLinux) {
+		t.Errorf("нет кнопки Linux при наличии релиза")
+	}
+	if !hasCallback(btns3, cbLauncherWindows) {
+		t.Errorf("нет кнопки Windows при наличии релиза")
+	}
+	if hasCallback(btns3, cbLauncherFile) {
+		t.Errorf("фолбэк «файл в чат» не должен показываться при наличии релизов")
+	}
+
+	// Только Linux-релиз — кнопка Windows не появляется.
+	v4 := menuView{User: testUser(), LauncherLinux: &launcherReleaseInfo{Version: "0.3.8", FileName: "launcher", AbsPath: "/tmp/l", Size: 1}}
+	_, markup4 := buildLauncherScreen(v4)
+	btns4 := flatButtons(t, markup4)
+	if !hasCallback(btns4, cbLauncherLinux) {
+		t.Errorf("нет кнопки Linux")
+	}
+	if hasCallback(btns4, cbLauncherWindows) {
+		t.Errorf("кнопка Windows не должна показываться без Windows-релиза")
 	}
 }
 

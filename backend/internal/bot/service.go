@@ -15,13 +15,14 @@ import (
 	"time"
 
 	"launcher-backend/internal/botconfig"
+	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/models"
 	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
 
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
 	tele "gopkg.in/telebot.v3"
+	"gorm.io/gorm"
 )
 
 const (
@@ -44,6 +45,10 @@ type Service struct {
 	Cfg  *botconfig.Config
 	HTTP *http.Client
 	Log  *slog.Logger
+
+	// Releases — сервис релизов лаунчера (общая БД с cmd/server). Нулевой
+	// (storageRoot пустой) — кнопки скачивания по платформам скрыты.
+	Releases launcherrelease.Service
 }
 
 type adminContext struct {
@@ -198,6 +203,35 @@ func maskEmailUnsafe(mail string) string {
 
 func (s *Service) launcherExePath() string { return strings.TrimSpace(s.Cfg.LauncherExePath) }
 
+// launcherReleaseInfo — найденный последний релиз под платформу для меню.
+type launcherReleaseInfo struct {
+	Version  string
+	FileName string
+	AbsPath  string
+	Size     int64
+}
+
+// latestLauncherInfo возвращает данные последнего активного релиза под платформу
+// или nil, если сервис не сконфигурирован / релизов нет. Ошибки логируются на warn.
+func (s *Service) latestLauncherInfo(platform string) *launcherReleaseInfo {
+	if s.Releases.StorageRoot() == "" {
+		return nil
+	}
+	release, file, abs, err := s.Releases.LatestFile(s.ctx(), platform)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("launcher latest release", "platform", platform, "err", err)
+		}
+		return nil
+	}
+	return &launcherReleaseInfo{
+		Version:  release.Version,
+		FileName: file.FileName,
+		AbsPath:  abs,
+		Size:     file.Size,
+	}
+}
+
 func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 	kb := homeReplyKeyboardMarkup()
 	raw := s.launcherExePath()
@@ -243,6 +277,69 @@ func (s *Service) replyLauncherDownload(chatID int64, telegramUID int64) error {
 	if err := telegram.SendDocument(longClient, s.Cfg.TelegramBotToken, chatID, sendPath, attachName, caption, kb); err != nil {
 		if s.Log != nil {
 			s.Log.Error("sendDocument launcher", "err", err)
+		}
+		return s.notifyWarn(chatID, "Не удалось отправить файл. Попробуйте позже или скачайте по прямой ссылке из раздела «Лаунчер».")
+	}
+	return nil
+}
+
+// replyLauncherReleaseDownload отправляет в чат бинарник последнего активного
+// релиза под указанную платформу (linux-x64 / windows-x64). Используется
+// кнопками «🐧 Linux» / «🪟 Windows» в разделе «Лаунчер».
+func (s *Service) replyLauncherReleaseDownload(chatID int64, platform string) error {
+	kb := homeReplyKeyboardMarkup()
+	info := s.latestLauncherInfo(platform)
+	if info == nil {
+		return s.notifyWarn(chatID, "Файл лаунчера сейчас недоступен. Попробуйте позже.")
+	}
+	if _, err := os.Stat(info.AbsPath); err != nil {
+		if s.Log != nil {
+			s.Log.Warn("launcher release file", "platform", platform, "path", info.AbsPath, "err", err)
+		}
+		return s.notifyWarn(chatID, "Файл лаунчера сейчас недоступен. Попробуйте позже.")
+	}
+
+	sendPath, attachName, cleanup, gz, err := prepareLauncherForTelegram(info.AbsPath)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Error("launcher prepare", "platform", platform, "err", err)
+		}
+		return s.notifyWarn(chatID, "Не удалось подготовить файл лаунчера. Попробуйте позже.")
+	}
+	defer cleanup()
+
+	platLabel := "Linux"
+	if platform == "windows-x64" {
+		platLabel = "Windows"
+	}
+	caption := fmt.Sprintf(
+		"<b>Лаунчер</b> v%s (%s)\n\n<i>Сохраните файл и запустите. Вход — учётка сайта (привязка в этом боте).</i>",
+		escHTML(info.Version), platLabel,
+	)
+	if gz {
+		caption = fmt.Sprintf(
+			"<b>Лаунчер</b> v%s (%s, архив <code>gzip</code>)\n\n"+
+				"Исходный файл больше лимита Telegram (~50 МБ), поэтому прислан сжатый <b>%s</b>.\n"+
+				"Распакуйте (7-Zip, WinRAR, PeaZip или <code>gunzip</code> в Linux) — получится исполняемый файл.\n\n"+
+				"<i>После распаковки запустите клиент. Вход — учётка сайта (привязка в этом боте).</i>",
+			escHTML(info.Version), platLabel, escHTML(attachName),
+		)
+	}
+	if dl := s.Cfg.LauncherDirectDownloadURL(); dl != "" {
+		caption += "\n\n<b>Прямая ссылка с сервера:</b> <a href=\"" + escHTMLAttr(dl) + "\">скачать</a>"
+	}
+
+	docHTTP := s.HTTP
+	if docHTTP == nil {
+		docHTTP = http.DefaultClient
+	}
+	longClient := &http.Client{Transport: docHTTP.Transport, Timeout: 20 * time.Minute}
+	if longClient.Transport == nil {
+		longClient.Transport = http.DefaultTransport
+	}
+	if err := telegram.SendDocument(longClient, s.Cfg.TelegramBotToken, chatID, sendPath, attachName, caption, kb); err != nil {
+		if s.Log != nil {
+			s.Log.Error("sendDocument launcher release", "platform", platform, "err", err)
 		}
 		return s.notifyWarn(chatID, "Не удалось отправить файл. Попробуйте позже или скачайте по прямой ссылке из раздела «Лаунчер».")
 	}

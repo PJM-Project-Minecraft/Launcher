@@ -12,18 +12,20 @@ import (
 
 // Callback-data экранов inline-меню. Формат "m:<screen>[:<action>]", ≤64 байт.
 const (
-	cbHome         = "m:home"
-	cbProfile      = "m:profile"
-	cbPwd          = "m:pwd"
-	cbPwdChange    = "m:pwd:change"
-	cbPwdReset     = "m:pwd:reset"
-	cbEmail        = "m:email"
-	cb2FA          = "m:2fa"
-	cb2FAOn        = "m:2fa:on"
-	cb2FAOff       = "m:2fa:off"
-	cbDonate       = "m:donate"
-	cbLauncher     = "m:launcher"
-	cbLauncherFile = "m:launcher:file"
+	cbHome            = "m:home"
+	cbProfile         = "m:profile"
+	cbPwd             = "m:pwd"
+	cbPwdChange       = "m:pwd:change"
+	cbPwdReset        = "m:pwd:reset"
+	cbEmail           = "m:email"
+	cb2FA             = "m:2fa"
+	cb2FAOn           = "m:2fa:on"
+	cb2FAOff          = "m:2fa:off"
+	cbDonate          = "m:donate"
+	cbLauncher        = "m:launcher"
+	cbLauncherFile    = "m:launcher:file"
+	cbLauncherLinux   = "m:launcher:linux"
+	cbLauncherWindows = "m:launcher:windows"
 	cbLogin           = "m:login"
 	cbRegister        = "m:register"
 	cbAdmin           = "m:admin"
@@ -42,6 +44,11 @@ type menuView struct {
 	DonateURL       string
 	LauncherURL     string
 	HasLauncherFile bool
+	// LauncherLinux / LauncherWindows — последний активный релиз под платформу
+	// (nil — релиза нет). Когда хотя бы один есть, в разделе «Лаунчер»
+	// показываются кнопки выбора платформы вместо старой «файл в чат».
+	LauncherLinux   *launcherReleaseInfo
+	LauncherWindows *launcherReleaseInfo
 }
 
 func backRow() []telegram.InlineBtn {
@@ -179,19 +186,47 @@ func buildDonateScreen(v menuView) (string, map[string]any) {
 	return text, telegram.InlineMarkup(rows...)
 }
 
-// buildLauncherScreen — скачивание лаунчера: прямая ссылка и/или файл в чат.
+// buildLauncherScreen — скачивание лаунчера. Если есть активные релизы —
+// показывает кнопки выбора платформы (Linux / Windows), каждая качает последний
+// релиз. Иначе откатывается на прямую ссылку и/или «файл в чат» (локальный exe).
 func buildLauncherScreen(v menuView) (string, map[string]any) {
+	hasRelease := v.LauncherLinux != nil || v.LauncherWindows != nil
+
+	var verLine string
+	if v.LauncherLinux != nil && v.LauncherWindows != nil && v.LauncherLinux.Version == v.LauncherWindows.Version {
+		verLine = fmt.Sprintf("\nАктуальная версия: <b>v%s</b>", escHTML(v.LauncherLinux.Version))
+	} else if v.LauncherLinux != nil && v.LauncherWindows != nil {
+		verLine = fmt.Sprintf("\nLinux: <b>v%s</b> · Windows: <b>v%s</b>",
+			escHTML(v.LauncherLinux.Version), escHTML(v.LauncherWindows.Version))
+	} else if v.LauncherLinux != nil {
+		verLine = fmt.Sprintf("\nАктуальная версия: <b>v%s</b>", escHTML(v.LauncherLinux.Version))
+	} else if v.LauncherWindows != nil {
+		verLine = fmt.Sprintf("\nАктуальная версия: <b>v%s</b>", escHTML(v.LauncherWindows.Version))
+	}
+
 	text := "⬇ <b>Лаунчер</b>\n\n" +
-		"Скачайте по прямой ссылке или получите файл прямо в чат.\n\n" +
+		"Выберите платформу — пришлём последний релиз прямо в чат." + verLine + "\n\n" +
 		"<i>Вход в лаунчер — учётка сайта (привязка в этом боте).</i>"
+
 	rows := [][]telegram.InlineBtn{}
+	if hasRelease {
+		var platRow []telegram.InlineBtn
+		if v.LauncherLinux != nil {
+			platRow = append(platRow, telegram.InlineBtn{Text: "🐧 Linux", Data: cbLauncherLinux})
+		}
+		if v.LauncherWindows != nil {
+			platRow = append(platRow, telegram.InlineBtn{Text: "🪟 Windows", Data: cbLauncherWindows})
+		}
+		rows = append(rows, platRow)
+	}
 	if v.LauncherURL != "" {
 		rows = append(rows, []telegram.InlineBtn{{Text: "🌐 Скачать с сайта", URL: v.LauncherURL}})
 	}
-	if v.HasLauncherFile {
+	// Локальный файл в чат — только как фолбэк, когда релизов нет.
+	if !hasRelease && v.HasLauncherFile {
 		rows = append(rows, []telegram.InlineBtn{{Text: "📩 Прислать файл в чат", Data: cbLauncherFile}})
 	}
-	if v.LauncherURL == "" && !v.HasLauncherFile {
+	if !hasRelease && v.LauncherURL == "" && !v.HasLauncherFile {
 		text = "⬇ <b>Лаунчер</b>\n\nСкачивание сейчас недоступно — загляните позже."
 	}
 	rows = append(rows, backRow())
@@ -301,6 +336,8 @@ func (s *Service) menuViewFor(telegramUID int64) (menuView, error) {
 		DonateURL:       s.Cfg.DonateShopURL,
 		LauncherURL:     s.Cfg.LauncherDirectDownloadURL(),
 		HasLauncherFile: s.launcherExePath() != "",
+		LauncherLinux:   s.latestLauncherInfo("linux-x64"),
+		LauncherWindows: s.latestLauncherInfo("windows-x64"),
 	}, nil
 }
 

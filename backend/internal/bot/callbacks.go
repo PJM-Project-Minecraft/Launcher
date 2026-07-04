@@ -14,6 +14,17 @@ func normalizeCallbackData(raw string) string {
 	return strings.TrimSpace(strings.TrimPrefix(raw, "\f"))
 }
 
+// platformForCallback — маппинг кнопки выбора платформы на внутренний код релиза.
+func platformForCallback(data string) string {
+	switch data {
+	case cbLauncherLinux:
+		return "linux-x64"
+	case cbLauncherWindows:
+		return "windows-x64"
+	}
+	return ""
+}
+
 // callbackNeedsLink — экраны, доступные только привязанному аккаунту.
 // Решения по заявкам (pr:*) сюда не входят: у них своя админ-проверка.
 func callbackNeedsLink(data string) bool {
@@ -96,6 +107,11 @@ func (s *Service) HandleCallback(c tele.Context) error {
 	case cbLauncherFile:
 		s.answerCb(cb.ID, "Отправляю файл…", false)
 		return s.replyLauncherDownload(chatID, telegramUID)
+
+	case cbLauncherLinux, cbLauncherWindows:
+		platform := platformForCallback(data)
+		s.answerCb(cb.ID, "Отправляю файл…", false)
+		return s.replyLauncherReleaseDownload(chatID, platform)
 
 	case cbPwd:
 		s.answerCb(cb.ID, "", false)

@@ -33,3 +33,4 @@ docker-compose.override.yml
 
 # Сторонний authlib-injector пользователя (отдельный репозиторий, не часть монорепо)
 /Gml.Authlib.Injector/
+.aider*
