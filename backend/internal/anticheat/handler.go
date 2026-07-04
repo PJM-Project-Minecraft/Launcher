@@ -13,6 +13,7 @@ import (
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/models"
+	"launcher-backend/internal/policy"
 	"launcher-backend/internal/yggdrasil"
 
 	"github.com/gofiber/fiber/v3"
@@ -168,6 +169,14 @@ func (h Handler) init(c fiber.Ctx) error {
 	user, ok := auth.CurrentUser(c)
 	if !ok {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Требуется авторизация"})
+	}
+	// Юридический гейт: без принятой актуальной Политики конфиденциальности
+	// launch-token не выдаётся. 451 Unavailable For Legal Reasons.
+	if policy.NeedsConsent(&user) {
+		return c.Status(http.StatusUnavailableForLegalReasons).JSON(fiber.Map{
+			"code":    "policy_required",
+			"message": "Примите Политику конфиденциальности: выйдите из аккаунта в лаунчере и войдите снова.",
+		})
 	}
 	if !h.initLimiter.allow(user.ID) {
 		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
