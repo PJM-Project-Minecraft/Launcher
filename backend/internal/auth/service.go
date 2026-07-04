@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"launcher-backend/internal/models"
+	"launcher-backend/internal/policy"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -24,10 +25,11 @@ type Service struct {
 }
 
 type LoginResult struct {
-	Token     string      `json:"token"`
-	ExpiresAt time.Time   `json:"expiresAt"`
-	User      models.User `json:"user"`
-	Message   string      `json:"message"`
+	Token     string        `json:"token"`
+	ExpiresAt time.Time     `json:"expiresAt"`
+	User      models.User   `json:"user"`
+	Message   string        `json:"message"`
+	Policy    policy.Status `json:"policy"`
 }
 
 func NewService(db *gorm.DB, provider Provider, jwtSecret string, adminLogins []string, appEnv string, tokenTTL time.Duration) Service {
@@ -106,6 +108,7 @@ func (s Service) Login(ctx context.Context, login, password, totp string) (Login
 		ExpiresAt: expiresAt,
 		User:      user,
 		Message:   message,
+		Policy:    policy.StatusFor(&user),
 	}, nil
 }
 
