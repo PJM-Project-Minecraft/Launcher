@@ -132,3 +132,64 @@ func TestDownload(t *testing.T) {
 		t.Fatal("Download() accepted path traversal in version")
 	}
 }
+
+// Кэш активных релизов: публичные /download и /api/launcher/update дёргаются
+// на каждый хит, без кэша бот-флуд превращается в шторм одинаковых SELECT
+// (инцидент 2026-07-08: 816 IP уронили прод). Чтение в обход сервиса не видно
+// до инвалидации; мутации через сервис инвалидируют кэш сами.
+func TestActiveReleasesCache(t *testing.T) {
+	s := newTestService(t)
+	createRelease(t, s, "0.2.0", false)
+
+	info, err := s.CheckUpdate(context.Background(), "linux-x64", "0.1.0")
+	if err != nil || info.LatestVersion != "0.2.0" {
+		t.Fatalf("CheckUpdate() = %+v, %v; want latest 0.2.0", info, err)
+	}
+
+	// Деактивация в обход сервиса — кэш ещё держит старый список.
+	if err := s.db.Model(&models.LauncherRelease{}).Where("version = ?", "0.2.0").
+		Update("is_active", false).Error; err != nil {
+		t.Fatalf("raw update: %v", err)
+	}
+	if info, err = s.CheckUpdate(context.Background(), "linux-x64", "0.1.0"); err != nil || !info.UpdateAvailable {
+		t.Fatalf("ожидался ответ из кэша, got %+v, %v", info, err)
+	}
+
+	// После инвалидации свежее чтение видит деактивацию.
+	s.invalidateReleaseCache()
+	if info, err = s.CheckUpdate(context.Background(), "linux-x64", "0.1.0"); err != nil || info.UpdateAvailable {
+		t.Fatalf("после инвалидации ожидался пустой апдейт, got %+v, %v", info, err)
+	}
+}
+
+func TestReleaseCacheInvalidatedByMutations(t *testing.T) {
+	s := newTestService(t)
+	first := createRelease(t, s, "0.2.0", false)
+	if _, err := s.CheckUpdate(context.Background(), "linux-x64", "0.1.0"); err != nil {
+		t.Fatalf("прогрев кэша: %v", err)
+	}
+
+	// Create инвалидирует кэш — новый релиз виден сразу.
+	second := createRelease(t, s, "0.3.0", false)
+	info, err := s.CheckUpdate(context.Background(), "linux-x64", "0.1.0")
+	if err != nil || info.LatestVersion != "0.3.0" {
+		t.Fatalf("после Create: %+v, %v; want 0.3.0", info, err)
+	}
+
+	// Update (деактивация) инвалидирует кэш.
+	off := false
+	if _, err := s.Update(context.Background(), second.ID, PatchRequest{IsActive: &off}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if info, err = s.CheckUpdate(context.Background(), "linux-x64", "0.1.0"); err != nil || info.LatestVersion != "0.2.0" {
+		t.Fatalf("после Update: %+v, %v; want 0.2.0", info, err)
+	}
+
+	// Delete инвалидирует кэш.
+	if err := s.Delete(context.Background(), first.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if info, err = s.CheckUpdate(context.Background(), "linux-x64", "0.1.0"); err != nil || info.UpdateAvailable {
+		t.Fatalf("после Delete: %+v, %v; want нет апдейта", info, err)
+	}
+}

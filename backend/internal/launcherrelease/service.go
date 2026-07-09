@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"launcher-backend/internal/models"
 
@@ -27,10 +29,48 @@ const maxReleaseFileSize = 200 << 20
 type Service struct {
 	db          *gorm.DB
 	storageRoot string
+	cache       *releaseCache
 }
 
 func NewService(db *gorm.DB, storageRoot string) Service {
-	return Service{db: db, storageRoot: storageRoot}
+	return Service{db: db, storageRoot: storageRoot, cache: &releaseCache{}}
+}
+
+// releaseCache — TTL-кэш активных релизов. Публичные /download и
+// /api/launcher/update дёргаются на каждый анонимный хит; без кэша бот-флуд
+// превращается в шторм одинаковых SELECT и валит Postgres вместе с хостом
+// (инцидент 2026-07-08). Мьютекс держится и на время запроса к БД — при
+// наплыве в БД уходит один SELECT, остальные ждут и читают готовый результат.
+type releaseCache struct {
+	mu      sync.Mutex
+	fetched time.Time
+	data    []models.LauncherRelease
+}
+
+const releaseCacheTTL = 30 * time.Second
+
+// activeReleases — активные релизы с файлами, через кэш. Возвращаемый срез
+// общий — вызывающие его не мутируют.
+func (s Service) activeReleases(ctx context.Context) ([]models.LauncherRelease, error) {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	if s.cache.data != nil && time.Since(s.cache.fetched) < releaseCacheTTL {
+		return s.cache.data, nil
+	}
+	var releases []models.LauncherRelease
+	if err := s.db.WithContext(ctx).Preload("Files").
+		Where("is_active = ?", true).Find(&releases).Error; err != nil {
+		return nil, err
+	}
+	s.cache.data = releases
+	s.cache.fetched = time.Now()
+	return releases, nil
+}
+
+func (s Service) invalidateReleaseCache() {
+	s.cache.mu.Lock()
+	s.cache.data = nil
+	s.cache.mu.Unlock()
 }
 
 // StorageRoot возвращает корень каталога релизов; пустая строка — сервис не
@@ -124,6 +164,7 @@ func (s Service) Create(ctx context.Context, req CreateRequest, files []Uploaded
 		_ = os.RemoveAll(filepath.Join(s.storageRoot, version))
 		return models.LauncherRelease{}, err
 	}
+	s.invalidateReleaseCache()
 	return release, nil
 }
 
@@ -192,6 +233,7 @@ func (s Service) Update(ctx context.Context, id string, req PatchRequest) (model
 		Updates(map[string]any{"mandatory": release.Mandatory, "is_active": release.IsActive}).Error; err != nil {
 		return models.LauncherRelease{}, err
 	}
+	s.invalidateReleaseCache()
 	return release, nil
 }
 
@@ -207,6 +249,7 @@ func (s Service) Delete(ctx context.Context, id string) error {
 	if err := s.db.WithContext(ctx).Delete(&release).Error; err != nil {
 		return err
 	}
+	s.invalidateReleaseCache()
 	return os.RemoveAll(filepath.Join(s.storageRoot, release.Version))
 }
 
@@ -216,9 +259,8 @@ func (s Service) CheckUpdate(ctx context.Context, platform, clientVersion string
 	if !isAllowedPlatform(platform) {
 		return UpdateInfo{}, errors.New("неизвестная платформа")
 	}
-	var releases []models.LauncherRelease
-	if err := s.db.WithContext(ctx).Preload("Files").
-		Where("is_active = ?", true).Find(&releases).Error; err != nil {
+	releases, err := s.activeReleases(ctx)
+	if err != nil {
 		return UpdateInfo{}, err
 	}
 
@@ -265,14 +307,13 @@ func (s Service) CheckUpdate(ctx context.Context, platform, clientVersion string
 // релизов; клиенты ниже неё не получают launch-token (426 в anticheat).
 // Пустая строка — обязательных релизов нет.
 func (s Service) MinMandatoryVersion(ctx context.Context) (string, error) {
-	var releases []models.LauncherRelease
-	if err := s.db.WithContext(ctx).
-		Where("is_active = ? AND mandatory = ?", true, true).Find(&releases).Error; err != nil {
+	releases, err := s.activeReleases(ctx)
+	if err != nil {
 		return "", err
 	}
 	max := ""
 	for _, release := range releases {
-		if max == "" || CompareVersions(release.Version, max) > 0 {
+		if release.Mandatory && (max == "" || CompareVersions(release.Version, max) > 0) {
 			max = release.Version
 		}
 	}
@@ -287,9 +328,8 @@ func (s Service) LatestFile(ctx context.Context, platform string) (models.Launch
 	if !isAllowedPlatform(platform) {
 		return models.LauncherRelease{}, models.LauncherReleaseFile{}, "", errors.New("неизвестная платформа")
 	}
-	var releases []models.LauncherRelease
-	if err := s.db.WithContext(ctx).Preload("Files").
-		Where("is_active = ?", true).Find(&releases).Error; err != nil {
+	releases, err := s.activeReleases(ctx)
+	if err != nil {
 		return models.LauncherRelease{}, models.LauncherReleaseFile{}, "", err
 	}
 	var latest *models.LauncherRelease
