@@ -6,11 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use rayon::prelude::*;
@@ -853,6 +853,9 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
         let config = config.clone();
         thread::spawn(move || {
             let result = sync_and_launch(&config, &token, &user, &profile, &app_weak);
+            if let Err(ref message) = result {
+                log_sync_error(message);
+            }
             let nick_for_rpc = nick_for_rpc.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
@@ -903,7 +906,14 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                                 });
                             } else {
                                 app.set_download_phase("Ошибка".into());
-                                app.set_download_file(message.clone().into());
+                                // На карточке одна строка — берём первую строку сообщения;
+                                // детали (хвост лога) остаются в sync-errors.log.
+                                let first_line = message
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("Неизвестная ошибка")
+                                    .to_string();
+                                app.set_download_file(first_line.into());
                                 app.set_download_panel_visible(true);
                                 app.set_message(message.into());
                             }
@@ -2143,6 +2153,20 @@ fn launch_profile(
     }
     // Иначе java.exe открыл бы собственное консольное окно рядом с игрой.
     hide_console_window(&mut process);
+
+    // Пишем stdout+stderr игры в лог профиля. В GUI-режиме (двойной клик) вывод
+    // иначе теряется, и мгновенный краш JVM (битая команда запуска, несовместимый
+    // агент) невозможно диагностировать. Best-effort: не смогли создать файл —
+    // оставляем унаследованные потоки.
+    let log_path = paths.profile_root.join("launch.log");
+    if let Ok(log_file) = File::create(&log_path) {
+        if let Ok(err_file) = log_file.try_clone() {
+            process.stdout(Stdio::from(log_file));
+            process.stderr(Stdio::from(err_file));
+        }
+    }
+
+    let started = Instant::now();
     let mut child = process
         .spawn()
         .map_err(|err| format!("Не удалось запустить Minecraft: {}", err))?;
@@ -2180,6 +2204,7 @@ fn launch_profile(
     let status = child
         .wait()
         .map_err(|err| format!("Не удалось дождаться закрытия Minecraft: {}", err))?;
+    let elapsed = started.elapsed();
 
     // Останавливаем keepalive до инвалидации, чтобы он не продлил уже погашенную сессию.
     keepalive_stop.store(true, Ordering::Relaxed);
@@ -2194,7 +2219,114 @@ fn launch_profile(
         return Err(reason.into_alert());
     }
 
+    // Мгновенный выход с ненулевым кодом — это не нормальное закрытие, а краш на
+    // старте. Возвращаем ошибку (панель остаётся видимой с путём к логу), иначе
+    // краш проглатывается как успех и кнопка «Играть» просто снова становится
+    // активной — игра будто «не запустилась».
+    if is_fast_launch_failure(elapsed, status.success()) {
+        let tail = read_log_tail(&log_path, 20);
+        return Err(launch_failure_message(status.code(), &log_path, &tail));
+    }
+
     Ok(minecraft_exit_message(status))
+}
+
+/// Порог «мгновенного падения»: нормальный клиент (даже модовый) держит процесс
+/// живым дольше при выходе в меню. Быстрый выход игрока завершается кодом 0, поэтому
+/// сюда попадает именно краш на старте.
+const FAST_LAUNCH_FAILURE: Duration = Duration::from_secs(20);
+
+/// True, если игра завершилась подозрительно быстро и с ошибкой — признак краша на
+/// старте (битая команда запуска, отсутствующий мод-загрузчик, несовместимый агент).
+fn is_fast_launch_failure(elapsed: Duration, success: bool) -> bool {
+    !success && elapsed < FAST_LAUNCH_FAILURE
+}
+
+/// Последние `max_lines` непустых строк лога запуска — для показа игроку прямо в
+/// сообщении об ошибке без открытия файла. Отсутствие/нечитаемость лога → пустая строка.
+fn read_log_tail(path: &Path, max_lines: usize) -> String {
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n").trim().to_string()
+}
+
+/// Сообщение об ошибке мгновенного падения: код выхода, путь к полному логу и его хвост.
+fn launch_failure_message(code: Option<i32>, log_path: &Path, tail: &str) -> String {
+    let code_part = match code {
+        Some(c) => format!("код {}", c),
+        None => "аварийно (сигнал)".to_string(),
+    };
+    let mut msg = format!(
+        "Minecraft не запустился — процесс завершился сразу ({}). Обычно причина \
+         в команде запуска профиля или несовместимом клиенте. Полный лог: {}",
+        code_part,
+        log_path.display()
+    );
+    if !tail.is_empty() {
+        msg.push_str("\n\nПоследние строки лога:\n");
+        msg.push_str(tail);
+    }
+    msg
+}
+
+/// Потолок размера лога ошибок: при превышении лог начинается заново, чтобы
+/// бесконечные повторы одной и той же ошибки не съедали диск.
+const ERROR_LOG_MAX_BYTES: u64 = 256 * 1024;
+
+/// Unix-время (секунды) → "YYYY-MM-DD HH:MM:SS" в UTC. Календарная часть —
+/// алгоритм civil_from_days (Хиннант), без внешних зависимостей.
+fn format_log_timestamp(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let secs = unix_secs % 86_400;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year,
+        month,
+        day,
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60
+    )
+}
+
+/// Дописывает в лог строку "[<время> UTC] <сообщение>". Создаёт папку при
+/// необходимости; разросшийся лог начинает заново (см. ERROR_LOG_MAX_BYTES).
+fn append_error_log(path: &Path, unix_secs: u64, message: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let oversized = fs::metadata(path).map(|m| m.len() > ERROR_LOG_MAX_BYTES).unwrap_or(false);
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(!oversized)
+        .truncate(oversized)
+        .write(true)
+        .open(path)?;
+    writeln!(file, "[{} UTC] {}", format_log_timestamp(unix_secs), message)
+}
+
+/// Best-effort запись ошибки синхронизации/запуска в постоянный лог
+/// (`<data_dir>/sync-errors.log`) — иначе с машины игрока её никак не достать:
+/// UI-сообщение живёт до следующего клика, stdout в GUI-режиме не виден.
+fn log_sync_error(message: &str) {
+    let Ok(dirs) = project_dirs() else { return };
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let _ = append_error_log(&dirs.data_dir().join("sync-errors.log"), secs, message);
 }
 
 fn post_game_started(app: &Weak<AppWindow>) {
@@ -3270,6 +3402,94 @@ impl LoginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_failure_only_on_quick_nonzero_exit() {
+        // Мгновенный краш: быстро + ошибка → распознаём.
+        assert!(is_fast_launch_failure(Duration::from_secs(2), false));
+        // Быстрый, но успешный выход (игрок сразу закрыл) — не ошибка.
+        assert!(!is_fast_launch_failure(Duration::from_secs(2), true));
+        // Долгая сессия с ненулевым кодом — нормальное закрытие, не мгновенный краш.
+        assert!(!is_fast_launch_failure(Duration::from_secs(120), false));
+    }
+
+    #[test]
+    fn launch_failure_message_has_code_path_and_tail() {
+        let msg = launch_failure_message(
+            Some(1),
+            Path::new("/data/profile/launch.log"),
+            "Error: Unable to access jarfile client.jar",
+        );
+        assert!(msg.contains("код 1"));
+        assert!(msg.contains("/data/profile/launch.log"));
+        assert!(msg.contains("Unable to access jarfile"));
+    }
+
+    #[test]
+    fn launch_failure_message_handles_signal_and_empty_tail() {
+        let msg = launch_failure_message(None, Path::new("/x/launch.log"), "");
+        assert!(msg.contains("аварийно (сигнал)"));
+        assert!(!msg.contains("Последние строки"));
+    }
+
+    #[test]
+    fn read_log_tail_returns_last_lines() {
+        let path = std::env::temp_dir().join("pjm_launch_tail_test.log");
+        fs::write(&path, "l1\nl2\nl3\nl4\nl5\n").unwrap();
+        let tail = read_log_tail(&path, 2);
+        assert_eq!(tail, "l4\nl5");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_log_tail_missing_file_is_empty() {
+        assert_eq!(
+            read_log_tail(Path::new("/no/such/pjm_launch.log"), 10),
+            ""
+        );
+    }
+
+    #[test]
+    fn format_log_timestamp_known_values() {
+        assert_eq!(format_log_timestamp(0), "1970-01-01 00:00:00");
+        assert_eq!(format_log_timestamp(86_400), "1970-01-02 00:00:00");
+        // Високосный год: 29 февраля 2000.
+        assert_eq!(format_log_timestamp(951_782_400), "2000-02-29 00:00:00");
+        assert_eq!(format_log_timestamp(1_751_993_669), "2025-07-08 16:54:29");
+    }
+
+    #[test]
+    fn append_error_log_appends_timestamped_lines() {
+        let dir = std::env::temp_dir().join("pjm_sync_log_append_test");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("sync-errors.log");
+
+        append_error_log(&path, 0, "первая ошибка").unwrap();
+        append_error_log(&path, 86_400, "вторая ошибка").unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "[1970-01-01 00:00:00 UTC] первая ошибка");
+        assert_eq!(lines[1], "[1970-01-02 00:00:00 UTC] вторая ошибка");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_error_log_truncates_oversized_log() {
+        let dir = std::env::temp_dir().join("pjm_sync_log_trunc_test");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("sync-errors.log");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "x".repeat(ERROR_LOG_MAX_BYTES as usize + 1)).unwrap();
+
+        append_error_log(&path, 0, "свежая ошибка").unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        // Разросшийся лог начат заново: старый мусор выброшен, новая запись на месте.
+        assert_eq!(content, "[1970-01-01 00:00:00 UTC] свежая ошибка\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn discord_rpc_enabled_defaults_true_when_absent() {

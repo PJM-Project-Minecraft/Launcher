@@ -40,7 +40,12 @@ static const char *ALLOW_FRAGMENTS[] = {
     /* Нативки легитимных модов, распаковываемые JNI во временные папки (/tmp и т.п.):
      * Axiom (imgui от moulberry), Simple Voice Chat (opus/rnnoise через javacpp),
      * Plasmo Voice (кодеки plasmoverse: opus4j/rnnoise4j/speex4j/lame4j). */
-    "imgui", "moulberry", "opus", "rnnoise", "javacpp", "speex", "lame4j"
+    "imgui", "moulberry", "opus", "rnnoise", "javacpp", "speex", "lame4j",
+    /* Массовые FP из прод-детектов 07.2026: RocksDB JNI (мод, распаковка в temp со
+     * случайным суффиксом → «новый» модуль каждый запуск), оверлей Medal.tv, Apple
+     * Bonjour (Winsock-провайдер), антивирусные инжекты, шелл-хук MS Office, SensApi. */
+    "librocksdbjni", "medal", "mdnsnsp", "antimalware", "com_antivirus",
+    "msoxmlmf", "sensapi", "tiptsf", "filesyncshell", "avamsi"
 };
 static const int ALLOW_COUNT = (int)(sizeof(ALLOW_FRAGMENTS) / sizeof(ALLOW_FRAGMENTS[0]));
 

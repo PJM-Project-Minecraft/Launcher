@@ -595,7 +595,10 @@ public final class Agent {
                 switch (type) {
                     case "illegal-class-name" -> reportIllegalName(name, "native");
                     case "debugger-runtime" -> detect("debugger", "debugger-runtime", "native:" + name);
-                    case "module-unknown" -> detect("module-unknown", "module-unknown", "native:" + name);
+                    // Сигнатура = имя модуля: в панели видно, ЧТО сработало (не literal
+                    // "module-unknown"), а blacklist-сигнатуры kind=module-unknown могут
+                    // точным матчем поднять severity/confidence для известных читерских DLL.
+                    case "module-unknown" -> detect("module-unknown", name, "native:" + name);
                     case "ld-preload" -> detect("ld-preload", "ld-preload", "native:" + name);
                     case "class-hash" -> {
                         // Нативка хеширует bootstrap-классы, недоступные Java-трансформеру:

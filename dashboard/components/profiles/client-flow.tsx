@@ -3,7 +3,7 @@
 // Секция «Сборка»: степпер Профиль → Клиент → Manifest и действия prepare/scan.
 
 import { useEffect, useState } from 'react';
-import { Check, Download, FileSearch, Loader2, Lock } from 'lucide-react';
+import { AlertTriangle, Check, Download, FileSearch, Loader2, Lock } from 'lucide-react';
 import { Button } from '../ui/button';
 import { useToast } from '../ui/toast';
 import { api, errorMessage } from '../../app/lib/api';
@@ -11,6 +11,23 @@ import type { Profile } from '../../app/lib/types';
 import { formatBytes, formatDate } from './helpers';
 
 type StepState = 'done' | 'active' | 'loading' | 'locked';
+
+// Ответ GET /api/admin/profiles/:id/drift — расхождение storage с манифестом.
+type DriftInfo = {
+  scanned: boolean;
+  drifted: boolean;
+  added: number;
+  removed: number;
+  changed: number;
+};
+
+function driftSummary(drift: DriftInfo): string {
+  const parts: string[] = [];
+  if (drift.added > 0) parts.push(`новых: ${drift.added}`);
+  if (drift.removed > 0) parts.push(`удалённых: ${drift.removed}`);
+  if (drift.changed > 0) parts.push(`изменённых: ${drift.changed}`);
+  return parts.join(', ');
+}
 
 function Step({ index, label, state, last }: { index: number; label: string; state: StepState; last?: boolean }) {
   const circle =
@@ -47,10 +64,34 @@ export function ClientFlow({
   const toast = useToast();
   const [isScanning, setIsScanning] = useState(false);
   const [isPreparingLocal, setIsPreparingLocal] = useState(false);
+  const [drift, setDrift] = useState<DriftInfo | null>(null);
 
   const isPreparing = isPreparingLocal || profile?.clientStatus === 'preparing';
   const clientReady = Boolean(profile?.clientPrepared);
   const hasManifest = clientReady && (profile?.fileCount ?? 0) > 0;
+  const profileId = profile?.id ?? null;
+  const manifestUpdatedAt = profile?.manifestUpdatedAt ?? null;
+
+  // Сверка storage↔manifest: ловит «закинул моды по SFTP, забыл просканировать»
+  // (у игроков это Hash mismatch при скачивании). Обновляется после скана/подготовки
+  // через смену manifestUpdatedAt.
+  useEffect(() => {
+    if (!profileId || isScanning || isPreparing) {
+      return;
+    }
+    let cancelled = false;
+    setDrift(null);
+    api<DriftInfo>(`/api/admin/profiles/${profileId}/drift`)
+      .then((result) => {
+        if (!cancelled) setDrift(result);
+      })
+      .catch(() => {
+        if (!cancelled) setDrift(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId, manifestUpdatedAt, isScanning, isPreparing]);
 
   // Поллинг статуса, пока идёт подготовка или скан (на случай запуска из другой сессии).
   useEffect(() => {
@@ -148,6 +189,17 @@ export function ClientFlow({
             <div className="text-sm text-fg-secondary">
               {profile.manifestUpdatedAt ? formatDate(profile.manifestUpdatedAt) : '—'}
             </div>
+          </div>
+        </div>
+      )}
+
+      {profile && !isScanning && drift?.scanned && drift.drifted && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2.5">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warn" />
+          <div className="text-sm text-warn">
+            Файлы в storage изменились после последнего сканирования ({driftSummary(drift)}).
+            Manifest устарел — у игроков скачивание упадёт с ошибкой «Hash mismatch».
+            Нажми «Сканировать файлы».
           </div>
         </div>
       )}

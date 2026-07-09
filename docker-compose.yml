@@ -31,6 +31,9 @@ services:
       JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
       # prod (.env на VPS): обязателен и != JWT_SECRET (P6). Пусто в dev → деривируется из JWT.
       ANTICHEAT_SECRET: "${ANTICHEAT_SECRET:-}"
+      # Без passthrough .env-значения ДО контейнера не доходят (гоча ANTICHEAT_SECRET).
+      ANTICHEAT_AUTO_BAN: "${ANTICHEAT_AUTO_BAN:-false}"
+      ANTICHEAT_REQUIRE_ATTESTATION: "${ANTICHEAT_REQUIRE_ATTESTATION:-false}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}"
       # prod (.env на VPS): APP_ENV=production — сервер откажется стартовать с дев-секретами.
       APP_ENV: "${APP_ENV:-development}"

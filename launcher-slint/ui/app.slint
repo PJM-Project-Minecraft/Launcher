@@ -1020,6 +1020,11 @@ export component AppWindow inherits Window {
             property <bool> dl-done: root.download-progress >= 1.0;
             // пульс активности: мигает, пока идёт загрузка (как «проверка файлов»)
             property <bool> dl-pulse: false;
+            // Синхронизация оборвалась с ошибкой: панель осталась видимой, но
+            // syncing уже сброшен. Без этого состояния карточка возвращалась к
+            // «Доступен» и ошибка была невидима — выглядело как молчаливый
+            // откат проверки файлов по кругу.
+            property <bool> dl-error: root.download-panel-visible && !root.is-syncing;
 
             Timer {
                 interval: 850ms;
@@ -1155,10 +1160,13 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             Text { width: 64px; text: "Статус:"; color: #989ca2; font-size: 14px; font-weight: 800; }
                             Text {
-                                text: root.is-syncing ? root.download-phase : root.profile-status;
-                                color: root.is-syncing
-                                    ? (play-card.dl-done ? #ffffff : (play-card.dl-pulse ? #ffffff : #8a8f96))
-                                    : #d7dadf;
+                                text: root.is-syncing || play-card.dl-error
+                                    ? root.download-phase
+                                    : root.profile-status;
+                                color: play-card.dl-error ? #ff6b6b
+                                    : (root.is-syncing
+                                        ? (play-card.dl-done ? #ffffff : (play-card.dl-pulse ? #ffffff : #8a8f96))
+                                        : #d7dadf);
                                 font-size: 14px;
                                 font-weight: 800;
                                 overflow: elide;
@@ -1167,14 +1175,17 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 8px;
-                            Text { width: 64px; text: root.is-syncing ? "Прогресс:" : "Сервер:"; color: #989ca2; font-size: 14px; font-weight: 800; }
+                            Text { width: 64px; text: root.is-syncing ? "Прогресс:" : (play-card.dl-error ? "Причина:" : "Сервер:"); color: #989ca2; font-size: 14px; font-weight: 800; }
                             Text {
                                 text: root.is-syncing
                                     ? "\{round(root.download-progress * 100)}% • " + root.download-counter
-                                    : (root.has-profile ? "Готов" : "Отключен");
-                                color: root.is-syncing
-                                    ? (play-card.dl-done ? #ffffff : (play-card.dl-pulse ? #eceef1 : #9398a0))
-                                    : #d7dadf;
+                                    : (play-card.dl-error
+                                        ? root.download-file
+                                        : (root.has-profile ? "Готов" : "Отключен"));
+                                color: play-card.dl-error ? #ff6b6b
+                                    : (root.is-syncing
+                                        ? (play-card.dl-done ? #ffffff : (play-card.dl-pulse ? #eceef1 : #9398a0))
+                                        : #d7dadf);
                                 font-size: 14px;
                                 font-weight: 800;
                                 overflow: elide;

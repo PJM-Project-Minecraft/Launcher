@@ -48,6 +48,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Delete("/:id", h.delete)
 	admin.Post("/:id/prepare-client", h.prepareClient)
 	admin.Post("/:id/scan", h.scan)
+	admin.Get("/:id/drift", h.drift)
 }
 
 // notifyProfilesChanged рассылает подключённым лаунчерам сигнал перезапросить профили.
@@ -146,6 +147,16 @@ func (h Handler) scan(c fiber.Ctx) error {
 		return h.writeError(c, err)
 	}
 	h.notifyProfilesChanged()
+	return c.JSON(result)
+}
+
+// drift — read-only сверка storage с манифестом (см. Service.Drift): дашборд
+// показывает предупреждение «файлы изменились — нажми Сканировать».
+func (h Handler) drift(c fiber.Ctx) error {
+	result, err := h.service.Drift(c.Context(), c.Params("id"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
 	return c.JSON(result)
 }
 

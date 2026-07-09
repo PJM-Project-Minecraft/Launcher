@@ -327,6 +327,116 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 	}, nil
 }
 
+// DriftResult — итог дешёвой сверки storage с манифестом в БД: пути, размеры и
+// mtime, без хэширования. Ловит «обновил файлы профиля, забыл нажать
+// „Сканировать файлы"» — до сканирования лаунчеры игроков падают на
+// hash mismatch. Подмена файла тем же размером со старым mtime (rsync -a)
+// эвристикой не ловится — это осознанный компромисс ради скорости.
+type DriftResult struct {
+	// Scanned — манифест хоть раз собирался.
+	Scanned bool `json:"scanned"`
+	Drifted bool `json:"drifted"`
+	// Added — файлы на диске, которых нет в манифесте.
+	Added int `json:"added"`
+	// Removed — файлы манифеста, пропавшие с диска.
+	Removed int `json:"removed"`
+	// Changed — размер отличается или mtime новее последнего сканирования.
+	Changed int `json:"changed"`
+}
+
+func (s Service) Drift(ctx context.Context, id string) (DriftResult, error) {
+	var profile models.Profile
+	if err := s.db.WithContext(ctx).First(&profile, "id = ?", id).Error; err != nil {
+		return DriftResult{}, err
+	}
+	if err := validateSlug(profile.Slug); err != nil {
+		return DriftResult{}, err
+	}
+
+	var dbFiles []models.GameFile
+	if err := s.db.WithContext(ctx).Where("profile_id = ?", id).Find(&dbFiles).Error; err != nil {
+		return DriftResult{}, err
+	}
+	manifestSizes := make(map[string]int64, len(dbFiles))
+	for _, file := range dbFiles {
+		manifestSizes[file.Path] = file.Size
+	}
+
+	result := DriftResult{Scanned: profile.ManifestUpdatedAt != nil}
+	root := s.filesRoot(profile)
+	preservePaths := profilePreservePaths(profile)
+	seen := make(map[string]bool, len(manifestSizes))
+
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// Папки профиля ещё нет — весь манифест «пропал с диска».
+			if path == root && os.IsNotExist(walkErr) {
+				return filepath.SkipAll
+			}
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		rel, err = safeRelativePath(rel)
+		if err != nil {
+			return err
+		}
+		if preservePathMatches(rel, preservePaths) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			// Scan симлинк отвергнет — значит storage разошёлся с манифестом.
+			result.Added++
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || isInstallerOnlyFile(rel) {
+			return nil
+		}
+
+		size, inManifest := manifestSizes[rel]
+		if !inManifest {
+			result.Added++
+			return nil
+		}
+		seen[rel] = true
+		if info.Size() != size {
+			result.Changed++
+			return nil
+		}
+		if profile.ManifestUpdatedAt != nil && info.ModTime().After(*profile.ManifestUpdatedAt) {
+			result.Changed++
+		}
+		return nil
+	})
+	if err != nil {
+		return DriftResult{}, err
+	}
+
+	for path := range manifestSizes {
+		if !seen[path] {
+			result.Removed++
+		}
+	}
+	result.Drifted = result.Added > 0 || result.Removed > 0 || result.Changed > 0
+	return result, nil
+}
+
 func (s Service) Manifest(ctx context.Context, id string) (Manifest, error) {
 	var profile models.Profile
 	if err := s.db.WithContext(ctx).

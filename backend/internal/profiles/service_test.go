@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"launcher-backend/internal/models"
 
@@ -144,6 +145,147 @@ func TestScanSkipsPreservedPathsAndManifestReturnsWhitelist(t *testing.T) {
 	}
 	if !equalStrings(manifest.PreservePaths, []string{"saves/", "options.txt"}) {
 		t.Fatalf("PreservePaths = %#v", manifest.PreservePaths)
+	}
+}
+
+func TestDriftCleanAfterScan(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name:        "Project Test",
+		Slug:        "project-test",
+		Loader:      "fabric",
+		GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	filesRoot := filepath.Join(service.storageRoot, profile.Slug, "files")
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "example.jar"), "mod-data")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+
+	drift, err := service.Drift(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("Drift() error = %v", err)
+	}
+	if !drift.Scanned {
+		t.Fatal("Scanned = false, want true после сканирования")
+	}
+	if drift.Drifted {
+		t.Fatalf("Drifted = true сразу после Scan, drift = %+v", drift)
+	}
+}
+
+func TestDriftDetectsAddedRemovedAndResized(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name:          "Project Test",
+		Slug:          "project-test",
+		Loader:        "fabric",
+		GameVersion:   "1.21.1",
+		PreservePaths: []string{"options.txt"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	filesRoot := filepath.Join(service.storageRoot, profile.Slug, "files")
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "keep.jar"), "keep")
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "gone.jar"), "gone")
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "resized.jar"), "old")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+
+	// Меняем storage мимо сканирования: +1 файл, -1 файл, у одного другой размер.
+	// Preserve-путь меняться может свободно — дрифтом не считается.
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "added.jar"), "added")
+	if err := os.Remove(filepath.Join(filesRoot, "mods", "gone.jar")); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "resized.jar"), "new-longer-content")
+	writeTestFile(t, filepath.Join(filesRoot, "options.txt"), "player-options")
+
+	drift, err := service.Drift(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("Drift() error = %v", err)
+	}
+	if !drift.Drifted {
+		t.Fatal("Drifted = false, want true")
+	}
+	if drift.Added != 1 || drift.Removed != 1 || drift.Changed != 1 {
+		t.Fatalf("drift = %+v, want Added=1 Removed=1 Changed=1", drift)
+	}
+}
+
+func TestDriftDetectsSameSizeMtimeBump(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name:        "Project Test",
+		Slug:        "project-test",
+		Loader:      "fabric",
+		GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	filesRoot := filepath.Join(service.storageRoot, profile.Slug, "files")
+	target := filepath.Join(filesRoot, "mods", "swapped.jar")
+	writeTestFile(t, target, "AAAA")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+
+	// Подмена содержимого тем же размером: ловится только по mtime новее скана.
+	writeTestFile(t, target, "BBBB")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatalf("Chtimes() error = %v", err)
+	}
+
+	drift, err := service.Drift(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("Drift() error = %v", err)
+	}
+	if !drift.Drifted || drift.Changed != 1 {
+		t.Fatalf("drift = %+v, want Drifted=true Changed=1", drift)
+	}
+}
+
+func TestDriftBeforeAnyScan(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name:        "Project Test",
+		Slug:        "project-test",
+		Loader:      "fabric",
+		GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Пустой несканированный профиль — дрифта нет (нечего сканировать).
+	drift, err := service.Drift(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("Drift() error = %v", err)
+	}
+	if drift.Scanned || drift.Drifted {
+		t.Fatalf("drift = %+v, want Scanned=false Drifted=false для пустого профиля", drift)
+	}
+
+	// Файлы появились, но манифест ни разу не собирался — это дрифт.
+	filesRoot := filepath.Join(service.storageRoot, profile.Slug, "files")
+	writeTestFile(t, filepath.Join(filesRoot, "mods", "example.jar"), "mod-data")
+
+	drift, err = service.Drift(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatalf("Drift() error = %v", err)
+	}
+	if drift.Scanned || !drift.Drifted || drift.Added != 1 {
+		t.Fatalf("drift = %+v, want Scanned=false Drifted=true Added=1", drift)
 	}
 }
 
