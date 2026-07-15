@@ -83,7 +83,21 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 Прод-only файлы (в git не входят, deploy не трогает): `.env`, `docker-compose.override.yml`,
 `backend/storage`, `backend/data`.
 
-**Прод-окружение (с 2026-06-24 — мигрировано на новый сервер):**
+**Прод-окружение (с 2026-07-16 — мигрировано на РФ-хостинг):**
+- Сервер: `root@176.108.254.89` (`likonchik`, зона `ru.AZ-2`, Debian 12, **1 CPU / 1.9 ГБ / 48 ГБ**), `/root/Launcher`. Слабый — добавлен swap `/swapfile` 2 ГБ (итого 3 ГБ) под сборку Next.js, иначе OOM.
+- **Firewall хостера — облачная группа безопасности (allow-list!).** Открыты: входящие TCP 22/80/443, исходящий TCP 443 к `0.0.0.0/0`. Правила править в панели хостера, не в iptables (на хосте пусто). Без исходящего 443 — Telegram/HTTPS наружу мертвы.
+- **⚠️ РФ-хостер блокирует подсети Telegram** (`api.telegram.org`, `t.me`). Бот и anticheat-алерты ходят в TG **через HTTP-прокси на Latvia** (`tinyproxy` на `13.140.17.105:13128`, ACL только для IP цели). В `docker-compose.override.yml` у `server`+`bot` задан `HTTPS_PROXY/HTTP_PROXY` на прокси и `NO_PROXY` со списком внутренних + Minecraft-доменов (`.mojang.com`, `.neoforged.net`, `.fabricmc.net`, `.quiltmc.org`, `.minecraftforge.net`, `.minecraft.net`) — тяжёлые загрузки ассетов идут **напрямую в РФ**, через прокси только Telegram. Клиенты в коде используют `http.DefaultTransport` → env-прокси уважают без правки кода.
+- **Фронт — Caddy на хосте** (`/etc/caddy/Caddyfile`, TLS = CF Origin cert `likonchik-origin.crt/key`): `launcher.*` → `127.0.0.1:8081`, `pjm.*` → `:8080`, `admin.*` → `:3000`. Реалип через `CF-Connecting-IP` (сниппет `cfrealip`).
+- **⚠️ Caddy — КАСТОМНЫЙ бинарь** (`v2.11.4` + плагин `github.com/mholt/caddy-ratelimit`, собран через `docker run caddy:2.11-builder xcaddy build`). Стоит `apt-mark hold caddy` — `apt upgrade` затёр бы бинарь стандартным (без плагина) → Caddy упал бы на директиве `rate_limit`. Бэкап стокового: `/root/caddy.orig.2.11.4.bak` (откат: `install -m755 … /usr/bin/caddy` + убрать `rate_limit` из Caddyfile + restart). Обновлять Caddy — только пересборкой с плагином.
+- **Rate-limit на `/download`** (витрина скачивания — вектор бот-флуда клик-ботами): в Caddyfile `rate_limit` по `{http.request.header.CF-Connecting-IP}` (реальный IP, НЕ CF-edge), 30 событий/мин → 429 сверх. Ключ по CF-IP обязателен: иначе все игроки за общими адресами CF в одном ведре. Двойная защита: CF challenge (режет не-браузеры на всём, кроме `/api/*`) + Caddy rate-limit по IP.
+- CloudFlare: `launcher`/`pjm`/`admin` — **оранжевое облако**, A-запись → `176.108.254.89`, SSL/TLS mode **Full** (CF ходит на origin по 443, TLS даёт CF Origin cert). `admin.*` за CF Access (анонимам 403 — норма).
+- **Зеркало** `mirror.likonchik.xyz` (nginx на Latvia) переключено `proxy_pass` → `176.108.254.89`.
+- **Старый сервер** `root@77.239.125.67` (Debian 13, Caddy на хосте): весь стек `docker compose stop`, тома/storage оставлены для отката — **не удалять**.
+- Миграция: rsync `/root/Launcher` напрямую source→target + `pg_dump`/restore (370 юзеров), Docker через `get.docker.com`, Caddy из офиц. apt-репо.
+
+**История серверов (для отката):** до 2026-07-16 прод жил на `srv-129`/`77.239.125.67` — оставлено ниже как справка.
+
+**Прод-окружение (2026-06-24 — устаревшее, srv-129):**
 - Сервер: `ssh srv-129` (`root@81.88.221.192`), **LXC-контейнер Proxmox** (Debian 12, 4 CPU / 6 ГБ / 69 ГБ), `/root/Launcher`. Docker в LXC работает (nesting). За NAT, внутренний IP `192.168.88.53`.
 - Docker compose: `launcher-server-1` (Fiber API, слушает `0.0.0.0:8080` **и** `0.0.0.0:8081` — оба на `:8080` контейнера), `launcher-bot-1` (Telegram long polling), `launcher-postgres-1` (Postgres 16, `127.0.0.1:5432`), `launcher-dashboard-1` (`0.0.0.0:3000`)
 - **Нет хостового nginx/certbot.** Домены и SSL — через **Reverse Proxy хостинга** (вкладка панели, автоSSL Let's Encrypt): `pjm.likonchik.xyz` → порт `8080`; `launcher.likonchik.xyz` → порт `8081` (хостинг не даёт два прокси-правила на один порт → второй бинд `8081` у `server`); `admin.likonchik.xyz` → порт `3000`.
@@ -110,6 +124,54 @@ scp backend/data/libanticheat.so   srv-129:/root/Launcher/backend/data/
 scp backend/data/anticheat.dll     srv-129:/root/Launcher/backend/data/
 scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 ```
+
+### Зеркало бэкенда (выбор сервера на окне входа)
+
+Лаунчер умеет ходить на бэкенд через зеркало: селектор «Сервер» на окне входа
+(скрыт, пока зеркало одно). Нужен, когда основной домен режется у части игроков.
+
+**Зеркало — это тупой reverse-proxy на основной бэкенд, а НЕ вторая установка.**
+Второй инстанс со своей БД сломает вход в игру: клиент ходит в yggdrasil через
+выбранный URL (`-javaagent:authlib-injector=<api_url>/api/v1/integrations/authlib/minecraft`,
+`main.rs`), а игровой сервер проверяет `hasJoined` на основном домене — сессия
+должна лежать в одной БД. По той же причине зеркало обязано проксировать всё
+(`/api/*`, `/health`), а не только логин: профили, скачивание файлов и античит
+тоже идут по `api_url`, т.е. трафик сборок пойдёт через зеркало.
+
+**Развёрнуто (15.07.2026): `mirror.likonchik.xyz` → nginx на Latvia (`13.140.17.105`).**
+Конфиг: `/etc/nginx/sites-available/mirror-launcher` (+ симлинк в `sites-enabled`),
+лог `/var/log/nginx/mirror.log` (формат `mirrorfmt` в `conf.d/mirror-log.conf`, пишет
+`$server_port`/`$scheme` — им проверяется, каким плечом ходит CF).
+
+1. nginx-vhost проксирует на origin `https://176.108.254.89` (до 2026-07-16 был `77.239.125.67`) c `Host`/SNI, прибитыми к
+   `launcher.likonchik.xyz` (Caddy на origin роутит по vhost и `mirror.*` не знает),
+   `proxy_buffering off` (SSE), таймауты 3600 (скачивание сборок),
+   `X-Forwarded-For $remote_addr` **перезаписью** (клиент не должен подсовывать чужой IP
+   в ключ брутфорс-лимитера).
+2. Прописать в `EXTRA_API_MIRRORS` (`launcher-slint/src/main.rs`), бампнуть версию,
+   собрать и залить релиз — список зеркал вшит в лаунчер, не приходит с бэкенда.
+3. Проверка: `curl https://mirror.likonchik.xyz/api/policy` → 200 JSON, плюс
+   `tail /var/log/nginx/mirror.log` на Latvia (в логе видны `$server_port`/`$scheme`).
+
+⚠️ **CF челленджит всё, кроме `/api/*`.** На зоне стоит skip-правило WAF для `/api/*`;
+`/health` под него не попадает и снаружи отдаёт 403 «Just a moment» (проверено: через CF
+`curl /api/auth/login` → 401 JSON, `curl /health` → 403). Поэтому пинг зеркал в лаунчере
+бьёт в `/api/policy`, а не в `/health` — иначе основной сервер вечно «недоступен».
+Через зеркало (Latvia, CF в цепочке нет) `/health` отвечает нормально.
+
+⚠️ **LE/certbot на зеркале под оранжевым облаком не выпустится.** CF challeng'ит и
+`/.well-known/acme-challenge/` тоже → валидатор LE получает HTML вместо токена.
+Поэтому публичный TLS даёт CF (Universal SSL), а на origin лежит самоподписанный
+(`/etc/nginx/selfsigned/mirror.*`) — он нужен только для плеча CF→origin, т.е. SSL mode
+в CF обязан быть **Full** (Flexible → плечо CF→origin в открытую; Full strict → 526,
+самоподписанный не пройдёт; правильный фикс под strict — CF Origin CA cert).
+
+⚠️ **Реальный IP игрока через зеркало.** Появляется второй hop, и в `X-Forwarded-For`
+приходит `игрок, зеркало`. В Fiber v3.3.0 `c.IP()` без `EnableIPValidation` отдаёт
+**сырое значение заголовка целиком** (`req.go:619`), т.е. строку с двумя адресами —
+она уходит в ключ брутфорс-лимитера, `PolicyConsent.IP` и IP игровой сессии.
+Комментарий в `cmd/server/main.go:45` про «последний hop» этому не соответствует.
+Перед раздачей зеркала стоит проверить, что пишется в консенты/сессии.
 
 > **Деплой после миграции (2026-06-24):** `deploy.sh` (git push → `git reset --hard origin/main` на VPS) писался под старый сервер. Новый `srv-129` склонирован на `main` и тянет git напрямую; для авто-деплоя на нём настраивался GitHub Actions self-hosted runner (юзер `github-user`, org `PJM-Project-Minecraft`) — механизм деплоя на новый сервер ещё не финализирован. Прод-only файлы те же (`.env`, `docker-compose.override.yml`, `backend/storage`, `backend/data`). В override `server` добавлен второй порт `8081` (см. прод-окружение).
 
