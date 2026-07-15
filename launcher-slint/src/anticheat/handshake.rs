@@ -58,7 +58,7 @@ pub fn fetch_blacklist(config: &AppConfig, token: &str) -> Result<Vec<Signature>
     let client = http_client()?;
     let url = format!(
         "{}/api/anticheat/blacklist",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     let response = client
         .get(url)
@@ -85,7 +85,7 @@ pub fn init(
     };
     let url = format!(
         "{}/api/anticheat/handshake/init",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     // hwidHash — агрегат (совместимость со старыми банами); hwidComponents — раздельные
     // хеши для fuzzy-матча. Старый сервер hwidComponents игнорирует.
@@ -156,7 +156,7 @@ pub fn confirm(config: &AppConfig, launch_token: &str) -> Result<(), String> {
     let client = http_client()?;
     let url = format!(
         "{}/api/anticheat/handshake/confirm",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     let response = client
         .post(url)

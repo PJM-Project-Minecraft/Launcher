@@ -33,7 +33,7 @@ impl IntegrityManifest {
         let client = crate::download_client().ok()?;
         let url = format!(
             "{}/api/anticheat/manifest",
-            config.api_url.trim_end_matches('/')
+            config.api_url().trim_end_matches('/')
         );
         let response = client.get(url).bearer_auth(token).send().ok()?;
         if !response.status().is_success() {

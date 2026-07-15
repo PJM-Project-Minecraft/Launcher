@@ -1,4 +1,4 @@
-import { LineEdit } from "std-widgets.slint";
+import { LineEdit, ComboBox } from "std-widgets.slint";
 
 component GoldButton inherits Rectangle {
     in property <string> label;
@@ -73,7 +73,10 @@ component GoldButton inherits Rectangle {
 component DarkButton inherits Rectangle {
     in property <string> label;
     in property <image> icon-source;
+    // transparent = без перекраски (иконка в исходных цветах).
+    in property <brush> icon-color: transparent;
     in property <bool> enabled: true;
+    in property <LayoutAlignment> content-alignment: center;
     callback clicked();
 
     height: 52px;
@@ -93,10 +96,10 @@ component DarkButton inherits Rectangle {
     animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
+        padding-left: 14px;
+        padding-right: 14px;
         spacing: 10px;
-        alignment: center;
+        alignment: root.content-alignment;
 
         VerticalLayout {
             alignment: center;
@@ -111,6 +114,7 @@ component DarkButton inherits Rectangle {
                     height: self.width;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
+                    colorize: root.icon-color;
                     animate width { duration: 340ms; easing: ease-out-back; }
                 }
             }
@@ -371,7 +375,8 @@ export component AppWindow inherits Window {
     title: "Project Minecraft Launcher";
     preferred-width: 1200px;
     preferred-height: 750px;
-    min-width: 900px;
+    // 232px сайдбар + 728px плей-карточка при синке + отступы: уже 900px даёт наложение.
+    min-width: 1024px;
     min-height: 600px;
     background: #070707;
 
@@ -382,7 +387,14 @@ export component AppWindow inherits Window {
         startup-opacity = 1.0;
     }
 
+    changed settings-visible => {
+        if (self.settings-visible) { settings-esc.focus(); }
+    }
+
     in property <string> api-url;
+    // Зеркала бэкенда: селектор на окне входа скрыт, если зеркало одно.
+    in property <[string]> server-names;
+    in-out property <int> server-index;
     in property <string> message;
     in property <string> user-login;
     in property <string> user-uuid;
@@ -400,6 +412,7 @@ export component AppWindow inherits Window {
     in property <string> selected-profile-name;
     in property <string> selected-profile-version;
     in property <string> profile-status;
+    in property <string> playtime-total;
     in property <string> download-phase;
     in property <string> download-file;
     in property <string> download-counter;
@@ -436,6 +449,8 @@ export component AppWindow inherits Window {
     in property <int> policy-version;
 
     callback login-requested(string, string, string);
+    callback server-selected(int);
+    callback open-mods-folder-requested();
     callback anticheat-alert-dismiss();
     callback logout-requested();
     callback policy-accept-requested();
@@ -472,10 +487,13 @@ export component AppWindow inherits Window {
         }
 
 	    Rectangle {
+	        // Селектор зеркала есть не всегда — карточка и всё под ним съезжают
+	        // на mirror-shift, только когда зеркал больше одного.
+	        property <length> mirror-shift: root.server-names.length > 1 ? 96px : 0px;
 	        width: 474px;
-	        height: 484px;
+	        height: 484px + self.mirror-shift;
 	        x: (parent.width - 474px) / 2;
-	        y: (parent.height - 484px) / 2 + (root.is-loading ? -8px : 0px);
+	        y: (parent.height - self.height) / 2 + (root.is-loading ? -8px : 0px);
 	        visible: !root.is-authenticated;
 	        border-radius: 22px;
 	        background: root.is-loading ? #050403 : #000000;
@@ -525,19 +543,41 @@ export component AppWindow inherits Window {
             background: #242424;
         }
 
+        if root.server-names.length > 1: Text {
+            text: "Сервер";
+            x: 40px;
+            y: 158px;
+            color: #b4b7bc;
+            font-size: 18px;
+            font-weight: 900;
+        }
+
+        if root.server-names.length > 1: ComboBox {
+            x: 40px;
+            y: 188px;
+            width: parent.width - 80px;
+            height: 56px;
+            enabled: !root.is-loading && !root.is-authenticated;
+            model: root.server-names;
+            current-index <=> root.server-index;
+            selected(value) => {
+                root.server-selected(self.current-index);
+            }
+        }
+
         Image {
             source: @image-url("../assets/account_circle.svg");
             colorize: #b4b7bc;
             width: 22px;
             height: 22px;
             x: 40px;
-            y: 157px;
+            y: 157px + parent.mirror-shift;
         }
 
         Text {
             text: "Логин";
             x: 70px;
-            y: 158px;
+            y: 158px + parent.mirror-shift;
             color: #b4b7bc;
             font-size: 18px;
             font-weight: 900;
@@ -545,13 +585,14 @@ export component AppWindow inherits Window {
 
         login-input := LineEdit {
             x: 40px;
-            y: 188px;
+            y: 188px + parent.mirror-shift;
             width: parent.width - 80px;
             height: 66px;
 	            font-size: 20px;
 	            enabled: !root.is-loading && !root.is-authenticated;
             text <=> root.login-value;
             placeholder-text: "";
+            accepted(_) => { password-input.focus(); }
         }
 
         Image {
@@ -560,13 +601,13 @@ export component AppWindow inherits Window {
             width: 22px;
             height: 22px;
             x: 40px;
-            y: 277px;
+            y: 277px + parent.mirror-shift;
         }
 
         Text {
             text: "Пароль";
             x: 70px;
-            y: 278px;
+            y: 278px + parent.mirror-shift;
             color: #b4b7bc;
             font-size: 18px;
             font-weight: 900;
@@ -574,7 +615,7 @@ export component AppWindow inherits Window {
 
         password-input := LineEdit {
             x: 40px;
-            y: 308px;
+            y: 308px + parent.mirror-shift;
             width: parent.width - 80px;
             height: 66px;
 	            font-size: 20px;
@@ -587,20 +628,10 @@ export component AppWindow inherits Window {
             }
         }
 
-        totp-input := LineEdit {
-            x: 40px;
-            y: 0px;
-            width: 1px;
-            height: 1px;
-            opacity: 0;
-            enabled: false;
-            text <=> root.totp-value;
-        }
-
         if root.message != "" && !root.requires-totp: Text {
             text: root.message;
             x: 40px;
-            y: 454px;
+            y: 454px + parent.mirror-shift;
             width: parent.width - 80px;
             color: #ff6b6b;
             font-size: 13px;
@@ -611,7 +642,7 @@ export component AppWindow inherits Window {
 
         GoldButton {
             x: 112px;
-            y: 392px;
+            y: 392px + parent.mirror-shift;
             width: 254px;
             height: 56px;
 	            label: root.is-loading ? "ПРОВЕРКА..." : "АВТОРИЗОВАТЬСЯ";
@@ -751,6 +782,26 @@ export component AppWindow inherits Window {
                     font-size: 20px;
                     font-weight: 800;
                 }
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    DarkButton {
+                        width: 232px;
+                        label: "Discord-сервер";
+                        icon-source: @image-url("../assets/discord.svg");
+                        icon-color: white;
+                        clicked => { root.open-url("https://discord.gg/zmeJMqH7j8"); }
+                    }
+                    DarkButton {
+                        width: 232px;
+                        label: "Telegram-канал";
+                        icon-source: @image-url("../assets/telegram.svg");
+                        icon-color: white;
+                        clicked => { root.open-url("https://t.me/project_minecraft"); }
+                    }
+                }
             }
         }
 
@@ -859,8 +910,10 @@ export component AppWindow inherits Window {
                 y: parent.height - self.height - 32px;
                 width: 184px;
                 height: 46px;
-                label: "Список модов";
+                label: "Папка модов";
                 icon-source: @image-url("../assets/mods.svg");
+                enabled: root.has-profile;
+                clicked => { root.open-mods-folder-requested(); }
             }
         }
 
@@ -923,7 +976,50 @@ export component AppWindow inherits Window {
                     height: 24px;
                     colorize: #e8e4dc;
                 }
-                ta-person := TouchArea {}
+                ta-person := TouchArea { clicked => { account-popup.show(); } }
+
+                // Карточка аккаунта: логин, UUID и срок сессии. Закрывается кликом мимо.
+                account-popup := PopupWindow {
+                    x: 46px - 320px;
+                    y: 54px;
+                    width: 320px;
+                    height: 118px;
+
+                    Rectangle {
+                        background: #0c0e0efa;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #ffffff22;
+
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 7px;
+                            alignment: center;
+
+                            Text {
+                                text: root.user-login;
+                                color: #eceef1;
+                                font-size: 17px;
+                                font-weight: 900;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: "UUID: " + root.user-uuid;
+                                color: #8c8f95;
+                                font-size: 12px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                            if root.token-expires-at != "": Text {
+                                text: "Сессия до: " + root.token-expires-at;
+                                color: #8c8f95;
+                                font-size: 12px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
             }
 
             Rectangle {
@@ -1037,9 +1133,9 @@ export component AppWindow inherits Window {
             opacity: root.is-authenticated && root.active-tab == 0 ? 1.0 : 0.0;
             visible: self.opacity > 0.01;
             // при загрузке подложка расширяется влево, освобождая место под иконку
-            width: root.is-syncing ? 660px : 552px;
+            width: root.is-syncing ? 728px : 620px;
             height: 178px;
-            border-radius: 4px;
+            border-radius: 6px;
             background: #080a0aeb;
             border-color: root.is-syncing ? #9aa0a655 : #ffffff22;
             border-width: 1px;
@@ -1057,7 +1153,7 @@ export component AppWindow inherits Window {
             Rectangle {
                 x: 0px;
                 y: 0px;
-                width: parent.width - 552px;
+                width: parent.width - 620px;
                 height: parent.height;
                 clip: true;
 
@@ -1130,36 +1226,31 @@ export component AppWindow inherits Window {
             }
 
             HorizontalLayout {
-                x: parent.width - 552px;
-                width: 552px;
+                x: parent.width - 620px;
+                width: 620px;
                 height: parent.height;
-                padding-left: 28px;
+                padding-left: 32px;
                 padding-right: 28px;
+                spacing: 24px;
                 alignment: space-between;
 
                 VerticalLayout {
                     alignment: center;
-                    spacing: 16px;
+                    spacing: 12px;
+                    width: 278px;
+                    horizontal-stretch: 0;
 
-                    DarkButton {
-                        width: 188px;
-                        height: 48px;
-                        label: "НАСТРОЙКИ";
-                        icon-source: @image-url("../assets/settings.svg");
-                        clicked => { root.settings-requested(); }
-                    }
-
-                    VerticalLayout {
-                        spacing: 9px;
                         HorizontalLayout {
                             spacing: 8px;
-                            Text { width: 64px; text: "Версия:"; color: #989ca2; font-size: 14px; font-weight: 800; }
-                            Text { text: root.selected-profile-version; color: #d7dadf; font-size: 14px; font-weight: 800; overflow: elide; }
+                            Text { width: 84px; text: "Версия:"; color: #989ca2; font-size: 14px; font-weight: 800; }
+                            Text { width: 186px; text: root.selected-profile-version; color: #d7dadf; font-size: 14px; font-weight: 800; horizontal-alignment: left; overflow: elide; }
                         }
                         HorizontalLayout {
                             spacing: 8px;
-                            Text { width: 64px; text: "Статус:"; color: #989ca2; font-size: 14px; font-weight: 800; }
+                            Text { width: 84px; text: "Статус:"; color: #989ca2; font-size: 14px; font-weight: 800; }
                             Text {
+                                width: 186px;
+                                horizontal-alignment: left;
                                 text: root.is-syncing || play-card.dl-error
                                     ? root.download-phase
                                     : root.profile-status;
@@ -1175,8 +1266,10 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 8px;
-                            Text { width: 64px; text: root.is-syncing ? "Прогресс:" : (play-card.dl-error ? "Причина:" : "Сервер:"); color: #989ca2; font-size: 14px; font-weight: 800; }
+                            Text { width: 84px; text: root.is-syncing ? "Прогресс:" : (play-card.dl-error ? "Причина:" : "Клиент:"); color: #989ca2; font-size: 14px; font-weight: 800; }
                             Text {
+                                width: 186px;
+                                horizontal-alignment: left;
                                 text: root.is-syncing
                                     ? "\{round(root.download-progress * 100)}% • " + root.download-counter
                                     : (play-card.dl-error
@@ -1192,19 +1285,33 @@ export component AppWindow inherits Window {
                                 animate color { duration: 850ms; easing: ease-in-out-sine; }
                             }
                         }
-                    }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { width: 84px; text: "Наиграно:"; color: #989ca2; font-size: 14px; font-weight: 800; }
+                            Text { width: 186px; text: root.playtime-total; color: #d7dadf; font-size: 14px; font-weight: 800; horizontal-alignment: left; overflow: elide; }
+                        }
                 }
 
                 VerticalLayout {
                     alignment: center;
+                    spacing: 10px;
+
                     PlayButton {
                         width: 258px;
-                        height: 76px;
+                        height: 72px;
                         label: root.update-mandatory ? "ТРЕБУЕТСЯ ОБНОВЛЕНИЕ"
                             : (root.is-syncing ? "ЗАГРУЗКА..." : "ИГРАТЬ");
                         icon-source: @image-url("../assets/play.svg");
                         enabled: root.has-profile && !root.is-syncing && !root.update-mandatory;
                         clicked => { root.play-requested(); }
+                    }
+
+                    DarkButton {
+                        width: 258px;
+                        height: 40px;
+                        label: "НАСТРОЙКИ";
+                        icon-source: @image-url("../assets/settings.svg");
+                        clicked => { root.settings-requested(); }
                     }
                 }
             }
@@ -1240,6 +1347,20 @@ export component AppWindow inherits Window {
         settings-backdrop := TouchArea {
             enabled: root.settings-visible && root.is-authenticated;
             clicked => { root.settings-close-requested(); }
+        }
+
+        // Esc закрывает настройки; фокус выставляется при открытии (см. changed ниже).
+        settings-esc := FocusScope {
+            width: 0px;
+            height: 0px;
+            enabled: root.settings-visible && root.is-authenticated;
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.settings-close-requested();
+                    return accept;
+                }
+                reject
+            }
         }
 
         settings-card := Rectangle {
@@ -1803,13 +1924,14 @@ export component AppWindow inherits Window {
     }
     }
 
-    // Плавающий баннер необязательного автообновления (нижний правый угол).
+    // Плавающий баннер необязательного автообновления (верхний правый угол,
+    // под шапкой — внизу справа он перекрывал кнопку «Играть»).
     // Обязательное обновление показывается полноэкранным оверлеем ниже.
     if (root.update-status != "" || root.update-ready) && !root.update-mandatory: Rectangle {
         width: 450px;
         height: 76px;
         x: parent.width - self.width - 20px;
-        y: parent.height - self.height - 20px;
+        y: root.is-authenticated ? 118px : 20px;
         background: #14141cf2;
         border-radius: 16px;
         border-width: 1px;

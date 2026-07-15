@@ -154,7 +154,7 @@ pub fn spawn_ingame_scan(
     guard: &LaunchGuard,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
-    let api_url = config.api_url.clone();
+    let api_url = config.api_url();
     let launch_token = guard.launch_token.clone();
     let blacklist = guard.blacklist.clone();
     thread::spawn(move || {

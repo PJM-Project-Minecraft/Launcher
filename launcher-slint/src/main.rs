@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
 mod anticheat;
 mod artifacts;
@@ -36,9 +36,78 @@ const DEFAULT_MEMORY_GB: i32 = 8;
 const MIN_MEMORY_GB: i32 = 2;
 const MAX_MEMORY_GB: i32 = 64;
 
+/// Зеркала бэкенда: игрок выбирает на окне входа, если основной домен недоступен.
+/// Первым пунктом всегда идёт вшитый при сборке URL («Основной»), сюда — только
+/// дополнительные адреса. Дубликат основного URL отсеивается в `api_mirrors`.
+const EXTRA_API_MIRRORS: &[(&str, &str)] = &[
+    ("Зеркало", "https://mirror.likonchik.xyz"),
+];
+
+/// Таймаут пинга зеркала. Короткий: это подсказка в списке, а не проверка здоровья.
+const MIRROR_PING_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// URL бэкенда меняется в рантайме (выбор зеркала на окне входа), а `AppConfig`
+/// клонируется в замыкания и фоновые треды ещё на старте — поэтому ячейка общая.
 #[derive(Clone)]
 struct AppConfig {
-    api_url: String,
+    api_url: Arc<RwLock<String>>,
+}
+
+impl AppConfig {
+    fn api_url(&self) -> String {
+        self.api_url.read().unwrap().clone()
+    }
+
+    fn set_api_url(&self, url: &str) {
+        *self.api_url.write().unwrap() = url.to_string();
+    }
+}
+
+/// Список зеркал для окна входа: вшитый URL + `EXTRA_API_MIRRORS` без дублей.
+fn api_mirrors(default_url: &str) -> Vec<(String, String)> {
+    let mut mirrors = vec![("Основной".to_string(), default_url.to_string())];
+    for (name, url) in EXTRA_API_MIRRORS {
+        if *url != default_url {
+            mirrors.push((name.to_string(), url.to_string()));
+        }
+    }
+    mirrors
+}
+
+/// Индекс сохранённого зеркала. Неизвестный/отсутствующий URL (зеркало выпилили
+/// из сборки) → основной, чтобы лаунчер не залипал на мёртвом адресе.
+fn mirror_index(mirrors: &[(String, String)], saved: Option<&str>) -> usize {
+    saved
+        .and_then(|url| mirrors.iter().position(|(_, m)| m == url))
+        .unwrap_or(0)
+}
+
+/// Пинг зеркала: время ответа публичного `/api/policy`. None — сеть/не-2xx, т.е.
+/// зеркало непригодно (домен режется, прокси лежит).
+///
+/// Не `/health`: WAF-правило CF пропускает без челленджа только `/api/*`, а на
+/// `/health` снаружи отдаёт 403-заглушку — основной сервер вечно «недоступен».
+fn ping_mirror(url: &str) -> Option<u128> {
+    let client = Client::builder()
+        .timeout(MIRROR_PING_TIMEOUT)
+        .build()
+        .ok()?;
+    let started = Instant::now();
+    let response = client
+        .get(format!("{}/api/policy", url.trim_end_matches('/')))
+        .send()
+        .ok()?;
+    response
+        .status()
+        .is_success()
+        .then(|| started.elapsed().as_millis())
+}
+
+fn mirror_label(name: &str, ping_ms: Option<u128>) -> String {
+    match ping_ms {
+        Some(ms) => format!("{name} — {ms} мс"),
+        None => format!("{name} — недоступен"),
+    }
 }
 
 /// Windows: прячет консольное окно дочернего консольного процесса (java, reg,
@@ -108,7 +177,7 @@ fn spawn_update_check(app_weak: Weak<AppWindow>, config: AppConfig) {
 }
 
 fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc<UpdateShared>) {
-    let info = match updater::check_update(&config.api_url) {
+    let info = match updater::check_update(&config.api_url()) {
         Ok(info) => info,
         // Сервер недоступен — тихо ждём следующего триггера (старт/SSE/30 мин).
         Err(_) => return,
@@ -140,7 +209,7 @@ fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc
         format!("Скачивается обновление {}…", info.latest_version),
     );
 
-    match updater::download_and_stage(&config.api_url, &info) {
+    match updater::download_and_stage(&config.api_url(), &info) {
         Ok(staged_path) => {
             if let Ok(mut staged) = shared.staged.lock() {
                 *staged = Some((info.clone(), staged_path));
@@ -386,6 +455,12 @@ struct LauncherSettings {
     use_discrete_gpu: bool,
     #[serde(default = "default_discord_rpc_enabled")]
     discord_rpc_enabled: bool,
+    /// Выбранное на окне входа зеркало бэкенда. None → «Основной».
+    #[serde(default)]
+    api_url: Option<String>,
+    /// Суммарное наигранное время (секунды), локальный счётчик этой машины.
+    #[serde(default)]
+    played_seconds: u64,
 }
 
 impl Default for LauncherSettings {
@@ -398,6 +473,8 @@ impl Default for LauncherSettings {
             memory_auto: true,
             use_discrete_gpu: true,
             discord_rpc_enabled: true,
+            api_url: None,
+            played_seconds: 0,
         }
     }
 }
@@ -443,8 +520,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let default_api_url = option_env!("LAUNCHER_DEFAULT_API_URL")
         .unwrap_or("http://127.0.0.1:8080")
         .to_string();
+    // Зеркала: env LAUNCHER_API_URL перебивает вшитый URL и становится «Основным».
+    // Выбор игрока (settings.json) применяется, только если такое зеркало ещё есть.
+    let mirrors = api_mirrors(&std::env::var("LAUNCHER_API_URL").unwrap_or(default_api_url));
+    let saved_mirror = load_settings().unwrap_or_default().api_url;
+    let mirror_idx = mirror_index(&mirrors, saved_mirror.as_deref());
     let config = AppConfig {
-        api_url: std::env::var("LAUNCHER_API_URL").unwrap_or(default_api_url),
+        api_url: Arc::new(RwLock::new(mirrors[mirror_idx].1.clone())),
     };
 
     // Discord Rich Presence (опционально). Client ID — из env при сборке или
@@ -458,7 +540,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // версию при старте (до логина — эндпоинт публичный).
     updater::cleanup_leftovers();
     app.window().set_size(slint::LogicalSize::new(1152.0, 720.0));
-    app.set_api_url(config.api_url.clone().into());
+    app.set_api_url(config.api_url().into());
+    register_mirror_handler(&app, config.clone(), mirrors, mirror_idx);
     app.set_message("Готов к входу.".into());
     app.set_profile_status("Offline".into());
     app.set_selected_profile_name(SharedString::default());
@@ -748,6 +831,32 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
         }
     });
 
+    // «Папка модов» в сайдбаре: mods внутри files_root выбранного профиля.
+    let mods_app = app.as_weak();
+    let mods_state = state.clone();
+    app.on_open_mods_folder_requested(move || {
+        if let Some(app) = mods_app.upgrade() {
+            let folder = mods_state
+                .lock()
+                .map_err(|_| "Не удалось прочитать состояние лаунчера.".to_string())
+                .and_then(|state| install_folder_for_state(&state).map(|root| root.join("mods")));
+
+            match folder {
+                Ok(path) => {
+                    if let Err(message) = fs::create_dir_all(&path)
+                        .map_err(|_| "Не удалось создать папку модов.".to_string())
+                        .and_then(|_| open_folder(&path))
+                    {
+                        app.set_message(message.into());
+                        return;
+                    }
+                    app.set_message("Папка модов открыта.".into());
+                }
+                Err(message) => app.set_message(message.into()),
+            }
+        }
+    });
+
     let folder_app = app.as_weak();
     app.on_open_install_folder_requested(move || {
         if let Some(app) = folder_app.upgrade() {
@@ -872,6 +981,8 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                             app.set_download_progress(1.0);
                             app.set_download_panel_visible(false);
                             app.set_message(message.into());
+                            let played = load_settings().unwrap_or_default().played_seconds;
+                            app.set_playtime_total(format_playtime(played).into());
                         }
                         Err(message) => {
                             if let Some(alert) = message.strip_prefix(anticheat::kick::KICK_PREFIX) {
@@ -1052,7 +1163,7 @@ fn apply_session(
     app.set_user_login(session.user.login.clone().into());
     app.set_user_uuid(session.user.provider_uuid.into());
     app.set_is_slim(session.user.is_slim);
-    app.set_token_expires_at(session.expires_at.into());
+    app.set_token_expires_at(format_session_expiry(&session.expires_at).into());
     app.set_password_value(SharedString::default());
     app.set_totp_value(SharedString::default());
     app.set_message(session.message.into());
@@ -1171,7 +1282,7 @@ fn stream_profile_events(
     };
     let url = format!(
         "{}/api/profiles/events",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     let response = match client
         .get(url)
@@ -1278,7 +1389,7 @@ fn login_to_backend(
 ) -> Result<LoginResponse, LoginError> {
     let client = http_client().map_err(|_| LoginError::unavailable())?;
 
-    let url = format!("{}/api/auth/login", config.api_url.trim_end_matches('/'));
+    let url = format!("{}/api/auth/login", config.api_url().trim_end_matches('/'));
     let response = client
         .post(url)
         .json(&LoginRequest {
@@ -1317,7 +1428,7 @@ fn login_to_backend(
 fn current_user(config: &AppConfig, token: &str) -> Result<AuthUser, String> {
     let client = http_client()?;
     let response = client
-        .get(format!("{}/api/auth/me", config.api_url.trim_end_matches('/')))
+        .get(format!("{}/api/auth/me", config.api_url().trim_end_matches('/')))
         .bearer_auth(token)
         .send()
         .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
@@ -1327,7 +1438,7 @@ fn current_user(config: &AppConfig, token: &str) -> Result<AuthUser, String> {
 fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>, String> {
     let client = http_client()?;
     let response = client
-        .get(format!("{}/api/profiles", config.api_url.trim_end_matches('/')))
+        .get(format!("{}/api/profiles", config.api_url().trim_end_matches('/')))
         .bearer_auth(token)
         .send()
         .map_err(|_| "Не удалось получить профили проекта.".to_string())?;
@@ -1338,7 +1449,7 @@ fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>
 fn fetch_policy(config: &AppConfig) -> Result<PolicyInfo, String> {
     let client = http_client()?;
     let response = client
-        .get(format!("{}/api/policy", config.api_url.trim_end_matches('/')))
+        .get(format!("{}/api/policy", config.api_url().trim_end_matches('/')))
         .send()
         .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
     parse_json_response(response, "Backend вернул некорректную политику")
@@ -1350,7 +1461,7 @@ fn accept_policy(config: &AppConfig, token: &str, version: i32) -> Result<(), St
     let response = client
         .post(format!(
             "{}/api/policy/accept",
-            config.api_url.trim_end_matches('/')
+            config.api_url().trim_end_matches('/')
         ))
         .bearer_auth(token)
         .json(&serde_json::json!({ "version": version }))
@@ -1367,7 +1478,7 @@ fn fetch_news(config: &AppConfig, token: &str) -> Vec<NewsSummary> {
         Ok(client) => client,
         Err(_) => return Vec::new(),
     };
-    let url = format!("{}/api/news?limit=20", config.api_url.trim_end_matches('/'));
+    let url = format!("{}/api/news?limit=20", config.api_url().trim_end_matches('/'));
     let response = match client.get(url).bearer_auth(token).send() {
         Ok(response) => response,
         Err(_) => return Vec::new(),
@@ -1407,7 +1518,7 @@ fn fetch_yggdrasil_session(
     let client = http_client()?;
     let url = format!(
         "{}/api/yggdrasil/launcher-session",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     // nonce связывает игровую сессию с launch-token античита (confirm пометит её Verified).
     let response = client
@@ -1466,7 +1577,7 @@ fn ensure_authlib_injector(
     let path = dir.join("authlib-injector.jar");
     let url = format!(
         "{}/api/yggdrasil/authlib-injector.jar",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     let client = download_client()?;
     artifacts::ensure(&client, &url, &path, &dir, expected_sha).map_err(|e| e.message())
@@ -1480,7 +1591,7 @@ fn invalidate_yggdrasil_session(config: &AppConfig, access_token: &str) {
     };
     let url = format!(
         "{}/api/yggdrasil/authserver/invalidate",
-        config.api_url.trim_end_matches('/')
+        config.api_url().trim_end_matches('/')
     );
     let _ = client
         .post(url)
@@ -1493,7 +1604,7 @@ fn fetch_manifest(config: &AppConfig, token: &str, profile_id: &str) -> Result<M
     let response = client
         .get(format!(
             "{}/api/profiles/{}/manifest",
-            config.api_url.trim_end_matches('/'),
+            config.api_url().trim_end_matches('/'),
             profile_id
         ))
         .bearer_auth(token)
@@ -1508,7 +1619,13 @@ fn parse_json_response<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, String> {
     let status = response.status();
     if status.is_success() {
-        return response.json::<T>().map_err(|_| fallback.to_string());
+        // Причину не глотаем: reqwest сюда же отдаёт обрыв связи и таймаут посреди
+        // чтения тела (у http_client 30с на весь запрос, а manifest — самый крупный
+        // ответ API). Без неё «некорректный manifest» врёт про причину и уводит
+        // диагностику в сторону разбора JSON.
+        return response
+            .json::<T>()
+            .map_err(|err| format!("{fallback}: {err}"));
     }
 
     let error = response.json::<ErrorResponse>().unwrap_or(ErrorResponse {
@@ -2103,7 +2220,7 @@ fn launch_profile(
     if let Some(injector) = ensure_authlib_injector(config, guard.authlib_sha())? {
         let ygg_url = format!(
             "{}/api/v1/integrations/authlib/minecraft",
-            config.api_url.trim_end_matches('/')
+            config.api_url().trim_end_matches('/')
         );
         jvm_args.insert(
             0,
@@ -2182,7 +2299,7 @@ fn launch_profile(
     // игрока выкидывало «Недействительной сессией» при реконнекте.
     let keepalive_stop = Arc::new(AtomicBool::new(false));
     let keepalive_handle = {
-        let api_url = config.api_url.clone();
+        let api_url = config.api_url();
         let token = token.to_string();
         let nonce = guard.nonce().to_string();
         let stop = keepalive_stop.clone();
@@ -2196,7 +2313,7 @@ fn launch_profile(
     // Опрос скриншот-запросов: пока игра запущена, лаунчер проверяет, не запросил ли
     // админ скриншот экрана. Делит stop-флаг с keepalive — гаснет на закрытии игры.
     let screenshot_handle = anticheat::screenshot::spawn_screenshot_loop(
-        &config.api_url,
+        &config.api_url(),
         guard.launch_token(),
         keepalive_stop.clone(),
     );
@@ -2212,6 +2329,14 @@ fn launch_profile(
     let _ = ingame_scan_handle.join();
     let _ = screenshot_handle.join();
     invalidate_yggdrasil_session(config, &session.access_token);
+
+    // Наиграно: копим только реальные сессии, краш на старте (быстрый выход с
+    // ошибкой) не считаем. Best-effort — сбой записи не должен ломать выход из игры.
+    if !is_fast_launch_failure(elapsed, status.success()) {
+        let mut settings = load_settings().unwrap_or_default();
+        settings.played_seconds = settings.played_seconds.saturating_add(elapsed.as_secs());
+        let _ = save_settings(&settings);
+    }
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о
     // попытке инжекта вместо обычного сообщения о закрытии.
@@ -2581,6 +2706,52 @@ fn selected_profile(state: &RuntimeState) -> Option<ProfileSummary> {
         .or_else(|| state.profiles.first().cloned())
 }
 
+/// Пинг зеркал в фоне: подписи в списке обновляются по мере ответов, поэтому
+/// окно входа не ждёт таймаут мёртвого зеркала. Строки правятся на месте
+/// (`set_row_data`) — замена модели сбросила бы выбор игрока на первый пункт.
+fn spawn_mirror_ping(app_weak: Weak<AppWindow>, mirrors: Vec<(String, String)>) {
+    if mirrors.len() < 2 {
+        return; // селектор скрыт — пинговать нечего
+    }
+    thread::spawn(move || {
+        for (index, (name, url)) in mirrors.iter().enumerate() {
+            let label = mirror_label(name, ping_mirror(url));
+            let _ = app_weak.upgrade_in_event_loop(move |app| {
+                app.get_server_names().set_row_data(index, label.into());
+            });
+        }
+    });
+}
+
+/// Выбор зеркала бэкенда на окне входа. Переключает общий `api_url` (его читают
+/// все запросы и фоновые треды) и запоминает выбор до следующего запуска.
+fn register_mirror_handler(
+    app: &AppWindow,
+    config: AppConfig,
+    mirrors: Vec<(String, String)>,
+    current: usize,
+) {
+    let names: Vec<SharedString> = mirrors.iter().map(|(n, _)| n.into()).collect();
+    app.set_server_names(ModelRc::new(VecModel::from(names)));
+    app.set_server_index(current as i32);
+    spawn_mirror_ping(app.as_weak(), mirrors.clone());
+
+    let app_weak = app.as_weak();
+    app.on_server_selected(move |index| {
+        let Some((name, url)) = mirrors.get(index.max(0) as usize) else {
+            return;
+        };
+        config.set_api_url(url);
+        let mut settings = load_settings().unwrap_or_default();
+        settings.api_url = Some(url.clone());
+        let _ = save_settings(&settings);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_api_url(url.into());
+            app.set_message(format!("Сервер: {name}").into());
+        }
+    });
+}
+
 fn apply_launcher_settings(app: &AppWindow, settings: &LauncherSettings) {
     let memory_gb = effective_memory_gb(settings);
     app.set_memory_gb(memory_gb);
@@ -2599,6 +2770,27 @@ fn apply_launcher_settings(app: &AppWindow, settings: &LauncherSettings) {
     }
     app.set_use_discrete_gpu(settings.use_discrete_gpu);
     app.set_discord_rpc_enabled(settings.discord_rpc_enabled);
+    app.set_playtime_total(format_playtime(settings.played_seconds).into());
+}
+
+/// Наигранное время в человекочитаемом виде: "12 ч 34 мин", "45 мин", "< 1 мин".
+fn format_playtime(secs: u64) -> String {
+    let hours = secs / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    match (hours, minutes) {
+        (0, 0) => "< 1 мин".to_string(),
+        (0, m) => format!("{} мин", m),
+        (h, 0) => format!("{} ч", h),
+        (h, m) => format!("{} ч {} мин", h, m),
+    }
+}
+
+// «2026-07-23T10:11:12+03:00» → «2026-07-23 10:11» для карточки аккаунта.
+fn format_session_expiry(raw: &str) -> String {
+    match raw.split_once('T') {
+        Some((date, time)) => format!("{} {}", date, time.get(..5).unwrap_or("")),
+        None => raw.to_string(),
+    }
 }
 
 fn apply_install_folder_label(app: &AppWindow, state: &Arc<Mutex<RuntimeState>>) {
@@ -3356,7 +3548,7 @@ fn absolute_api_url(config: &AppConfig, value: &str) -> String {
     } else {
         format!(
             "{}/{}",
-            config.api_url.trim_end_matches('/'),
+            config.api_url().trim_end_matches('/'),
             value.trim_start_matches('/')
         )
     }
@@ -3402,6 +3594,38 @@ impl LoginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playtime_formats_by_magnitude() {
+        assert_eq!(format_playtime(0), "< 1 мин");
+        assert_eq!(format_playtime(59), "< 1 мин");
+        assert_eq!(format_playtime(45 * 60), "45 мин");
+        assert_eq!(format_playtime(3_600), "1 ч");
+        assert_eq!(format_playtime(12 * 3_600 + 34 * 60), "12 ч 34 мин");
+    }
+
+    #[test]
+    fn saved_mirror_resolves_or_falls_back_to_default() {
+        let mirrors = api_mirrors("https://main.example");
+        assert_eq!(mirrors[0].1, "https://main.example");
+        // Нет сохранённого выбора → основной.
+        assert_eq!(mirror_index(&mirrors, None), 0);
+        assert_eq!(mirror_index(&mirrors, Some("https://main.example")), 0);
+        // Зеркало, которого больше нет в сборке → основной, а не мёртвый адрес.
+        assert_eq!(mirror_index(&mirrors, Some("https://gone.example")), 0);
+
+        let mirrors = vec![
+            ("Основной".to_string(), "https://main.example".to_string()),
+            ("Зеркало".to_string(), "https://mirror.example".to_string()),
+        ];
+        assert_eq!(mirror_index(&mirrors, Some("https://mirror.example")), 1);
+    }
+
+    #[test]
+    fn mirror_label_shows_ping_or_unavailable() {
+        assert_eq!(mirror_label("Основной", Some(42)), "Основной — 42 мс");
+        assert_eq!(mirror_label("Зеркало", None), "Зеркало — недоступен");
+    }
 
     #[test]
     fn fast_failure_only_on_quick_nonzero_exit() {

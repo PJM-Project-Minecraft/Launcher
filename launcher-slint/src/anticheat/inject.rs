@@ -76,8 +76,14 @@ pub fn build(
     if let Some(agent) = agents::ensure_agent(config, agent_sha)? {
         let kick = agent.with_file_name(KICK_FLAG);
         let _ = fs::remove_file(&kick); // свежий старт
-        let api_url = config.api_url.trim_end_matches('/');
-        args.extend(agent_args(token, api_url, &kick, challenge, &agent));
+        let api_url = config.api_url();
+        args.extend(agent_args(
+            token,
+            api_url.trim_end_matches('/'),
+            &kick,
+            challenge,
+            &agent,
+        ));
         kick_file = Some(kick);
     }
 
