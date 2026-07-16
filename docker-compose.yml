@@ -35,6 +35,10 @@ services:
       ANTICHEAT_AUTO_BAN: "${ANTICHEAT_AUTO_BAN:-false}"
       ANTICHEAT_REQUIRE_ATTESTATION: "${ANTICHEAT_REQUIRE_ATTESTATION:-false}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}"
+      # База публичного бакета с файлами сборок. Пусто (dev) → файлы качаются с бэкенда.
+      # Включать только когда mandatory-версия лаунчера >= 0.4.1: до неё лаунчер слал
+      # bearer на любой хост, а S3 отвечает 400 на чужой Authorization.
+      PROFILE_CDN_BASE: "${PROFILE_CDN_BASE:-}"
       # prod (.env на VPS): APP_ENV=production — сервер откажется стартовать с дев-секретами.
       APP_ENV: "${APP_ENV:-development}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
