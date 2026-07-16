@@ -1785,9 +1785,14 @@ fn download_one_file(
     }
 
     let url = absolute_api_url(config, &file.download_url);
-    let mut response = client
-        .get(url)
-        .bearer_auth(token)
+    let mut request = client.get(&url);
+    // JWT уходит только на свой бэкенд. Манифест может указывать файл на публичное
+    // зеркало (S3-бакет) — туда токен слать и незачем, и вредно: S3 отвечает 400 на
+    // Authorization, который не является его подписью.
+    if is_api_url(config, &url) {
+        request = request.bearer_auth(token);
+    }
+    let mut response = request
         .send()
         .map_err(|_| format!("Не удалось скачать {}", file.path))?;
     if !response.status().is_success() {
@@ -3554,6 +3559,16 @@ fn absolute_api_url(config: &AppConfig, value: &str) -> String {
     }
 }
 
+/// Ведёт ли absolute-URL на выбранный бэкенд (а не на публичное зеркало файлов).
+/// Граница — `/` после базы: без неё `https://api.example.com.evil.tld` прошёл бы
+/// как «свой» и получил бы JWT игрока.
+fn is_api_url(config: &AppConfig, url: &str) -> bool {
+    let api_url = config.api_url();
+    let base = api_url.trim_end_matches('/');
+    url.strip_prefix(base)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 fn os_value<'a>(windows: &'a str, linux: &'a str, macos: &'a str) -> &'a str {
     if cfg!(target_os = "windows") {
         windows
@@ -3594,6 +3609,20 @@ impl LoginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_goes_only_to_own_backend() {
+        let config = AppConfig {
+            api_url: Arc::new(RwLock::new("https://launcher.likonchik.xyz".to_string())),
+        };
+
+        assert!(is_api_url(&config, "https://launcher.likonchik.xyz/api/profiles/1/files/mods/a.jar"));
+        assert!(is_api_url(&config, "https://launcher.likonchik.xyz"));
+        // Файлы с бакета — без токена.
+        assert!(!is_api_url(&config, "https://pjm-files.s3.cloud.ru/vanilla/files/mods/a.jar"));
+        // Префикс базы, но чужой хост — токен туда уйти не должен.
+        assert!(!is_api_url(&config, "https://launcher.likonchik.xyz.evil.tld/api/steal"));
+    }
 
     #[test]
     fn playtime_formats_by_magnitude() {

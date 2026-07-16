@@ -21,6 +21,11 @@ type Config struct {
 	AllowedOrigins      []string
 	AdminLogins         []string
 	ProfileStorageRoot  string
+	// ProfileCDNBase — база публичного зеркала файлов профилей (бакет S3).
+	// Задан → манифест отдаёт absolute download_url на бакет, трафик сборок идёт мимо VPS.
+	// Пусто → файлы качаются с бэкенда по относительному /api/profiles/... (дефолт).
+	// Раскладка ключей в бакете = раскладка storage: <slug>/files/<path>.
+	ProfileCDNBase      string
 	LauncherReleaseRoot string
 	ScreenshotStorageRoot string
 	TelegramChannel     string
@@ -69,6 +74,7 @@ func Load() Config {
 			"PROFILE_STORAGE_ROOT",
 			filepath.Join("storage", "profiles"),
 		),
+		ProfileCDNBase: strings.TrimRight(env("PROFILE_CDN_BASE", ""), "/"),
 		LauncherReleaseRoot: env(
 			"LAUNCHER_RELEASE_ROOT",
 			filepath.Join("storage", "releases"),

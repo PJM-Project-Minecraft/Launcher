@@ -24,6 +24,8 @@ import (
 type Service struct {
 	db          *gorm.DB
 	storageRoot string
+	// cdnBase — см. config.ProfileCDNBase. Пусто → download_url остаётся относительным на бэкенд.
+	cdnBase string
 }
 
 var defaultPreservePaths = []string{
@@ -137,8 +139,8 @@ type FileDownload struct {
 	File         models.GameFile
 }
 
-func NewService(db *gorm.DB, storageRoot string) Service {
-	return Service{db: db, storageRoot: storageRoot}
+func NewService(db *gorm.DB, storageRoot string, cdnBase string) Service {
+	return Service{db: db, storageRoot: storageRoot, cdnBase: strings.TrimRight(cdnBase, "/")}
 }
 
 func (s Service) ListActive(ctx context.Context) ([]ProfileSummary, error) {
@@ -461,7 +463,7 @@ func (s Service) Manifest(ctx context.Context, id string) (Manifest, error) {
 			ID:          file.ID,
 			Name:        file.Name,
 			Path:        file.Path,
-			DownloadURL: "/api/profiles/" + profile.ID + "/files/" + escapePath(file.Path),
+			DownloadURL: s.downloadURL(profile, file.Path),
 			HashSHA256:  file.HashSHA256,
 			Size:        file.Size,
 			FileType:    file.FileType,
@@ -921,6 +923,17 @@ func safeJoin(root, rel string) (string, error) {
 		return "", errors.New("unsafe path")
 	}
 	return pathAbs, nil
+}
+
+// downloadURL — откуда лаунчер тянет файл профиля. С заданным cdnBase это прямая
+// ссылка на бакет (ключ = <slug>/files/<path>, как в storage), иначе — путь на бэкенд.
+// Целостность в обоих случаях держится на SHA-256 из этого же манифеста, который
+// лаунчер получает по JWT с бэкенда, — подмена файла в бакете ломает проверку хэша.
+func (s Service) downloadURL(profile models.Profile, path string) string {
+	if s.cdnBase == "" {
+		return "/api/profiles/" + profile.ID + "/files/" + escapePath(path)
+	}
+	return s.cdnBase + "/" + escapePath(profile.Slug) + "/files/" + escapePath(path)
 }
 
 func escapePath(path string) string {

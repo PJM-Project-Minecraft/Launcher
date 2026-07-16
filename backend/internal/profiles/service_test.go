@@ -317,8 +317,22 @@ func TestPreservePathsRejectUnsafeAndReservedPaths(t *testing.T) {
 	}
 }
 
+func TestDownloadURLUsesCDNWhenConfigured(t *testing.T) {
+	profile := models.Profile{ID: "p1", Slug: "project-test"}
+
+	backend := NewService(nil, t.TempDir(), "")
+	if got := backend.downloadURL(profile, "mods/my mod.jar"); got != "/api/profiles/p1/files/mods/my%20mod.jar" {
+		t.Fatalf("downloadURL() without CDN = %q", got)
+	}
+
+	cdn := NewService(nil, t.TempDir(), "https://pjm-files.s3.cloud.ru/")
+	if got := cdn.downloadURL(profile, "mods/my mod.jar"); got != "https://pjm-files.s3.cloud.ru/project-test/files/mods/my%20mod.jar" {
+		t.Fatalf("downloadURL() with CDN = %q", got)
+	}
+}
+
 func TestClientPreparedAcceptsInstalledNeoForgeVersionJSON(t *testing.T) {
-	service := NewService(nil, t.TempDir())
+	service := NewService(nil, t.TempDir(), "")
 	profile := models.Profile{
 		Name:          "Project Test",
 		Slug:          "project-test",
@@ -443,7 +457,7 @@ func newTestService(t *testing.T) Service {
 	if err := db.AutoMigrate(&models.Profile{}, &models.GameFile{}); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)
 	}
-	return NewService(db, t.TempDir())
+	return NewService(db, t.TempDir(), "")
 }
 
 func writeTestFile(t *testing.T, path string, data string) {

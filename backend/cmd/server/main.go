@@ -109,7 +109,7 @@ func main() {
 	policy.NewHandler(db).RegisterRoutes(app, authService.RequireAuth(), auth.CurrentUser)
 	adminapi.NewHandler(db).RegisterRoutes(app, authService.RequireAuth())
 	profilesBroker := events.NewBroker()
-	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot), profilesBroker).
+	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot, cfg.ProfileCDNBase), profilesBroker).
 		RegisterRoutes(app, authService.RequireAuth())
 	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot)
 	launcherrelease.SetLogger(slog.Warn)
