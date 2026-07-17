@@ -284,7 +284,7 @@ func renderDownloadPage(cards []platformCard, osDetected bool) string {
 
 	b.WriteString(`<div class="note">Вход в лаунчер — по <b>учётной записи сайта</b>. ` +
 		`Создать аккаунт и привязать его можно в Telegram-боте проекта.</div>`)
-	b.WriteString(`<footer><a href="/privacy">Политика конфиденциальности</a></footer>`)
+	b.WriteString(`<footer><a href="/rules">Правила сервера</a> · <a href="/privacy">Политика конфиденциальности</a></footer>`)
 	b.WriteString(`</main></body></html>`)
 	return b.String()
 }

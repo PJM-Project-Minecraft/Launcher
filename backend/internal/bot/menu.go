@@ -43,6 +43,7 @@ type menuView struct {
 	Tagline         string
 	DonateURL       string
 	LauncherURL     string
+	RulesURL        string
 	HasLauncherFile bool
 	// LauncherLinux / LauncherWindows — последний активный релиз под платформу
 	// (nil — релиза нет). Когда хотя бы один есть, в разделе «Лаунчер»
@@ -89,10 +90,12 @@ func buildHomeScreen(v menuView, notice string) (string, map[string]any) {
 			"🔑 <b>Войти</b> — учётка уже есть\n" +
 			"📋 <b>Регистрация</b> — создать новую\n\n" +
 			"<i>Всё управление — кнопками ниже 👇</i>")
-		return b.String(), telegram.InlineMarkup(
-			[]telegram.InlineBtn{{Text: "🔑 Войти", Data: cbLogin}, {Text: "📋 Регистрация", Data: cbRegister}},
-			[]telegram.InlineBtn{{Text: "💎 Донат", Data: cbDonate}, {Text: "⬇ Лаунчер", Data: cbLauncher}},
-		)
+		rows := [][]telegram.InlineBtn{
+			{{Text: "🔑 Войти", Data: cbLogin}, {Text: "📋 Регистрация", Data: cbRegister}},
+			{{Text: "💎 Донат", Data: cbDonate}, {Text: "⬇ Лаунчер", Data: cbLauncher}},
+		}
+		rows = appendRulesRow(rows, v.RulesURL)
+		return b.String(), telegram.InlineMarkup(rows...)
 	}
 
 	totp := "❌ выключена"
@@ -109,10 +112,20 @@ func buildHomeScreen(v menuView, notice string) (string, map[string]any) {
 		{{Text: "📧 Email", Data: cbEmail}, {Text: "🛡 2FA", Data: cb2FA}},
 		{{Text: "💎 Донат", Data: cbDonate}, {Text: "⬇ Лаунчер", Data: cbLauncher}},
 	}
+	rows = appendRulesRow(rows, v.RulesURL)
 	if v.Admin {
 		rows = append(rows, []telegram.InlineBtn{{Text: "🛠 Админка", Data: cbAdmin}})
 	}
 	return b.String(), telegram.InlineMarkup(rows...)
+}
+
+// appendRulesRow — URL-кнопка правил сервера. Без PUBLIC_BASE_URL кнопка
+// выпадает (Telegram отклоняет сообщение с невалидным URL — BUTTON_URL_INVALID).
+func appendRulesRow(rows [][]telegram.InlineBtn, rulesURL string) [][]telegram.InlineBtn {
+	if strings.HasPrefix(rulesURL, "http://") || strings.HasPrefix(rulesURL, "https://") {
+		rows = append(rows, []telegram.InlineBtn{{Text: "📜 Правила сервера", URL: rulesURL}})
+	}
+	return rows
 }
 
 // buildProfileScreen — карточка профиля (только для привязанных; guard в диспетчере).
@@ -287,6 +300,10 @@ func (s *Service) policyURL() string {
 	return strings.TrimRight(s.Cfg.PublicOrigin, "/") + "/privacy"
 }
 
+func (s *Service) rulesURL() string {
+	return strings.TrimRight(s.Cfg.PublicOrigin, "/") + "/rules"
+}
+
 // policyGateText — гейт для текстовых сценариев привязанного пользователя:
 // если согласия нет, шлёт экран политики новым меню-сообщением и возвращает true.
 func (s *Service) policyGateText(chatID, telegramUID int64) (bool, error) {
@@ -372,6 +389,7 @@ func (s *Service) menuViewFor(telegramUID int64) (menuView, error) {
 		Tagline:         s.Cfg.BrandTagline,
 		DonateURL:       s.Cfg.DonateShopURL,
 		LauncherURL:     s.Cfg.LauncherDirectDownloadURL(),
+		RulesURL:        s.rulesURL(),
 		HasLauncherFile: s.launcherExePath() != "",
 		LauncherLinux:   s.latestLauncherInfo("linux-x64"),
 		LauncherWindows: s.latestLauncherInfo("windows-x64"),

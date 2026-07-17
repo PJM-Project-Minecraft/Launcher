@@ -174,7 +174,8 @@ func renderPage(title, markdown string) []byte {
 		`</header><article class="doc">`)
 	page.Write(body.Bytes())
 	page.WriteString(`</article>` +
-		`<footer>Project Minecraft · <a href="/download">Скачать лаунчер</a></footer>` +
+		`<footer>Project Minecraft · <a href="/download">Скачать лаунчер</a> · ` +
+		`<a href="/rules">Правила сервера</a> · <a href="/privacy">Политика конфиденциальности</a></footer>` +
 		`</main></body></html>`)
 	return page.Bytes()
 }
