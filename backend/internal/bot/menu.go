@@ -29,6 +29,7 @@ const (
 	cbLogin           = "m:login"
 	cbRegister        = "m:register"
 	cbAdmin           = "m:admin"
+	cbSupport         = "m:support"
 	cbPolicyAccept    = "m:policy:ok"
 	cbPolicyRegAccept = "m:policy:reg"
 )
@@ -111,6 +112,7 @@ func buildHomeScreen(v menuView, notice string) (string, map[string]any) {
 		{{Text: "👤 Профиль", Data: cbProfile}, {Text: "🔑 Пароль", Data: cbPwd}},
 		{{Text: "📧 Email", Data: cbEmail}, {Text: "🛡 2FA", Data: cb2FA}},
 		{{Text: "💎 Донат", Data: cbDonate}, {Text: "⬇ Лаунчер", Data: cbLauncher}},
+		{{Text: "🆘 Поддержка", Data: cbSupport}},
 	}
 	rows = appendRulesRow(rows, v.RulesURL)
 	if v.Admin {

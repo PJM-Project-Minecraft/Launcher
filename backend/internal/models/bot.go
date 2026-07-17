@@ -74,6 +74,26 @@ type BotPasswordReset struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Статусы тикета поддержки.
+const (
+	SupportOpen   = "open"
+	SupportClosed = "closed"
+)
+
+// BotSupportTicket — обращение игрока в поддержку через бота. Двусторонний диалог:
+// игрок пишет из меню → уведомление админам с кнопкой «Ответить»; ответ админа
+// бот доставляет в ChatID игрока. Один открытый тикет на игрока (follow-up дописывает
+// LastMessage, не плодит дубли — как BotPasswordReset).
+type BotSupportTicket struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	UserID      string    `gorm:"type:uuid;index;not null" json:"userId"`
+	ChatID      int64     `gorm:"not null" json:"chatId"` // чат игрока — куда доставлять ответы
+	Status      string    `gorm:"size:16;not null;default:open;index" json:"status"`
+	LastMessage string    `gorm:"type:text" json:"lastMessage"` // последнее сообщение игрока (для карточки админа)
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 // Session — сессии веб-аутентификации (зарезервировано, перенос из бота).
 type Session struct {
 	ID           string    `gorm:"type:uuid;primaryKey" json:"id"`

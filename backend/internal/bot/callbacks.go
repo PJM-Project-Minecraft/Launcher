@@ -29,7 +29,7 @@ func platformForCallback(data string) string {
 // Решения по заявкам (pr:*) сюда не входят: у них своя админ-проверка.
 func callbackNeedsLink(data string) bool {
 	switch data {
-	case cbProfile, cbPwd, cbPwdChange, cbPwdReset, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin:
+	case cbProfile, cbPwd, cbPwdChange, cbPwdReset, cbEmail, cb2FA, cb2FAOn, cb2FAOff, cbAdmin, cbSupport:
 		return true
 	}
 	return false
@@ -56,6 +56,10 @@ func (s *Service) HandleCallback(c tele.Context) error {
 	// Решения по заявкам на сброс пароля — отдельная админ-ветка (pr:ok:<id> / pr:no:<id>).
 	if strings.HasPrefix(data, "pr:") {
 		return s.handlePwdResetDecision(cb, chatID, telegramUID, msgID, data)
+	}
+	// Действия админа по тикетам поддержки (sup:reply:<id> / sup:close:<id>).
+	if strings.HasPrefix(data, "sup:") {
+		return s.handleSupportAction(cb, chatID, telegramUID, msgID, data)
 	}
 
 	v, err := s.menuViewFor(telegramUID)
@@ -124,6 +128,10 @@ func (s *Service) HandleCallback(c tele.Context) error {
 
 	case cbPwdReset:
 		return s.requestPwdReset(cb, chatID, msgID, v)
+
+	case cbSupport:
+		s.answerCb(cb.ID, "", false)
+		return s.beginSupportFlow(chatID, telegramUID)
 
 	case cbEmail:
 		s.answerCb(cb.ID, "", false)

@@ -125,6 +125,10 @@ func (s *Service) HandleText(c tele.Context) error {
 		return s.adminManage(chatID, telegramUserID(sender), text)
 	case repo.FlowAdminAskNewEmail:
 		return s.adminApplyEmail(chatID, telegramUserID(sender), strings.TrimSpace(text))
+	case repo.FlowSupportMsg:
+		return s.handleSupportMessage(chatID, telegramUserID(sender), text)
+	case repo.FlowSupportReply:
+		return s.handleSupportReply(chatID, telegramUserID(sender), payload, text)
 	default:
 		_ = s.notifyWarn(chatID, "Сейчас бот ждёт другой тип ответа или состояние сбилось. Попробуйте /cancel, затем /start.")
 		return nil
