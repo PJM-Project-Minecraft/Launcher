@@ -46,6 +46,8 @@ const (
 	FlowAdminAwaitPick
 	FlowAdminManaging
 	FlowAdminAskNewEmail
+	FlowSupportMsg   // игрок пишет обращение в поддержку
+	FlowSupportReply // админ пишет ответ на тикет (id тикета — в payload)
 )
 
 var flowToString = map[FlowState]string{
@@ -57,6 +59,7 @@ var flowToString = map[FlowState]string{
 	FlowTotpDisablePwd: "totp_off_pwd", FlowTotpDisableOTP: "totp_off_otp", FlowAdminMenu: "admin_menu",
 	FlowAdminSearch: "admin_search", FlowAdminAwaitPick: "admin_pick", FlowAdminManaging: "admin_manage",
 	FlowAdminAskNewEmail: "admin_mail",
+	FlowSupportMsg:       "support_msg", FlowSupportReply: "support_reply",
 }
 
 func (f FlowState) String() string {
@@ -88,6 +91,8 @@ type DialoguePayload struct {
 	PendingRegEmail    *string `json:"pending_reg_email,omitempty"`
 	PendingRegPwdHash  *string `json:"pending_reg_pwd_hash,omitempty"`
 	PendingRegOTPHash  *string `json:"pending_reg_otp_hash,omitempty"`
+
+	SupportTicketID *uint `json:"support_ticket_id,omitempty"` // тикет, на который админ пишет ответ
 }
 
 func EmptyPayload() DialoguePayload { return DialoguePayload{} }
@@ -384,6 +389,55 @@ func ListPrivilegedWithTelegram(ctx context.Context, db *gorm.DB) ([]models.User
 		Where("role IN ? AND telegram_id IS NOT NULL", []string{models.RoleAdmin, models.RoleModerator}).
 		Find(&out).Error
 	return out, err
+}
+
+// --- Тикеты поддержки ---
+
+// CreateOrAppendSupport кладёт сообщение игрока: если есть открытый тикет —
+// обновляет его LastMessage (created=false), иначе заводит новый. Дедуп как у
+// заявок на сброс пароля — один открытый диалог на игрока.
+func CreateOrAppendSupport(ctx context.Context, db *gorm.DB, userID string, chatID int64, message string) (id uint, created bool, err error) {
+	var existing models.BotSupportTicket
+	e := db.WithContext(ctx).
+		Where("user_id = ? AND status = ?", userID, models.SupportOpen).
+		First(&existing).Error
+	if e == nil {
+		existing.LastMessage = message
+		existing.UpdatedAt = time.Now().UTC()
+		if err := db.WithContext(ctx).Model(&existing).
+			Updates(map[string]any{"last_message": message, "updated_at": existing.UpdatedAt}).Error; err != nil {
+			return 0, false, err
+		}
+		return existing.ID, false, nil
+	}
+	if !errors.Is(e, gorm.ErrRecordNotFound) {
+		return 0, false, e
+	}
+	t := models.BotSupportTicket{UserID: userID, ChatID: chatID, Status: models.SupportOpen, LastMessage: message}
+	if err := db.WithContext(ctx).Create(&t).Error; err != nil {
+		return 0, false, err
+	}
+	return t.ID, true, nil
+}
+
+func GetSupportTicket(ctx context.Context, db *gorm.DB, id uint) (*models.BotSupportTicket, error) {
+	var t models.BotSupportTicket
+	err := db.WithContext(ctx).Where("id = ?", id).First(&t).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// CloseSupportTicket закрывает открытый тикет; false, если он уже закрыт.
+func CloseSupportTicket(ctx context.Context, db *gorm.DB, id uint) (bool, error) {
+	res := db.WithContext(ctx).Model(&models.BotSupportTicket{}).
+		Where("id = ? AND status = ?", id, models.SupportOpen).
+		Updates(map[string]any{"status": models.SupportClosed, "updated_at": time.Now().UTC()})
+	return res.RowsAffected > 0, res.Error
 }
 
 // UserStats — сводные счётчики для админ-панели бота.
