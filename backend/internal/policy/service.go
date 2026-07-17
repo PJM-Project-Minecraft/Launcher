@@ -32,6 +32,13 @@ var text string
 // Text возвращает канонический markdown-текст политики.
 func Text() string { return text }
 
+//go:embed rules.md
+var rulesText string
+
+// RulesText — markdown-текст правил сервера (страница /rules; без версионирования
+// и согласий — просто публичный документ).
+func RulesText() string { return rulesText }
+
 // Status — блок о политике в ответах API (логин).
 type Status struct {
 	Required bool `json:"required"`

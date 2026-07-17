@@ -154,3 +154,18 @@ func TestPrivacyPage(t *testing.T) {
 		t.Errorf("страница не похожа на отрендеренную политику")
 	}
 }
+
+func TestRulesPage(t *testing.T) {
+	app := newTestApp(t, openTestDB(t), nil)
+	res, err := app.Test(httptest.NewRequest("GET", "/rules", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if res.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	html, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(html), "<h1") || !strings.Contains(string(html), "рейд") {
+		t.Errorf("страница не похожа на отрендеренные правила")
+	}
+}

@@ -28,6 +28,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, requireAuth fiber.Handler, curre
 	app.Get("/api/policy", h.get)
 	app.Post("/api/policy/accept", requireAuth, h.accept(currentUser))
 	app.Get("/privacy", h.page)
+	app.Get("/rules", h.rulesPage)
 }
 
 func (h Handler) get(c fiber.Ctx) error {
@@ -69,10 +70,12 @@ func (h Handler) accept(currentUser CurrentUserFn) fiber.Handler {
 	}
 }
 
-// Страница /privacy: markdown рендерится в HTML лениво один раз.
+// Страницы /privacy и /rules: markdown рендерится в HTML лениво один раз.
 var (
-	pageOnce sync.Once
-	pageHTML []byte
+	pageOnce  sync.Once
+	pageHTML  []byte
+	rulesOnce sync.Once
+	rulesHTML []byte
 )
 
 // pageCSS — брендовое оформление страницы политики. Монохром-воксель, тот же
@@ -149,16 +152,16 @@ footer a{color:var(--dim);text-decoration:underline;text-underline-offset:3px}
 footer a:hover{color:var(--face)}
 `
 
-func renderPage() []byte {
+func renderPage(title, markdown string) []byte {
 	var body bytes.Buffer
-	if err := goldmark.Convert([]byte(Text()), &body); err != nil {
+	if err := goldmark.Convert([]byte(markdown), &body); err != nil {
 		body.Reset()
-		body.WriteString("<pre>" + html.EscapeString(Text()) + "</pre>")
+		body.WriteString("<pre>" + html.EscapeString(markdown) + "</pre>")
 	}
 	var page bytes.Buffer
 	page.WriteString(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
-		`<title>Политика конфиденциальности — Project Minecraft</title>` +
+		`<title>` + html.EscapeString(title) + ` — Project Minecraft</title>` +
 		`<meta name="robots" content="noindex">` +
 		`<link rel="preconnect" href="https://fonts.googleapis.com">` +
 		`<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` +
@@ -177,7 +180,13 @@ func renderPage() []byte {
 }
 
 func (h Handler) page(c fiber.Ctx) error {
-	pageOnce.Do(func() { pageHTML = renderPage() })
+	pageOnce.Do(func() { pageHTML = renderPage("Политика конфиденциальности", Text()) })
 	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
 	return c.Send(pageHTML)
+}
+
+func (h Handler) rulesPage(c fiber.Ctx) error {
+	rulesOnce.Do(func() { rulesHTML = renderPage("Правила сервера", RulesText()) })
+	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
+	return c.Send(rulesHTML)
 }
