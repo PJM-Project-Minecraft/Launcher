@@ -1,0 +1,24 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "All Rights Reserved"
+
+[[mods]]
+modId = "pjmac"
+version = "${version}"
+displayName = "PJM Anticheat P5"
+description = "Серверно-авторитетный in-game handshake античита (P5)."
+
+[[dependencies.pjmac]]
+modId = "neoforge"
+type = "required"
+# ⚠️ Сузь диапазон под свою версию NeoForge.
+versionRange = "[21,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.pjmac]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21,)"
+ordering = "NONE"
+side = "BOTH"

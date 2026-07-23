@@ -1,0 +1,40 @@
+// Сборка мода P5 через ModDevGradle. ⚠️ Укажи ТОЧНУЮ версию NeoForge своего игрового
+// сервера в gradle.properties (neoforge_version). Сборка: ./gradlew build → build/libs/*.jar.
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.+'
+}
+
+group = 'xyz.projectminecraft.anticheat'
+version = project.findProperty('mod_version') ?: '0.1.0'
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+neoForge {
+    version = project.findProperty('neoforge_version')
+
+    // interpolate ${version} в neoforge.mods.toml
+    validateAccessTransformers = true
+    runs {
+        // при желании: client/server run-конфиги для локального теста
+    }
+    mods {
+        pjmac {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+// Подстановка версии в mods.toml.
+tasks.named('processResources') {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand version: project.version
+    }
+}

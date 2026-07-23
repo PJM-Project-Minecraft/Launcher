@@ -285,7 +285,16 @@ NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Jav
 - **P6** — в прод `config.Validate()` требует явный `ANTICHEAT_SECRET` (≠ JWT, не дев); нативка: debug-логи только под `-DAC_DEBUG`, strip `-s`; agent.jar `-g:none`.
 
 **Осталось:**
-- **P5** — NeoForge-мод `anticheat-neoforge/` (in-game agent-handshake + sign-probe). Самый сильный замок против полностью обойдённого клиента. Не начат.
+- **P5** — серверно-авторитетный in-game handshake. **Бэкенд ГОТОВ и оттестирован**
+  (`POST /api/anticheat/p5/verify`, `internal/anticheat/p5.go`; конфиг `ANTICHEAT_P5_SECRET`
+  + `ANTICHEAT_P5_ENFORCE`, репорт-онли по дефолту). **NeoForge-мод — референс-реализация в
+  `anticheat-neoforge/`, НЕ собран/не протестирован в игре** (нет Gradle/NeoForge-тулчейна
+  здесь): собрать `./gradlew build` под точную версию NeoForge игрового сервера, сверить
+  network-API, обкатать на dev-сервере в репорт-онли, разложить (серверный jar → на игровой
+  сервер; клиентский → в профиль mods/ + «Сканировать файлы»), дать игрокам обновиться,
+  потом `ANTICHEAT_P5_ENFORCE=true`. Rollout и протокол — `anticheat-neoforge/README.md`.
+  ⚠️ Честный потолок: accessToken есть и у читера → P5 это ПРИНУЖДЕНИЕ ПРИСУТСТВИЯ (клиент
+  без мода кикается), не крипто-невозможность против полностью переписанного клиента.
 - ~~Включить attestation~~ — сделано, `ANTICHEAT_REQUIRE_ATTESTATION=true` на проде (см. P3 выше).
 
 **Ключевая архитектурная гоча:**
