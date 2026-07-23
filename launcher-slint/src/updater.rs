@@ -12,7 +12,6 @@ use std::process::Command;
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -86,7 +85,7 @@ pub fn is_upgrade(latest_version: &str) -> bool {
 
 /// Запрашивает у бэкенда сведения об обновлении для текущей версии и платформы.
 pub fn check_update(api_url: &str) -> Result<UpdateInfo, String> {
-    let client = Client::builder()
+    let client = crate::hardened_backend_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Не удалось создать HTTP-клиент.".to_string())?;
@@ -132,7 +131,7 @@ pub fn download_and_stage(api_url: &str, info: &UpdateInfo) -> Result<PathBuf, S
         "Каталог лаунчера недоступен для записи — скачайте новую версию вручную.".to_string()
     })?;
 
-    let client = Client::builder()
+    let client = crate::hardened_backend_builder()
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Duration::from_secs(20))
         .build()

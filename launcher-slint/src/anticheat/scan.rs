@@ -14,6 +14,19 @@ pub struct Detection {
     pub severity: i32,
 }
 
+impl Detection {
+    /// Детект «к лаунчеру подключён отладчик». severity игнорируется сервером
+    /// (systemSeverity["debugger"]=6, confidence soft → не кик, только review/алерт).
+    pub fn launcher_debugger() -> Self {
+        Self {
+            source: "launcher".to_string(),
+            kind: "debugger".to_string(),
+            signature: "launcher-debugger".to_string(),
+            severity: 0,
+        }
+    }
+}
+
 /// Возвращает список найденных совпадений процессов с блэклистом.
 pub fn scan_processes(blacklist: &[Signature]) -> Vec<Detection> {
     let process_sigs: Vec<&Signature> = blacklist

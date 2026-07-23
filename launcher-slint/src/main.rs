@@ -88,7 +88,7 @@ fn mirror_index(mirrors: &[(String, String)], saved: Option<&str>) -> usize {
 /// Не `/health`: WAF-правило CF пропускает без челленджа только `/api/*`, а на
 /// `/health` снаружи отдаёт 403-заглушку — основной сервер вечно «недоступен».
 fn ping_mirror(url: &str) -> Option<u128> {
-    let client = Client::builder()
+    let client = hardened_backend_builder()
         .timeout(MIRROR_PING_TIMEOUT)
         .build()
         .ok()?;
@@ -1382,7 +1382,8 @@ fn refresh_profiles_now(
 /// HTTP-клиент для долгоживущего SSE-потока: без общего таймаута запроса,
 /// но с TCP keepalive для обнаружения «мёртвых» соединений.
 fn sse_client() -> Result<Client, String> {
-    Client::builder()
+    // SSE-поток идёт на бэкенд → защищённый канал (rustls+webpki, без прокси).
+    hardened_backend_builder()
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Duration::from_secs(20))
         .build()
@@ -1587,7 +1588,7 @@ fn ensure_authlib_injector(
         "{}/api/yggdrasil/authlib-injector.jar",
         config.api_url().trim_end_matches('/')
     );
-    let client = download_client()?;
+    let client = backend_download_client()?;
     artifacts::ensure(&client, &url, &path, &dir, expected_sha).map_err(|e| e.message())
 }
 
@@ -1725,7 +1726,10 @@ fn download_files(
         return Ok(());
     }
 
-    let client = download_client()?;
+    // Два клиента: защищённый для файлов со своего бэкенда (rustls+webpki+JWT) и обычный
+    // для файлов с публичного S3-зеркала (download_one_file выбирает по is_api_url).
+    let backend_client = backend_download_client()?;
+    let asset_client = download_client()?;
     let total_bytes = files.iter().map(|file| file.size.max(0) as u64).sum::<u64>().max(1);
     let completed_bytes = AtomicU64::new(0);
     let completed_files = AtomicUsize::new(0);
@@ -1747,7 +1751,8 @@ fn download_files(
         files
             .par_iter()
             .map(|file| -> Result<(), String> {
-                let file_bytes = download_one_file(&client, config, token, files_root, file)?;
+                let file_bytes =
+                    download_one_file(&backend_client, &asset_client, config, token, files_root, file)?;
 
                 let done_files = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
                 let done_bytes =
@@ -1781,7 +1786,8 @@ fn download_files(
 // переименовывает в целевой путь. Вызывается параллельно из пула в download_files;
 // все пути уникальны на файл, поэтому конкурентная запись безопасна.
 fn download_one_file(
-    client: &Client,
+    backend_client: &Client,
+    asset_client: &Client,
     config: &AppConfig,
     token: &str,
     files_root: &Path,
@@ -1793,11 +1799,13 @@ fn download_one_file(
     }
 
     let url = absolute_api_url(config, &file.download_url);
+    // Свой бэкенд — защищённый клиент (rustls+webpki, без прокси) + JWT. Публичное
+    // зеркало (S3-бакет) — обычный клиент без токена: JWT туда слать и незачем, и
+    // вредно (S3 отвечает 400 на Authorization), а его CA может быть вне webpki.
+    let is_backend = is_api_url(config, &url);
+    let client = if is_backend { backend_client } else { asset_client };
     let mut request = client.get(&url);
-    // JWT уходит только на свой бэкенд. Манифест может указывать файл на публичное
-    // зеркало (S3-бакет) — туда токен слать и незачем, и вредно: S3 отвечает 400 на
-    // Authorization, который не является его подписью.
-    if is_api_url(config, &url) {
+    if is_backend {
         request = request.bearer_auth(token);
     }
     let mut response = request
@@ -3003,17 +3011,44 @@ fn post_progress(
     });
 }
 
+/// Билдер HTTP-клиента для ВСЕХ вызовов своего бэкенда/античита (не для сторонних хостов).
+/// Защита от HTTP-дебагеров/перехватчиков (Fiddler, Charles, Burp, mitmproxy):
+///  - `use_rustls_tls()` + вшитые webpki-roots вместо системного хранилища сертификатов:
+///    корневой CA перехватчика, установленный в ОС, НЕ доверенный → TLS-handshake падает,
+///    трафик авторизации/античита нельзя ни расшифровать, ни подменить.
+///  - `no_proxy()`: игнорируем HTTP(S)_PROXY/ALL_PROXY, чтобы не ходить через прокси-перехватчик.
+///
+/// Прод-домены (launcher/mirror.likonchik.xyz) выпущены Let's Encrypt (ISRG Root X1 есть в
+/// webpki-roots), поэтому канал работает. ⚠️ Смена CA бэкенда на корень вне webpki потребует
+/// пересборки лаунчера (роутинг сертификатов вшит в бинарник). Сторонние загрузки (Mojang/S3)
+/// намеренно остаются на системном хранилище + системном прокси — см. download_client.
+pub(crate) fn hardened_backend_builder() -> reqwest::blocking::ClientBuilder {
+    Client::builder().use_rustls_tls().no_proxy()
+}
+
 fn http_client() -> Result<Client, String> {
-    Client::builder()
+    hardened_backend_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Не удалось создать HTTP клиент.".to_string())
 }
 
-/// Клиент для скачивания файлов: без общего таймаута (большие файлы качаются
-/// дольше 30 с), мёртвое соединение обнаруживается connect-таймаутом и TCP keepalive.
+/// Клиент для скачивания СТОРОННИХ файлов (Mojang java-runtime, S3-зеркало профилей):
+/// системное хранилище CA + системный прокси (их сертификаты могут быть вне webpki, а
+/// целостность и так гарантируется SHA-сверкой). Без общего таймаута (большие файлы).
 fn download_client() -> Result<Client, String> {
     Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Не удалось создать HTTP клиент.".to_string())
+}
+
+/// Клиент для скачивания С БЭКЕНДА (манифест античита, agent.jar/native, authlib,
+/// файлы профиля с api_url): как download_client, но по защищённому каналу
+/// (rustls+webpki, без прокси) — от HTTP-перехватчиков.
+fn backend_download_client() -> Result<Client, String> {
+    hardened_backend_builder()
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Duration::from_secs(20))
         .build()
@@ -3624,6 +3659,25 @@ impl LoginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Сетевой смоук: защищённый клиент (rustls+webpki, без прокси) ДОЛЖЕН достучаться до
+    // прод-бэкенда и зеркала (их LE-сертификаты в webpki-roots), иначе логин кирпич.
+    // Не в обычном прогоне: cargo test hardened_client_reaches_prod -- --ignored
+    #[test]
+    #[ignore]
+    fn hardened_client_reaches_prod() {
+        let client = hardened_backend_builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("build hardened client");
+        for host in ["https://launcher.likonchik.xyz", "https://mirror.likonchik.xyz"] {
+            let resp = client
+                .get(format!("{host}/api/policy"))
+                .send()
+                .unwrap_or_else(|e| panic!("{host}: {e}"));
+            assert!(resp.status().is_success(), "{host}: HTTP {}", resp.status());
+        }
+    }
 
     #[test]
     fn bearer_goes_only_to_own_backend() {

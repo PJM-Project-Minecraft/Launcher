@@ -30,7 +30,7 @@ impl IntegrityManifest {
     /// Тянет манифест с бэкенда под JWT. None — недоступен (оффлайн/сбой/401):
     /// тогда SHA-сверка не выполняется (fail-open, не ломаем оффлайн-запуск).
     pub fn fetch(config: &AppConfig, token: &str) -> Option<Self> {
-        let client = crate::download_client().ok()?;
+        let client = crate::backend_download_client().ok()?;
         let url = format!(
             "{}/api/anticheat/manifest",
             config.api_url().trim_end_matches('/')

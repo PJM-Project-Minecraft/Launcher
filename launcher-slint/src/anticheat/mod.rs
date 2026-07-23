@@ -8,6 +8,7 @@ mod hwid;
 mod inject;
 mod manifest;
 mod scan;
+mod selfdebug;
 pub mod screenshot;
 pub mod kick;
 
@@ -44,7 +45,11 @@ impl LaunchGuard {
     /// = fail-open: guard с пустым токеном (агенты не инжектятся, enforcement на join).
     pub fn begin(config: &AppConfig, token: &str) -> Result<Self, String> {
         let blacklist = handshake::fetch_blacklist(config, token).unwrap_or_default();
-        let detections = scan::scan_processes(&blacklist);
+        let mut detections = scan::scan_processes(&blacklist);
+        // Отладчик, подключённый к процессу лаунчера на этапе pre-launch (репорт-онли).
+        if selfdebug::debugger_present() {
+            detections.push(scan::Detection::launcher_debugger());
+        }
         let components = hwid::collect_hwid_components();
         let manifest = IntegrityManifest::fetch(config, token);
 
@@ -158,16 +163,24 @@ pub fn spawn_ingame_scan(
     let launch_token = guard.launch_token.clone();
     let blacklist = guard.blacklist.clone();
     thread::spawn(move || {
-        if launch_token.is_empty() || blacklist.is_empty() {
+        // Без launch-token репортить нечем. Блэклист может быть пуст — цикл всё равно
+        // нужен для периодической проверки отладчика.
+        if launch_token.is_empty() {
             return;
         }
         let mut reported: HashSet<String> = HashSet::new();
+        let mut debugger_reported = false;
         poll_until(&stop, INGAME_SCAN_INTERVAL, || {
             for d in scan::scan_processes(&blacklist) {
                 // Дедуп: одну и ту же сигнатуру за сессию шлём один раз.
                 if reported.insert(d.signature.clone()) {
                     scan::report_detection(&api_url, &launch_token, &d);
                 }
+            }
+            // Отладчик, подключённый к лаунчеру уже во время игры (один раз за сессию).
+            if !debugger_reported && selfdebug::debugger_present() {
+                debugger_reported = true;
+                scan::report_detection(&api_url, &launch_token, &scan::Detection::launcher_debugger());
             }
         });
     })
