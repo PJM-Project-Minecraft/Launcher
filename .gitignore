@@ -27,6 +27,11 @@ dashboard/out/
 backend/.env
 dashboard/.env.local
 
+# Приватный ключ подписи автообновления (updatesign keygen) — ТОЛЬКО на релиз-боксе,
+# в git попасть не должен: с ним можно подписать вредоносное обновление.
+*.key
+update-signing.key
+
 # Прод-only оверрайд compose (живёт только на VPS, деплой его не трогает)
 docker-compose.override.yml
 .superpowers/
