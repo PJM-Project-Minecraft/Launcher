@@ -308,6 +308,24 @@ func (s *Store) SessionByNonce(nonce string) (Session, bool) {
 	return sess, true
 }
 
+// VerifiedSessionByName возвращает живую Verified-сессию игрока по нику. Для P5:
+// игровой сервер знает ник входящего игрока, а не nonce. Один аккаунт = одна активная
+// сессия, поэтому первая подходящая корректна.
+func (s *Store) VerifiedSessionByName(name string) (Session, bool) {
+	if name == "" {
+		return Session{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, sess := range s.sessions {
+		if sess.Name == name && sess.Verified && now.Before(sess.expiresAt) {
+			return sess, true
+		}
+	}
+	return Session{}, false
+}
+
 // ActiveSessions возвращает все живые Verified-сессии (онлайн-игроки) для дашборда.
 // IP берётся из связанной join-записи по UUID (join фиксирует IP подключения к серверу).
 func (s *Store) ActiveSessions() []OnlineSession {

@@ -143,7 +143,11 @@ func main() {
 	anticheat.NewHandler(acService).
 		WithVersionGate(releaseService).
 		WithScreenshots(screenshotSvc, yggService.Store()).
+		WithP5(cfg.AnticheatP5Secret, cfg.AnticheatP5Enforce).
 		RegisterRoutes(app, authService.RequireAuth())
+	if cfg.AnticheatP5Secret != "" {
+		slog.Info("anticheat: P5 in-game handshake enabled", "enforce", cfg.AnticheatP5Enforce)
+	}
 
 	slog.Info(
 		"backend listening",

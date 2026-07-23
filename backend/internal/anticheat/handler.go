@@ -30,6 +30,7 @@ type Handler struct {
 	screenshots *ScreenshotService
 	sessions    OnlineSessionsProvider
 	versionGate VersionGate
+	p5          p5Config
 	// Лимитеры (указатели — переживают копирование Handler в WithVersionGate).
 	initLimiter    *rateLimiter
 	confirmLimiter *rateLimiter
@@ -44,6 +45,8 @@ type Handler struct {
 type OnlineSessionsProvider interface {
 	ActiveSessions() []yggdrasil.OnlineSession
 	SessionByNonce(nonce string) (yggdrasil.Session, bool)
+	// VerifiedSessionByName — живая Verified-сессия игрока по нику (для P5-verify).
+	VerifiedSessionByName(name string) (yggdrasil.Session, bool)
 }
 
 func NewHandler(service *Service) Handler {
@@ -75,6 +78,13 @@ func (h Handler) WithVersionGate(gate VersionGate) Handler {
 	return h
 }
 
+// WithP5 включает серверно-авторитетный handshake (P5): игровой NeoForge-сервер сверяет
+// присутствие мода через /p5/verify. secret пуст — P5 выключен; enforce=false — репорт-онли.
+func (h Handler) WithP5(secret string, enforce bool) Handler {
+	h.p5 = p5Config{secret: secret, enforce: enforce}
+	return h
+}
+
 // RegisterRoutes монтирует игровые (JWT/launch-token) и admin-эндпоинты античита.
 func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// Авторизация навешивается per-route: group.Use(...) применялась бы по префиксу
@@ -93,6 +103,10 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Post("/diag", h.diag)
 	// Блэклист для агента (без JWT, по launch-token): версия + сигнатуры для рантайм-скана.
 	group.Get("/rules", h.rules)
+	// P5: серверно-авторитетный handshake от игрового NeoForge-сервера. Аутентификация —
+	// общий секрет ANTICHEAT_P5_SECRET в заголовке X-AC-P5-Secret (server-to-server, не JWT;
+	// per-route, как остальные не-JWT роуты этой группы).
+	group.Post("/p5/verify", h.p5Verify)
 	// Раздача agent.jar: лаунчер качает его и инжектит как -javaagent.
 	group.Get("/agent.jar", h.agentJar)
 	// Раздача нативной JVMTI-библиотеки по ОС: лаунчер инжектит как -agentpath.

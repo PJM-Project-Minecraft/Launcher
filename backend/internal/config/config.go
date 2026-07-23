@@ -53,6 +53,13 @@ type Config struct {
 	// Алерты античита в Telegram: токен бота (например, vps-ops-bot) и chat_id получателя.
 	AnticheatAlertBotToken string
 	AnticheatAlertChatID   string
+	// P5 — серверно-авторитетный in-game handshake. AnticheatP5Secret — общий секрет
+	// для аутентификации игрового NeoForge-сервера (server-to-server, не JWT). Пуст —
+	// P5 выключен. AnticheatP5Enforce — false (дефолт): репорт-онли (пускаем, но логируем
+	// расхождения); true: кик при невалидном proof (включать ТОЛЬКО после раздачи мода и
+	// обкатки на dev-сервере, иначе кикнет всех).
+	AnticheatP5Secret  string
+	AnticheatP5Enforce bool
 }
 
 func Load() Config {
@@ -104,6 +111,8 @@ func Load() Config {
 		TrustedProxies:        splitCSV(env("TRUSTED_PROXIES", "")),
 		AnticheatAlertBotToken: env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
 		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),
+		AnticheatP5Secret:      env("ANTICHEAT_P5_SECRET", ""),
+		AnticheatP5Enforce:     env("ANTICHEAT_P5_ENFORCE", "false") == "true",
 	}
 
 	if cfg.JWTSecret == "dev-only-change-me" {
