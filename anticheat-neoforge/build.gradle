@@ -12,6 +12,13 @@ java {
     toolchain.languageVersion = JavaLanguageVersion.of(21)
 }
 
+// -g:none: без отладочной инфы (имён локальных/номеров строк) — анти-RE, как у Java-агента.
+// Безопасно для загрузки мода (не ломает NeoForge/рефлексию). Полное имя-манглинг —
+// ProGuard (proguard-rules.pro), но только ПОСЛЕ game-теста чистого мода.
+tasks.withType(JavaCompile).configureEach {
+    options.debug = false
+}
+
 neoForge {
     version = project.findProperty('neoforge_version')
 
