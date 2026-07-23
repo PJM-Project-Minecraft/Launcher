@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VPS="${DEPLOY_VPS:-root@13.140.17.105}"
+VPS="${DEPLOY_VPS:-root@176.108.254.89}"
 DIR="${DEPLOY_DIR:-/root/Launcher}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 
