@@ -136,6 +136,24 @@ EOF
 # Лаунчер со вшитым ключом примет обновление ТОЛЬКО с валидной подписью.
 PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
 [[ "$PLATFORM" == windows-* ]] && PLAYER_BIN="$PACKAGE_DIR/ProjectMinecraftLauncher.exe"
+
+# Публичный ключ вшивается через option_env! на этапе cargo. Частая ошибка — задать
+# LAUNCHER_UPDATE_PUBKEY отдельной (не экспортированной) строкой: тогда он не долетает
+# до cargo и лаунчер молча собирается БЕЗ проверки подписи. Ловим это сразу.
+if [[ -n "${LAUNCHER_UPDATE_PUBKEY:-}" ]]; then
+  if grep -aq "$LAUNCHER_UPDATE_PUBKEY" "$PLAYER_BIN"; then
+    echo "[launcher] Публичный ключ вшит в бинарник ✓"
+  else
+    echo "[launcher] ОШИБКА: LAUNCHER_UPDATE_PUBKEY задан, но в бинарнике его НЕТ." >&2
+    echo "[launcher]        Переменная не экспортирована в cargo. Передавай её В ОДНОЙ строке" >&2
+    echo "[launcher]        со скриптом (LAUNCHER_UPDATE_PUBKEY=... scripts/prod/build-...) или через export." >&2
+    exit 1
+  fi
+elif [[ -n "${LAUNCHER_SIGNING_KEY:-}" ]]; then
+  echo "[launcher] ВНИМАНИЕ: подписываешь релиз, но LAUNCHER_UPDATE_PUBKEY не задан —" >&2
+  echo "[launcher]          собранный лаунчер НЕ проверяет подпись. Забыл экспортировать ключ?" >&2
+fi
+
 if [[ -n "${LAUNCHER_SIGNING_KEY:-}" ]]; then
   SIG=""
   if command -v updatesign >/dev/null 2>&1; then

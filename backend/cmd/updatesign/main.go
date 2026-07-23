@@ -34,14 +34,44 @@ func main() {
 		pubkey(os.Args[2:])
 	case "sign":
 		sign(os.Args[2:])
+	case "verify":
+		verify(os.Args[2:])
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: updatesign keygen [keyfile] | pubkey -key keyfile | sign -key keyfile <binary>")
+	fmt.Fprintln(os.Stderr, "usage: updatesign keygen [keyfile] | pubkey -key keyfile | sign -key keyfile <binary> | verify -pub hex -sig hex <binary>")
 	os.Exit(2)
+}
+
+// verify проверяет hex-подпись бинарника публичным ключом (то же, что делает лаунчер).
+// Полезно прогнать перед заливкой релиза: OK = keyed-лаунчер примет обновление.
+func verify(args []string) {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	pub := fs.String("pub", "", "публичный ключ (hex, 64 символа)")
+	sig := fs.String("sig", "", "подпись (hex, 128 символов)")
+	_ = fs.Parse(args)
+	if *pub == "" || *sig == "" || fs.NArg() != 1 {
+		usage()
+	}
+	pubBytes, err := hex.DecodeString(strings.TrimSpace(*pub))
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		fatalf("некорректный публичный ключ (ожидается %d hex-байт)", ed25519.PublicKeySize)
+	}
+	sigBytes, err := hex.DecodeString(strings.TrimSpace(*sig))
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		fatalf("некорректная подпись (ожидается %d hex-байт)", ed25519.SignatureSize)
+	}
+	data, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fatalf("чтение файла: %v", err)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), data, sigBytes) {
+		fatalf("FAIL: подпись НЕ совпала с бинарником/ключом")
+	}
+	fmt.Println("OK: подпись верна")
 }
 
 func keygen(args []string) {
