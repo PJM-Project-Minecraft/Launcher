@@ -5,6 +5,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use obfstr::obfstr;
+
 use crate::anticheat::{agents, manifest::IntegrityManifest};
 use crate::AppConfig;
 
@@ -21,10 +23,11 @@ pub struct InjectionPlan {
 /// Аргументы нативного JVMTI-агента: запрет позднего attach + flag-файл + agentpath.
 fn native_args(native_path: &Path, flag_path: &Path) -> Vec<String> {
     vec![
-        "-XX:+DisableAttachMechanism".to_string(),
-        format!("-Dac.native.flag={}", flag_path.to_string_lossy()),
+        obfstr!("-XX:+DisableAttachMechanism").to_string(),
+        format!("{}{}", obfstr!("-Dac.native.flag="), flag_path.to_string_lossy()),
         format!(
-            "-agentpath:{}={}",
+            "{}{}={}",
+            obfstr!("-agentpath:"),
             native_path.to_string_lossy(),
             flag_path.to_string_lossy()
         ),
@@ -40,11 +43,11 @@ fn agent_args(
     agent_path: &Path,
 ) -> Vec<String> {
     vec![
-        format!("-Dac.token={}", token),
-        format!("-Dac.url={}", api_url),
-        format!("-Dac.kickfile={}", kick_path.to_string_lossy()),
-        format!("-Dac.challenge={}", challenge),
-        format!("-javaagent:{}", agent_path.to_string_lossy()),
+        format!("{}{}", obfstr!("-Dac.token="), token),
+        format!("{}{}", obfstr!("-Dac.url="), api_url),
+        format!("{}{}", obfstr!("-Dac.kickfile="), kick_path.to_string_lossy()),
+        format!("{}{}", obfstr!("-Dac.challenge="), challenge),
+        format!("{}{}", obfstr!("-javaagent:"), agent_path.to_string_lossy()),
     ]
 }
 

@@ -30,8 +30,9 @@ pub fn ensure_agent(
     };
     let path = dir.join("anticheat-agent.jar");
     let url = format!(
-        "{}/api/anticheat/agent.jar",
-        config.api_url().trim_end_matches('/')
+        "{}{}",
+        config.api_url().trim_end_matches('/'),
+        obfstr::obfstr!("/api/anticheat/agent.jar")
     );
     let client = crate::backend_download_client()?;
     crate::artifacts::ensure(&client, &url, &path, &dir, expected_sha).map_err(|e| e.message())
@@ -51,8 +52,9 @@ pub fn ensure_native(
     };
     let path = dir.join(file_name);
     let url = format!(
-        "{}/api/anticheat/native/{}",
+        "{}{}{}",
         config.api_url().trim_end_matches('/'),
+        obfstr::obfstr!("/api/anticheat/native/"),
         os_token
     );
     let client = crate::backend_download_client()?;

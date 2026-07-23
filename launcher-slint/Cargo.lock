@@ -2863,6 +2863,7 @@ dependencies = [
  "hex",
  "image",
  "keyring",
+ "obfstr",
  "rayon",
  "reqwest",
  "serde",
@@ -3328,6 +3329,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "obfstr"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cf5f1acbf6ef57cef9d127e72c4afd01d6b08692616fd09afad7f7807d6eb78"
 
 [[package]]
 name = "objc-sys"
@@ -4154,7 +4161,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

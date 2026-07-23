@@ -2,6 +2,7 @@
 //! confirm (fallback). Явная модель исхода `InitOutcome` — единственное место, где
 //! решается fail-open vs блок запуска.
 
+use obfstr::obfstr;
 use serde::Deserialize;
 
 use super::scan;
@@ -57,8 +58,9 @@ pub const POLICY_REQUIRED_ERR: &str = "__policy_required__";
 pub fn fetch_blacklist(config: &AppConfig, token: &str) -> Result<Vec<Signature>, String> {
     let client = http_client()?;
     let url = format!(
-        "{}/api/anticheat/blacklist",
-        config.api_url().trim_end_matches('/')
+        "{}{}",
+        config.api_url().trim_end_matches('/'),
+        obfstr!("/api/anticheat/blacklist")
     );
     let response = client
         .get(url)
@@ -84,8 +86,9 @@ pub fn init(
         return InitOutcome::Unavailable;
     };
     let url = format!(
-        "{}/api/anticheat/handshake/init",
-        config.api_url().trim_end_matches('/')
+        "{}{}",
+        config.api_url().trim_end_matches('/'),
+        obfstr!("/api/anticheat/handshake/init")
     );
     // hwidHash — агрегат (совместимость со старыми банами); hwidComponents — раздельные
     // хеши для fuzzy-матча. Старый сервер hwidComponents игнорирует.
@@ -155,8 +158,9 @@ pub fn confirm(config: &AppConfig, launch_token: &str) -> Result<(), String> {
     }
     let client = http_client()?;
     let url = format!(
-        "{}/api/anticheat/handshake/confirm",
-        config.api_url().trim_end_matches('/')
+        "{}{}",
+        config.api_url().trim_end_matches('/'),
+        obfstr!("/api/anticheat/handshake/confirm")
     );
     let response = client
         .post(url)

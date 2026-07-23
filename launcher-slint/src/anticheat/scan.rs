@@ -61,7 +61,7 @@ pub fn report_detection(api_url: &str, launch_token: &str, d: &Detection) {
     let Ok(client) = http_client() else {
         return;
     };
-    let url = format!("{}/api/anticheat/detect", api_url.trim_end_matches('/'));
+    let url = format!("{}{}", api_url.trim_end_matches('/'), obfstr::obfstr!("/api/anticheat/detect"));
     let body = serde_json::json!({
         "launchToken": launch_token,
         "source": "launcher",
