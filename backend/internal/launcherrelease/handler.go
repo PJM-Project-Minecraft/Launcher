@@ -103,9 +103,10 @@ func (h Handler) create(c fiber.Ctx) error {
 		}
 		defer opened.Close()
 		files = append(files, UploadedFile{
-			Platform: platform,
-			FileName: headers[0].Filename,
-			Reader:   opened,
+			Platform:  platform,
+			FileName:  headers[0].Filename,
+			Reader:    opened,
+			Signature: formValue(form, "signature-"+platform),
 		})
 	}
 

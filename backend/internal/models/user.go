@@ -26,6 +26,14 @@ type User struct {
 	// Двухфакторная аутентификация (TOTP).
 	TOTPSecret  string `gorm:"size:64" json:"-"`
 	TOTPEnabled bool   `gorm:"not null;default:false" json:"totpEnabled"`
+	// TOTPLastStep — номер последнего принятого TOTP-шага (unix/30). Код с шагом ≤
+	// этого значения отклоняется как повтор: закрывает replay кода в 90-сек окне.
+	TOTPLastStep int64 `gorm:"not null;default:0" json:"-"`
+
+	// TokensValidAfter — момент, до которого выданные JWT недействительны. Ставится
+	// при смене пароля: старые сессии (iat < этого) перестают проходить проверку,
+	// т.е. смена пароля отзывает украденные токены, не дожидаясь их 7-дн. TTL.
+	TokensValidAfter *time.Time `json:"-"`
 
 	// Блокировки и последний вход.
 	IsBanned     bool   `gorm:"not null;default:false" json:"isBanned"`

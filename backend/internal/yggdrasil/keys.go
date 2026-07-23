@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -44,8 +45,12 @@ func LoadOrCreateKey(path string) (*KeyPair, error) {
 		return nil, err
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err == nil {
-		_ = os.WriteFile(path, pemBytes, 0o600)
+	// Ошибку записи не глотаем: без персиста ключ регенерируется при каждом рестарте,
+	// а вместе с ним меняется публикуемый signaturePublickey (тихая деградация).
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		slog.Warn("yggdrasil: не удалось создать каталог ключа (ключ не сохранён)", "path", path, "error", err)
+	} else if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		slog.Warn("yggdrasil: не удалось сохранить ключ (регенерируется при рестарте)", "path", path, "error", err)
 	}
 	return newKeyPair(key)
 }

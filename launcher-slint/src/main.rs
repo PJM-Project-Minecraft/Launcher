@@ -185,6 +185,11 @@ fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc
     if !info.update_available {
         return;
     }
+    // Клиентский guard от навязанного даунгрейда: не откатываемся на не-новее версию,
+    // даже если сервер выставил update_available (сервер/зеркало могли быть скомпром.).
+    if !updater::is_upgrade(&info.latest_version) {
+        return;
+    }
 
     // Уже скачали именно эту версию — только освежаем UI.
     let already_staged = shared
@@ -251,7 +256,7 @@ fn register_update_restart_handler(app: &AppWindow) {
         let Some((info, staged_path)) = staged else {
             return;
         };
-        if let Err(message) = updater::apply_and_restart(&staged_path) {
+        if let Err(message) = updater::apply_and_restart(&staged_path, &info) {
             // Подмена не удалась: сбрасываем staged (файл мог быть повреждён).
             if let Ok(mut staged) = shared.staged.lock() {
                 *staged = None;
@@ -885,8 +890,11 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
     app.on_open_url(|url| {
         let url = url.to_string();
         let mut command = if cfg!(target_os = "windows") {
-            let mut cmd = Command::new("cmd");
-            cmd.args(["/C", "start", &url]);
+            // rundll32 FileProtocolHandler открывает URL в браузере, передавая его ЕДИНЫМ
+            // аргументом — без разбора шелла (в отличие от `cmd /C start`, где & | ^ в URL
+            // стали бы инъекцией команды, попади в url когда-нибудь строка из сети).
+            let mut cmd = Command::new("rundll32.exe");
+            cmd.args(["url.dll,FileProtocolHandler", &url]);
             cmd
         } else if cfg!(target_os = "macos") {
             let mut cmd = Command::new("open");
@@ -3028,8 +3036,15 @@ fn save_token(token: &str) -> Result<(), String> {
                 .map_err(|_| "Не удалось сохранить токен авторизации.".to_string())
         });
 
+    // JWT в settings.json (плейнтекст, права по umask) кладём ТОЛЬКО как fallback,
+    // когда keyring недоступен. При успешном keyring поле очищаем — иначе токен всегда
+    // лежал бы открыто рядом, и keyring не давал бы защиты (кража = просто чтение файла).
     let mut settings = load_settings().unwrap_or_default();
-    settings.auth_token = Some(token.to_string());
+    settings.auth_token = if keyring_result.is_ok() {
+        None
+    } else {
+        Some(token.to_string())
+    };
     let settings_result = save_settings(&settings);
 
     if keyring_result.is_ok() || settings_result.is_ok() {

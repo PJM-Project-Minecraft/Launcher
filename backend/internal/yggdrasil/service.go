@@ -100,8 +100,22 @@ func (s *Service) LookupByNames(ctx context.Context, names []string) []Profile {
 // LookupByUUID находит игрока по нормализованному UUID (для profile/{uuid}).
 func (s *Service) LookupByUUID(ctx context.Context, uuid string) (Profile, bool) {
 	clean := normalizeHex(uuid)
+	if len(clean) != 32 {
+		return Profile{}, false
+	}
+	// Индексный поиск вместо полного скана users (раньше — CPU/DB-DoS: анонимный
+	// /profile/:uuid грузил и линейно сканировал всю таблицу на каждый хит). И
+	// provider_uuid (uniqueIndex), и id (PK) проиндексированы. Зарегистрированные
+	// игроки хранят UUID с дефисами (OfflinePlayerUUIDString), поэтому ищем обе формы;
+	// NormalizeUUID подтверждает совпадение.
+	// ponytail: не покрывает http-провайдерных юзеров с НЕ-hex provider_uuid (косметика
+	// скина); AUTH_MODE=local (прод/дефолт) хранит hex — им это не грозит.
+	dashed := clean[0:8] + "-" + clean[8:12] + "-" + clean[12:16] + "-" + clean[16:20] + "-" + clean[20:32]
+	forms := []string{clean, dashed}
 	var users []models.User
-	if err := s.db.WithContext(ctx).Find(&users).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Where("provider_uuid IN ? OR id IN ?", forms, forms).
+		Limit(8).Find(&users).Error; err != nil {
 		return Profile{}, false
 	}
 	for _, user := range users {

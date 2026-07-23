@@ -85,9 +85,10 @@ type CreateRequest struct {
 
 // UploadedFile — один бинарник из multipart-формы админки.
 type UploadedFile struct {
-	Platform string
-	FileName string
-	Reader   io.Reader
+	Platform  string
+	FileName  string
+	Reader    io.Reader
+	Signature string // hex Ed25519-подпись бинарника (оффлайн-подпись; пусто — без подписи)
 }
 
 // PatchRequest — частичное обновление флагов релиза.
@@ -104,6 +105,7 @@ type UpdateInfo struct {
 	Changelog       string `json:"changelog"`
 	DownloadURL     string `json:"downloadUrl"`
 	SHA256          string `json:"sha256"`
+	Signature       string `json:"signature"` // hex Ed25519-подпись бинарника (пусто — не подписан)
 	Size            int64  `json:"size"`
 }
 
@@ -201,14 +203,34 @@ func (s Service) storeFile(releaseID, version string, file UploadedFile) (models
 		return models.LauncherReleaseFile{}, errors.New("файл релиза пуст")
 	}
 
+	sig := strings.ToLower(strings.TrimSpace(file.Signature))
+	if sig != "" && !isHex128(sig) {
+		_ = os.Remove(dst)
+		return models.LauncherReleaseFile{}, errors.New("подпись Ed25519 должна быть 128 hex-символов")
+	}
+
 	return models.LauncherReleaseFile{
-		ID:         uuid.NewString(),
-		ReleaseID:  releaseID,
-		Platform:   file.Platform,
-		FileName:   name,
-		HashSHA256: hex.EncodeToString(hasher.Sum(nil)),
-		Size:       size,
+		ID:               uuid.NewString(),
+		ReleaseID:        releaseID,
+		Platform:         file.Platform,
+		FileName:         name,
+		HashSHA256:       hex.EncodeToString(hasher.Sum(nil)),
+		Size:             size,
+		SignatureEd25519: sig,
 	}, nil
+}
+
+// isHex128 — ровно 128 hex-символов (64-байтная Ed25519-подпись).
+func isHex128(s string) bool {
+	if len(s) != 128 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s Service) List(ctx context.Context) ([]models.LauncherRelease, error) {
@@ -299,6 +321,7 @@ func (s Service) CheckUpdate(ctx context.Context, platform, clientVersion string
 		Changelog:       latest.Changelog,
 		DownloadURL:     "/api/launcher/download/" + latest.Version + "/" + platform,
 		SHA256:          latestFile.HashSHA256,
+		Signature:       latestFile.SignatureEd25519,
 		Size:            latestFile.Size,
 	}, nil
 }

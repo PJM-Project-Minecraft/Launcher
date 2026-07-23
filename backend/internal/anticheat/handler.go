@@ -31,9 +31,10 @@ type Handler struct {
 	sessions    OnlineSessionsProvider
 	versionGate VersionGate
 	// Лимитеры (указатели — переживают копирование Handler в WithVersionGate).
-	initLimiter   *rateLimiter
-	detectLimiter *rateLimiter
-	hbLimiter     *rateLimiter
+	initLimiter    *rateLimiter
+	confirmLimiter *rateLimiter
+	detectLimiter  *rateLimiter
+	hbLimiter      *rateLimiter
 	// Лимитер аплоада скриншотов (на UUID игрока): лаунчер грузит редко, но защита от сбоя.
 	screenshotLimiter *rateLimiter
 }
@@ -49,6 +50,7 @@ func NewHandler(service *Service) Handler {
 	return Handler{
 		service:           service,
 		initLimiter:       newRateLimiter(10, time.Minute),
+		confirmLimiter:    newRateLimiter(6, time.Minute),
 		detectLimiter:     newRateLimiter(40, time.Minute),
 		hbLimiter:         newRateLimiter(6, time.Minute),
 		screenshotLimiter: newRateLimiter(10, time.Minute),
@@ -83,7 +85,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Get("/blacklist", authMiddleware, h.blacklist)
 	// Launch-token-защищённые: confirm и репорты от лаунчера/агентов (без JWT).
 	group.Post("/handshake/confirm", h.confirm)
-	group.Post("/detect", h.detect)
+	group.Post("/detect", requestBodyLimit(detectMaxBodySize, h.detect))
 	group.Post("/heartbeat", h.heartbeat)
 	// Лёгкая телеметрия агента (по launch-token): агент сообщает о самовосстановлении
 	// своих фоновых тредов (heartbeat/event-poller пережили interrupt/Throwable).
@@ -207,7 +209,18 @@ func (h Handler) confirm(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
 	}
-	if err := h.service.Confirm(launchTokenFromBody(c, req.LaunchToken), req.Proof); err != nil {
+	token := launchTokenFromBody(c, req.LaunchToken)
+	// Проверяем токен ДО Confirm, чтобы лимитировать по UUID: без этого confirm был
+	// единственным нелимитированным launch-token-роутом → флуд алертов + рост goroutine
+	// (в transition-режиме каждый невалидный proof порождает go NotifyDetection).
+	claims, err := h.service.VerifyToken(token)
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Не удалось подтвердить защиту"})
+	}
+	if !h.confirmLimiter.allow(claims.UUID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
+	}
+	if err := h.service.Confirm(token, req.Proof); err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Не удалось подтвердить защиту"})
 	}
 	return c.SendStatus(http.StatusNoContent)
@@ -584,6 +597,9 @@ func (h Handler) screenshotImage(c fiber.Ctx) error {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: err.Error()})
 	}
 	c.Set(fiber.HeaderContentType, "image/jpeg")
+	// nosniff: содержимое загружает лаунчер игрока; не даём браузеру дашборда
+	// переопределить тип и выполнить не-JPEG как HTML/скрипт.
+	c.Set("X-Content-Type-Options", "nosniff")
 	return c.SendFile(path)
 }
 
@@ -650,6 +666,11 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if err != nil || len(data) == 0 {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректные данные скриншота"})
 	}
+	// Магия JPEG (FF D8 FF): не сохраняем произвольные байты, которые потом отдаются
+	// дашборду как image/jpeg. Лаунчер грузит только JPEG (image crate, feature "jpeg").
+	if len(data) < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Ожидается JPEG"})
+	}
 	if err := h.screenshots.CompleteScreenshot(c.Context(), id, data, req.Width, req.Height); err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось сохранить скриншот"})
 	}
@@ -689,16 +710,26 @@ func (h Handler) screenshotFail(c fiber.Ctx) error {
 // Fiber v3 не имеет встроенного bodylimit-middleware — это ручная отсечка.
 const screenshotMaxBodySize = maxBase64Len + 2*1024*1024 // base64 + JSON-оверhead
 
-func screenshotUploadBodyLimit(h fiber.Handler) fiber.Handler {
+// detectMaxBodySize — потолок тела /detect: держатель launch-token иначе мог бы слать
+// произвольно большой Details (пишется целиком в Raw) под app-wide 512МБ-лимитом.
+const detectMaxBodySize = 64 * 1024
+
+// requestBodyLimit отвергает запрос по Content-Length ДО буферизации тела Fiber'ом
+// (ранняя защита от memory-DoS; в Fiber v3 нет встроенного per-route bodylimit).
+func requestBodyLimit(maxBytes int, h fiber.Handler) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if cl := c.Get("Content-Length"); cl != "" {
-			if n, err := strconv.Atoi(cl); err == nil && n > screenshotMaxBodySize {
+			if n, err := strconv.Atoi(cl); err == nil && n > maxBytes {
 				return c.Status(http.StatusRequestEntityTooLarge).
-					JSON(ErrorResponse{Message: "Скриншот слишком большой"})
+					JSON(ErrorResponse{Message: "Слишком большой запрос"})
 			}
 		}
 		return h(c)
 	}
+}
+
+func screenshotUploadBodyLimit(h fiber.Handler) fiber.Handler {
+	return requestBodyLimit(screenshotMaxBodySize, h)
 }
 
 // launchTokenFromHeader достаёт launch-token только из заголовка (НЕ из query —

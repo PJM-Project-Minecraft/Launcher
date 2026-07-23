@@ -141,6 +141,13 @@ func (s Service) UserFromToken(ctx context.Context, tokenValue string) (models.U
 	if err := s.db.WithContext(ctx).Where("id = ?", userID).First(&user).Error; err != nil {
 		return models.User{}, err
 	}
+
+	// Отзыв сессий при смене пароля: токен, выданный до tokens_valid_after, отклоняем.
+	if user.TokensValidAfter != nil {
+		if iat, ok := claims["iat"].(float64); ok && int64(iat) < user.TokensValidAfter.Unix() {
+			return models.User{}, errors.New("token revoked")
+		}
+	}
 	return user, nil
 }
 

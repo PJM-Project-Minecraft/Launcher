@@ -270,6 +270,47 @@ func TestAutoBanEscalatesToPermanent(t *testing.T) {
 	}
 }
 
+// Регрессия (security): клиент задаёт hwidHash сам (не аттестован). Атакующий не должен
+// авто-забанить чужое устройство, выставив hwidHash жертвы (framing), и не должен затереть
+// её отпечаток своим компонентом (порча fuzzy-матча). Баниться может только его аккаунт.
+func TestForeignHwidNotFramedOrPolluted(t *testing.T) {
+	db := newTestDB(t)
+	svc := NewService(db, "secret", true, nil, "") // autoBan включён
+	ctx := context.Background()
+
+	// Владелец A регистрирует HWID со стабильным компонентом.
+	if _, err := svc.InitHandshakeWithComponents(ctx, "uuid-A", "Alice", "hwid-shared",
+		HwidComponents{MachineID: "mid-A"}, nil); err != nil {
+		t.Fatalf("init A: %v", err)
+	}
+	// Атакующий B выставляет hwidHash жертвы и шлёт свой компонент, затем — hard-детект.
+	resB, err := svc.InitHandshakeWithComponents(ctx, "uuid-B", "Bob", "hwid-shared",
+		HwidComponents{MachineID: "mid-B"}, nil)
+	if err != nil {
+		t.Fatalf("init B: %v", err)
+	}
+	claimsB, _ := svc.VerifyToken(resB.LaunchToken)
+	if _, _, err := svc.RecordDetection(ctx, claimsB, DetectionInput{Type: "inject", Signature: "foreign-agent"}); err != nil {
+		t.Fatalf("detect B: %v", err)
+	}
+
+	var hwidBans int64
+	db.Model(&models.HwidBan{}).Where("hwid_hash = ?", "hwid-shared").Count(&hwidBans)
+	if hwidBans != 0 {
+		t.Fatalf("чужой HWID не должен попадать под авто-бан (framing): got %d", hwidBans)
+	}
+	var accBans int64
+	db.Model(&models.AccountBan{}).Where("user_uuid = ?", "uuid-B").Count(&accBans)
+	if accBans != 1 {
+		t.Fatalf("аккаунт самого атакующего должен быть забанен: got %d", accBans)
+	}
+	var h models.Hwid
+	db.Where("hash = ?", "hwid-shared").First(&h)
+	if h.MachineIDHash != "mid-A" {
+		t.Fatalf("компонент владельца не должен затираться чужим: got %q", h.MachineIDHash)
+	}
+}
+
 // Регрессия: heartbeat — единственный сигнал «игра жива» во время сессии. Он обязан
 // продлевать игровую сессию (TouchByNonce), иначе её 15-мин TTL истекает на лету и
 // реконнект ловит «Недействительная сессия».

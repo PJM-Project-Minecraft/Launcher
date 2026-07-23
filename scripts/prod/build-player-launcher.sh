@@ -130,6 +130,30 @@ Do not set LAUNCHER_API_URL unless you intentionally want to override the
 production backend.
 EOF
 
+# Оффлайн-подпись бинарника обновления (Ed25519). Приватный ключ — ТОЛЬКО на релиз-боксе
+# (в git/на сервере его нет). Задайте LAUNCHER_SIGNING_KEY=путь/к/update-signing.key;
+# ключ создаётся `updatesign keygen`, публичный (LAUNCHER_UPDATE_PUBKEY) вшивается в сборку.
+# Лаунчер со вшитым ключом примет обновление ТОЛЬКО с валидной подписью.
+PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
+[[ "$PLATFORM" == windows-* ]] && PLAYER_BIN="$PACKAGE_DIR/ProjectMinecraftLauncher.exe"
+if [[ -n "${LAUNCHER_SIGNING_KEY:-}" ]]; then
+  SIG=""
+  if command -v updatesign >/dev/null 2>&1; then
+    SIG="$(updatesign sign -key "$LAUNCHER_SIGNING_KEY" "$PLAYER_BIN")"
+  elif command -v go >/dev/null 2>&1; then
+    SIG="$(cd "$ROOT_DIR/backend" && go run ./cmd/updatesign sign -key "$LAUNCHER_SIGNING_KEY" "$PLAYER_BIN")"
+  else
+    echo "[launcher] WARN: LAUNCHER_SIGNING_KEY задан, но нет ни updatesign в PATH, ни go — подпись пропущена." >&2
+  fi
+  if [[ -n "$SIG" ]]; then
+    echo "$SIG" > "$PACKAGE_DIR/signature.txt"
+    echo "[launcher] Подпись обновления ($PLATFORM): $SIG"
+    echo "[launcher] Сохранена в $PACKAGE_DIR/signature.txt — вставьте её в поле «Подпись» при заливке релиза."
+  fi
+else
+  echo "[launcher] (подпись не создана: LAUNCHER_SIGNING_KEY не задан; лаунчер со вшитым ключом отвергнет неподписанный релиз)" >&2
+fi
+
 mkdir -p "$OUT_DIR"
 if command -v tar >/dev/null 2>&1; then
   (

@@ -11,12 +11,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use ed25519_dalek::{Signature, VerifyingKey};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Версия лаунчера, зашитая при сборке (Cargo.toml).
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Публичный ключ Ed25519 для проверки подписи обновления, вшивается при сборке
+/// (`LAUNCHER_UPDATE_PUBKEY` = 64 hex-символа). Задан → подпись ОБЯЗАТЕЛЬНА и
+/// проверяется (fail-closed); не задан (dev-сборка) → как раньше, только SHA-256.
+fn update_pubkey() -> Option<VerifyingKey> {
+    let hex_key = option_env!("LAUNCHER_UPDATE_PUBKEY")?.trim();
+    if hex_key.is_empty() {
+        return None;
+    }
+    let bytes = hex::decode(hex_key).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    VerifyingKey::from_bytes(&arr).ok()
+}
 
 /// Платформа в терминах бэкенда (storage/releases/<version>/<platform>).
 pub fn platform() -> &'static str {
@@ -39,13 +53,13 @@ pub struct UpdateInfo {
     pub download_url: String,
     #[serde(default)]
     pub sha256: String,
+    /// hex Ed25519-подпись бинарника (пусто — релиз без подписи).
+    #[serde(default)]
+    pub signature: String,
 }
 
 /// Посегментное сравнение версий "X.Y.Z"; отсутствующие и нечисловые
 /// сегменты считаются нулями (зеркало CompareVersions на бэкенде).
-/// Решение об обновлении принимает сервер; здесь оставлено как
-/// протестированный эталон алгоритма.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     fn parse(version: &str) -> Vec<u64> {
         version
@@ -62,6 +76,12 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
         }
     }
     Ordering::Equal
+}
+
+/// true, если версия строго новее текущей. Клиентский guard против навязанного
+/// сервером даунгрейда (откат на старую уязвимую версию): решение сервера не слепо.
+pub fn is_upgrade(latest_version: &str) -> bool {
+    compare_versions(latest_version, CURRENT_VERSION) == Ordering::Greater
 }
 
 /// Запрашивает у бэкенда сведения об обновлении для текущей версии и платформы.
@@ -130,7 +150,6 @@ pub fn download_and_stage(api_url: &str, info: &UpdateInfo) -> Result<PathBuf, S
         ));
     }
 
-    let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = match response.read(&mut buffer) {
@@ -143,7 +162,6 @@ pub fn download_and_stage(api_url: &str, info: &UpdateInfo) -> Result<PathBuf, S
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
         if out.write_all(&buffer[..read]).is_err() {
             let _ = fs::remove_file(&staged);
             return Err("Не удалось записать обновление на диск.".to_string());
@@ -151,18 +169,53 @@ pub fn download_and_stage(api_url: &str, info: &UpdateInfo) -> Result<PathBuf, S
     }
     drop(out);
 
-    let actual = format!("{:x}", hasher.finalize());
-    if !actual.eq_ignore_ascii_case(info.sha256.trim()) {
+    // SHA-256 + подпись. Подпись — корень доверия: SHA приходит тем же каналом, что и
+    // файл, и один сам по себе подлинность не доказывает (MITM/скомпром. зеркало
+    // подставят и файл, и совпадающий хеш). Ошибка → удаляем недоверенный файл.
+    if let Err(e) = verify_staged_file(&staged, info) {
         let _ = fs::remove_file(&staged);
-        return Err("Контрольная сумма обновления не совпала.".to_string());
+        return Err(e);
     }
     Ok(staged)
 }
 
+/// Сверяет подготовленный файл с ожидаемыми SHA-256 и Ed25519-подписью. Читает файл
+/// заново — чтобы `apply_and_restart` мог перепроверить прямо перед подменой (TOCTOU:
+/// локальный процесс с теми же правами мог подменить `.update.partial` после stage).
+fn verify_staged_file(path: &Path, info: &UpdateInfo) -> Result<(), String> {
+    let data = fs::read(path).map_err(|_| "Не удалось прочитать обновление.".to_string())?;
+    let actual = format!("{:x}", Sha256::digest(&data));
+    if !actual.eq_ignore_ascii_case(info.sha256.trim()) {
+        return Err("Контрольная сумма обновления не совпала.".to_string());
+    }
+    verify_signature(&data, &info.signature)
+}
+
+/// Проверяет Ed25519-подпись данных вшитым публичным ключом. Ключ вшит → подпись
+/// ОБЯЗАТЕЛЬНА (fail-closed: сервер не «снимет» защиту, прислав пустую подпись).
+/// Ключа нет (dev-сборка) → подпись не требуется.
+fn verify_signature(data: &[u8], sig_hex: &str) -> Result<(), String> {
+    let Some(pubkey) = update_pubkey() else {
+        return Ok(());
+    };
+    let sig_bytes =
+        hex::decode(sig_hex.trim()).map_err(|_| "Обновление без корректной подписи.".to_string())?;
+    let arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "Обновление без корректной подписи.".to_string())?;
+    pubkey
+        .verify_strict(data, &Signature::from_bytes(&arr))
+        .map_err(|_| "Подпись обновления недействительна.".to_string())
+}
+
 /// Подменяет текущий бинарник подготовленным файлом и перезапускает лаунчер.
 /// При успехе не возвращается (process::exit).
-pub fn apply_and_restart(staged: &Path) -> Result<(), String> {
+pub fn apply_and_restart(staged: &Path, info: &UpdateInfo) -> Result<(), String> {
     let exe = exe_path()?;
+
+    // Перепроверяем SHA+подпись прямо перед подменой (TOCTOU): между stage и apply
+    // файл мог быть изменён другим локальным процессом.
+    verify_staged_file(staged, info)?;
 
     #[cfg(unix)]
     {

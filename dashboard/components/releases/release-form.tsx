@@ -26,6 +26,12 @@ export function ReleaseForm({ onCreated }: { onCreated: () => void }) {
     'linux-x64': null,
     'windows-x64': null
   });
+  // Оффлайн Ed25519-подпись бинарника (hex из `updatesign sign`). Необязательна, но
+  // лаунчер со вшитым ключом примет обновление ТОЛЬКО с валидной подписью.
+  const [signatures, setSignatures] = useState<Record<string, string>>({
+    'linux-x64': '',
+    'windows-x64': ''
+  });
   const [progress, setProgress] = useState<number | null>(null);
 
   const selectedCount = Object.values(files).filter(Boolean).length;
@@ -39,6 +45,8 @@ export function ReleaseForm({ onCreated }: { onCreated: () => void }) {
     for (const platform of platforms) {
       const file = files[platform.key];
       if (file) form.set(platform.key, file);
+      const sig = signatures[platform.key]?.trim();
+      if (sig) form.set(`signature-${platform.key}`, sig);
     }
 
     setProgress(0);
@@ -49,6 +57,7 @@ export function ReleaseForm({ onCreated }: { onCreated: () => void }) {
       setChangelog('');
       setMandatory(false);
       setFiles({ 'linux-x64': null, 'windows-x64': null });
+      setSignatures({ 'linux-x64': '', 'windows-x64': '' });
       setFormKey((k) => k + 1);
       onCreated();
     } catch (error) {
@@ -75,13 +84,22 @@ export function ReleaseForm({ onCreated }: { onCreated: () => void }) {
       </Field>
 
       {platforms.map((platform) => (
-        <Field key={`${platform.key}-${formKey}`} label={`Бинарник ${platform.label}`}>
-          <input
-            type="file"
-            onChange={(e) => setFiles((current) => ({ ...current, [platform.key]: e.target.files?.[0] ?? null }))}
-            className="block w-full text-sm text-fg-secondary file:mr-3 file:rounded-lg file:border file:border-edge file:bg-surface file:px-3 file:py-2 file:text-sm file:font-semibold file:text-fg hover:file:bg-surface-strong"
-          />
-        </Field>
+        <div key={`${platform.key}-${formKey}`} className="flex flex-col gap-2">
+          <Field label={`Бинарник ${platform.label}`}>
+            <input
+              type="file"
+              onChange={(e) => setFiles((current) => ({ ...current, [platform.key]: e.target.files?.[0] ?? null }))}
+              className="block w-full text-sm text-fg-secondary file:mr-3 file:rounded-lg file:border file:border-edge file:bg-surface file:px-3 file:py-2 file:text-sm file:font-semibold file:text-fg hover:file:bg-surface-strong"
+            />
+          </Field>
+          <Field label={`Подпись ${platform.label}`} hint="hex из `updatesign sign` (необязательно, но нужна для лаунчера со вшитым ключом)">
+            <Input
+              value={signatures[platform.key]}
+              onChange={(e) => setSignatures((current) => ({ ...current, [platform.key]: e.target.value }))}
+              placeholder="128 hex-символов Ed25519"
+            />
+          </Field>
+        </div>
       ))}
 
       <label className="flex items-center gap-2 text-sm text-fg-secondary">

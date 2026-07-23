@@ -165,20 +165,24 @@ func (s *Service) Confirm(token string, proof ConfirmProof) error {
 	if err != nil {
 		return err
 	}
-	if perr := s.verifyProof(claims, proof); perr != nil {
-		if s.requireAttestation {
-			return perr // жёсткий режим: без валидного proof не верифицируем сессию
-		}
-		// Transition: фиксируем будущий отказ, но пускаем (пока не раздан новый лаунчер).
-		// Уровень Error + Telegram-алерт: срабатывание этой ветки в масштабе = признак
-		// массового обхода античита (подделанный/отсутствующий proof), операторы должны
-		// это видеть, а не терять в Warn-шуме. Сессию всё равно не блокируем — enforcement
-		// requireAttestation флипается прод-переменной ANTICHEAT_REQUIRE_ATTESTATION.
+	proofErr := s.verifyProof(claims, proof)
+	if proofErr != nil && s.requireAttestation {
+		return proofErr // жёсткий режим: без валидного proof не верифицируем сессию
+	}
+	// MarkVerifiedByNonce гейтит и верификацию, и алерт: true только на ПЕРВОМ confirm
+	// этого nonce (повторный/уже верифицированный → false). Раньше алерт стоял до него,
+	// поэтому повторные confirm'ы по одному nonce слали дубль-алерты и плодили goroutine;
+	// теперь synthetic-детект «bypass» уходит ровно один раз на сессию.
+	if s.verifier == nil || !s.verifier.MarkVerifiedByNonce(claims.Nonce) {
+		return errors.New("session not found or already confirmed")
+	}
+	if proofErr != nil {
+		// Transition: proof не сошёлся, но сессию пропускаем (лаунчер с attestation ещё
+		// не раздан). Error + Telegram-алерт: массовое срабатывание = признак обхода
+		// античита. Enforcement включается ANTICHEAT_REQUIRE_ATTESTATION.
 		slog.Error("anticheat: attestation bypass (transition mode — сессия пропущена)",
-			"login", claims.Login, "uuid", claims.UUID, "reason", perr)
+			"login", claims.Login, "uuid", claims.UUID, "reason", proofErr)
 		if s.notifier != nil {
-			// Переиспользуем канал алертов о детектах (Telegram): синтетический детект
-			// «attestation-bypass». go — не блокировать confirm сетевым вызовом.
 			go s.notifier.NotifyDetection(models.Detection{
 				UserUUID:   claims.UUID,
 				Login:      claims.Login,
@@ -186,14 +190,11 @@ func (s *Service) Confirm(token string, proof ConfirmProof) error {
 				SessionID:  claims.Nonce,
 				Source:     "native",
 				Type:       "attestation-bypass",
-				Signature:  perr.Error(),
+				Signature:  proofErr.Error(),
 				Severity:   9,
 				Confidence: "soft",
 			}, false)
 		}
-	}
-	if s.verifier == nil || !s.verifier.MarkVerifiedByNonce(claims.Nonce) {
-		return errors.New("session not found or already confirmed")
 	}
 	// Трекинг живости стартует после успешного confirm.
 	s.touchHeartbeat(claims.Nonce)
@@ -724,9 +725,11 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 	if err := s.db.WithContext(ctx).Create(&rec).Error; err != nil {
 		return severity, confidence, err
 	}
-	// Авто-бан только за hard-детект: soft-эвристика (substring-матч, tamper, debugger)
-	// не банит даже при включённом autoBan — она лишь попадает в review-очередь.
-	autoBanned := s.autoBan && severity >= autoBanSeverity && confidence == "hard"
+	// Авто-бан только за hard-детект И только для детекта, привязанного к живой сессии
+	// (sessionID = nonce из launch-token, т.е. post-init /detect). Pre-launch детекты из
+	// init (sessionID="") приходят с НЕаттестованным, клиентом-заданным hwidHash — авто-
+	// бан по ним = вектор подставы (framing). soft-эвристика тоже не банит.
+	autoBanned := s.autoBan && sessionID != "" && severity >= autoBanSeverity && confidence == "hard"
 	if autoBanned {
 		s.autoBanEscalated(ctx, userUUID, login, hwidHash, d.Signature, now)
 	}
@@ -765,10 +768,29 @@ func (s *Service) autoBanEscalated(ctx context.Context, userUUID, login, hwidHas
 		expiry = &t
 	}
 	reason := "auto: " + signature
+	// Аккаунт баним по claims.UUID — он берётся из JWT (аутентифицирован), не подделать.
 	_ = s.banAccount(ctx, userUUID, login, reason, "anticheat", expiry)
-	if hwidHash != "" {
+	// HWID баним ТОЛЬКО если хеш принадлежит этому аккаунту (FirstUserUUID совпадает):
+	// hwidHash приходит из клиента (не аттестован), и без этой проверки читер, выставив
+	// hwidHash = агрегат жертвы, авто-забанил бы чужое устройство (framing).
+	if hwidHash != "" && s.hwidOwnedBy(ctx, hwidHash, userUUID) {
 		_ = s.banHwid(ctx, hwidHash, reason, "anticheat", expiry)
 	}
+}
+
+// hwidOwnedBy — true, если записи HWID ещё нет (новый хеш этого игрока) или её
+// FirstUserUUID == userUUID. False — хеш впервые виден под другим аккаунтом (чужой),
+// либо ошибка БД (консервативно не баним).
+func (s *Service) hwidOwnedBy(ctx context.Context, hwidHash, userUUID string) bool {
+	var h models.Hwid
+	err := s.db.WithContext(ctx).Where("hash = ?", hwidHash).First(&h).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return h.FirstUserUUID == userUUID
 }
 
 // hasPriorBan сообщает, банился ли уже этот аккаунт или HWID (запись существует,
@@ -883,14 +905,18 @@ func (s *Service) touchHwid(ctx context.Context, hwidHash, userUUID, login strin
 		"seen_count": gorm.Expr("seen_count + 1"),
 		"last_seen":  now,
 	}
-	// Компоненты обновляем только если присланы — старый клиент их не шлёт, не затираем.
-	if comps.MachineID != "" {
+	// Компоненты перезаписываем ТОЛЬКО владельцем хеша (FirstUserUUID) или когда поле
+	// ещё пустое. Иначе чужой аккаунт, выставив hwidHash жертвы, затёр бы её отпечаток
+	// (порча fuzzy-матча / данных для будущего HWID-бана). Старый клиент компоненты не
+	// шлёт — не затираем в любом случае.
+	owned := h.FirstUserUUID == userUUID
+	if comps.MachineID != "" && (owned || h.MachineIDHash == "") {
 		updates["machine_id_hash"] = comps.MachineID
 	}
-	if comps.BoardUUID != "" {
+	if comps.BoardUUID != "" && (owned || h.BoardUUIDHash == "") {
 		updates["board_uuid_hash"] = comps.BoardUUID
 	}
-	if macJSON != "" {
+	if macJSON != "" && (owned || h.MacHashes == "") {
 		updates["mac_hashes"] = macJSON
 	}
 	return s.db.WithContext(ctx).Model(&models.Hwid{}).Where("hash = ?", hwidHash).Updates(updates).Error

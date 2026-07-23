@@ -148,8 +148,28 @@ func BindTelegram(ctx context.Context, db *gorm.DB, userID string, telegramID in
 }
 
 func SetPassword(ctx context.Context, db *gorm.DB, userID, bcryptHash string) error {
+	now := time.Now().UTC()
+	// tokens_valid_after = now отзывает все ранее выданные JWT: после смены пароля
+	// украденная сессия перестаёт работать сразу, а не через 7-дн. TTL токена.
 	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).
-		Updates(map[string]any{"password_hash": bcryptHash, "updated_at": time.Now().UTC()}).Error
+		Updates(map[string]any{"password_hash": bcryptHash, "tokens_valid_after": now, "updated_at": now}).Error
+}
+
+// SetTOTPLastStep фиксирует номер последнего принятого TOTP-шага (анти-replay кода).
+func SetTOTPLastStep(ctx context.Context, db *gorm.DB, userID string, step int64) error {
+	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).
+		Update("totp_last_step", step).Error
+}
+
+// CountRecentFailedLogins считает неуспешные попытки входа для логина с момента since.
+// Ключ — username (в auth_logs пишется и для несуществующих логинов), IP-независим:
+// закрывает распределённый перебор пароля (спрей с ботнета обходит per-IP лимитер).
+func CountRecentFailedLogins(ctx context.Context, db *gorm.DB, username string, since time.Time) (int64, error) {
+	var n int64
+	err := db.WithContext(ctx).Model(&models.AuthLog{}).
+		Where("username = ? AND success = ? AND created_at >= ?", username, false, since).
+		Count(&n).Error
+	return n, err
 }
 
 func SetEmail(ctx context.Context, db *gorm.DB, userID, email string) error {
