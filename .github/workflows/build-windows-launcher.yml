@@ -1,7 +1,17 @@
-# Ручная сборка Windows-бинарника плеер-лаунчера (MSVC) с зашитым URL бэкенда.
+# Ручная сборка Windows-бинарника плеер-лаунчера (MSVC) с зашитым URL бэкенда
+# и подписью автообновления.
+#
 # Запуск: вкладка Actions → Build Windows Launcher → Run workflow,
 # либо: gh workflow run build-windows-launcher.yml -f api_url=https://launcher.likonchik.xyz
-# Готовый exe — в артефактах рана; его заливаем в дашборд на странице «Релизы».
+#
+# ПОДПИСЬ АВТООБНОВЛЕНИЯ (два режима, выбери один):
+#   1) Ключ в CI (удобно, но приватный ключ покидает релиз-бокс → живёт в секретах GitHub):
+#      Settings → Secrets → Actions → LAUNCHER_SIGNING_KEY = hex-seed из `updatesign keygen`.
+#      CI сам выведет публичный ключ, вшьёт его и подпишет exe. Артефакт: exe + signature.txt.
+#   2) Ключ офлайн (безопаснее): Settings → Variables → Actions → LAUNCHER_UPDATE_PUBKEY =
+#      публичный ключ (hex, не секрет). CI вшивает его, но НЕ подписывает; скачай exe из
+#      артефакта и подпиши локально: `updatesign sign -key <ключ> ProjectMinecraftLauncher.exe`.
+# Без секрета и без variable exe соберётся БЕЗ проверки подписи (обновления по SHA).
 name: Build Windows Launcher
 
 on:
@@ -21,22 +31,86 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: launcher-slint
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      # Определяем публичный ключ: из приватного (секрет) — приоритет и одна точка правды;
+      # иначе из variables. Приватный ключ пишем в файл только на время рана (раннер эфемерный).
+      - name: Resolve signing pubkey
+        id: resolve
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.LAUNCHER_SIGNING_KEY }}
+          PUBVAR: ${{ vars.LAUNCHER_UPDATE_PUBKEY }}
+        run: |
+          if [[ -n "$SIGNING_KEY" ]]; then
+            printf '%s' "$SIGNING_KEY" > backend/ci-signing.key
+            PUB="$(cd backend && go run ./cmd/updatesign pubkey -key ci-signing.key)"
+            echo "have_key=1" >> "$GITHUB_OUTPUT"
+            echo "pubkey=$PUB" >> "$GITHUB_OUTPUT"
+            echo "Подпись в CI включена. pubkey=$PUB"
+          elif [[ -n "$PUBVAR" ]]; then
+            echo "have_key=0" >> "$GITHUB_OUTPUT"
+            echo "pubkey=$PUBVAR" >> "$GITHUB_OUTPUT"
+            echo "Секрета нет — вшиваю pubkey из variables, подпишешь exe локально. pubkey=$PUBVAR"
+          else
+            echo "have_key=0" >> "$GITHUB_OUTPUT"
+            echo "pubkey=" >> "$GITHUB_OUTPUT"
+            echo "Ни секрета, ни variable — сборка БЕЗ проверки подписи."
+          fi
+
       - name: Build release
         working-directory: launcher-slint
         env:
           LAUNCHER_DEFAULT_API_URL: ${{ inputs.api_url }}
+          LAUNCHER_UPDATE_PUBKEY: ${{ steps.resolve.outputs.pubkey }}
         run: cargo build --release --locked
+
       - name: Read version
         id: version
         shell: bash
         run: echo "version=$(awk -F '"' '/^version = / { print $2; exit }' launcher-slint/Cargo.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
           cp launcher-slint/target/release/launcher-slint.exe dist/ProjectMinecraftLauncher.exe
+
+      # Страховка: публичный ключ реально попал в бинарник (иначе лаунчер не проверял бы подпись).
+      - name: Verify pubkey embedded
+        if: steps.resolve.outputs.pubkey != ''
+        shell: bash
+        run: |
+          if grep -aq "${{ steps.resolve.outputs.pubkey }}" dist/ProjectMinecraftLauncher.exe; then
+            echo "Публичный ключ вшит в бинарник ✓"
+          else
+            echo "ОШИБКА: публичный ключ не вшит в бинарник." >&2
+            exit 1
+          fi
+
+      # Подпись в CI (только при наличии секретного ключа). Проверяем её тут же — как лаунчер.
+      - name: Sign
+        if: steps.resolve.outputs.have_key == '1'
+        shell: bash
+        run: |
+          cd backend
+          SIG="$(go run ./cmd/updatesign sign -key ci-signing.key ../dist/ProjectMinecraftLauncher.exe)"
+          go run ./cmd/updatesign verify -pub "${{ steps.resolve.outputs.pubkey }}" -sig "$SIG" ../dist/ProjectMinecraftLauncher.exe
+          echo "$SIG" > ../dist/signature.txt
+          echo "Подпись: $SIG"
+
+      - name: Cleanup signing key
+        if: always()
+        shell: bash
+        run: rm -f backend/ci-signing.key
+
       - uses: actions/upload-artifact@v4
         with:
           name: project-minecraft-launcher-${{ steps.version.outputs.version }}-windows-x64
-          path: dist/ProjectMinecraftLauncher.exe
-          if-no-files-found: error
+          path: |
+            dist/ProjectMinecraftLauncher.exe
+            dist/signature.txt
+          if-no-files-found: warn

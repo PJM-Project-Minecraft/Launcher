@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 #
-# Build a player-facing launcher package with the production backend URL baked in.
+# Сборка плеер-лаунчера с зашитым URL бэкенда и (опционально) подписью автообновления.
+#
+# Подпись: задайте приватный ключ — публичный ВЫВОДИТСЯ из него автоматически, вшивается
+# в бинарник и им же подписывается сборка. Ключ создаётся `updatesign keygen`, хранится
+# ТОЛЬКО на релиз-боксе (в git/на сервере его нет).
+#   scripts/prod/build-player-launcher.sh --api-url https://... --signing-key ~/pjm-update-signing.key
+# Без ключа собирается лаунчер, принимающий обновления по SHA (как раньше).
 
 set -euo pipefail
 
@@ -8,19 +14,26 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 API_URL="${LAUNCHER_DEFAULT_API_URL:-}"
 OUT_DIR="$ROOT_DIR/dist/releases"
 BUILD=1
+# Ключ подписи и публичный ключ можно задать флагом или переменной окружения.
+SIGNING_KEY="${LAUNCHER_SIGNING_KEY:-}"
+PUBKEY="${LAUNCHER_UPDATE_PUBKEY:-}"
 
 usage() {
   cat <<'EOF'
 Usage: scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com [options]
 
 Options:
-  --api-url URL      Public backend URL used by players and the game server
-  --out-dir DIR      Output directory (default: dist/releases)
-  --no-build         Package the existing release binary without rebuilding
-  -h, --help         Show this help
+  --api-url URL       Public backend URL used by players and the game server
+  --signing-key PATH  Приватный Ed25519-ключ (updatesign keygen). Публичный ключ
+                      выводится из него, вшивается в бинарник и им же подписывается сборка.
+                      Можно вместо флага задать переменную LAUNCHER_SIGNING_KEY.
+  --out-dir DIR       Output directory (default: dist/releases)
+  --no-build          Package the existing release binary without rebuilding
+  -h, --help          Show this help
 
-Example:
-  scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com
+Example (с подписью):
+  scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com \
+    --signing-key ~/pjm-update-signing.key
 EOF
 }
 
@@ -28,6 +41,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --api-url)
       API_URL="${2:-}"
+      shift
+      ;;
+    --signing-key)
+      SIGNING_KEY="${2:-}"
       shift
       ;;
     --out-dir)
@@ -70,6 +87,36 @@ if ! command -v cargo >/dev/null 2>&1; then
   fi
 fi
 
+# run_updatesign — вызывает инструмент подписи: собранный бинарь updatesign в PATH
+# или `go run` из модуля backend. Пути аргументов должны быть абсолютными (go run
+# исполняется с cwd=backend).
+run_updatesign() {
+  if command -v updatesign >/dev/null 2>&1; then
+    updatesign "$@"
+  elif command -v go >/dev/null 2>&1; then
+    ( cd "$ROOT_DIR/backend" && go run ./cmd/updatesign "$@" )
+  else
+    echo "ERROR: для подписи нужен updatesign в PATH или go (backend/cmd/updatesign)." >&2
+    return 1
+  fi
+}
+
+# Публичный ключ выводим из приватного (одна точка правды): пользователь задаёт только
+# ключ, копировать pubkey руками не нужно — так исчезает ошибка «забыл экспортировать».
+if [[ -n "$SIGNING_KEY" ]]; then
+  if [[ ! -f "$SIGNING_KEY" ]]; then
+    echo "ERROR: файл приватного ключа не найден: $SIGNING_KEY" >&2
+    exit 1
+  fi
+  DERIVED_PUB="$(run_updatesign pubkey -key "$SIGNING_KEY")" || exit 1
+  if [[ -n "$PUBKEY" && "$PUBKEY" != "$DERIVED_PUB" ]]; then
+    echo "ERROR: LAUNCHER_UPDATE_PUBKEY не совпадает с ключом из --signing-key." >&2
+    exit 1
+  fi
+  PUBKEY="$DERIVED_PUB"
+  echo "[launcher] Публичный ключ выведен из приватного: $PUBKEY"
+fi
+
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT_DIR/launcher-slint/Cargo.toml")"
 TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 PLATFORM="linux-x64"
@@ -84,7 +131,8 @@ if (( BUILD == 1 )); then
   echo "[launcher] Building release with LAUNCHER_DEFAULT_API_URL=$API_URL"
   (
     cd "$ROOT_DIR/launcher-slint"
-    LAUNCHER_DEFAULT_API_URL="$API_URL" cargo build --release
+    # PUBKEY передаётся ЯВНО (не через export родителя) — иначе option_env! его не увидит.
+    LAUNCHER_DEFAULT_API_URL="$API_URL" LAUNCHER_UPDATE_PUBKEY="$PUBKEY" cargo build --release
   )
 fi
 
@@ -130,46 +178,31 @@ Do not set LAUNCHER_API_URL unless you intentionally want to override the
 production backend.
 EOF
 
-# Оффлайн-подпись бинарника обновления (Ed25519). Приватный ключ — ТОЛЬКО на релиз-боксе
-# (в git/на сервере его нет). Задайте LAUNCHER_SIGNING_KEY=путь/к/update-signing.key;
-# ключ создаётся `updatesign keygen`, публичный (LAUNCHER_UPDATE_PUBKEY) вшивается в сборку.
-# Лаунчер со вшитым ключом примет обновление ТОЛЬКО с валидной подписью.
 PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
 [[ "$PLATFORM" == windows-* ]] && PLAYER_BIN="$PACKAGE_DIR/ProjectMinecraftLauncher.exe"
 
-# Публичный ключ вшивается через option_env! на этапе cargo. Частая ошибка — задать
-# LAUNCHER_UPDATE_PUBKEY отдельной (не экспортированной) строкой: тогда он не долетает
-# до cargo и лаунчер молча собирается БЕЗ проверки подписи. Ловим это сразу.
-if [[ -n "${LAUNCHER_UPDATE_PUBKEY:-}" ]]; then
-  if grep -aq "$LAUNCHER_UPDATE_PUBKEY" "$PLAYER_BIN"; then
+# Подпись автообновления (Ed25519). Публичный ключ вшивается через option_env! на этапе
+# cargo — проверяем, что он реально попал в бинарник (страховка от кэша cargo/сбоя).
+if [[ -n "$PUBKEY" ]]; then
+  if grep -aq "$PUBKEY" "$PLAYER_BIN"; then
     echo "[launcher] Публичный ключ вшит в бинарник ✓"
   else
-    echo "[launcher] ОШИБКА: LAUNCHER_UPDATE_PUBKEY задан, но в бинарнике его НЕТ." >&2
-    echo "[launcher]        Переменная не экспортирована в cargo. Передавай её В ОДНОЙ строке" >&2
-    echo "[launcher]        со скриптом (LAUNCHER_UPDATE_PUBKEY=... scripts/prod/build-...) или через export." >&2
+    echo "[launcher] ОШИБКА: публичный ключ задан, но в бинарнике его НЕТ (cargo не пересобрал?)." >&2
+    echo "[launcher]        Удали launcher-slint/target/release и пересобери." >&2
     exit 1
   fi
-elif [[ -n "${LAUNCHER_SIGNING_KEY:-}" ]]; then
-  echo "[launcher] ВНИМАНИЕ: подписываешь релиз, но LAUNCHER_UPDATE_PUBKEY не задан —" >&2
-  echo "[launcher]          собранный лаунчер НЕ проверяет подпись. Забыл экспортировать ключ?" >&2
 fi
 
-if [[ -n "${LAUNCHER_SIGNING_KEY:-}" ]]; then
-  SIG=""
-  if command -v updatesign >/dev/null 2>&1; then
-    SIG="$(updatesign sign -key "$LAUNCHER_SIGNING_KEY" "$PLAYER_BIN")"
-  elif command -v go >/dev/null 2>&1; then
-    SIG="$(cd "$ROOT_DIR/backend" && go run ./cmd/updatesign sign -key "$LAUNCHER_SIGNING_KEY" "$PLAYER_BIN")"
-  else
-    echo "[launcher] WARN: LAUNCHER_SIGNING_KEY задан, но нет ни updatesign в PATH, ни go — подпись пропущена." >&2
-  fi
-  if [[ -n "$SIG" ]]; then
-    echo "$SIG" > "$PACKAGE_DIR/signature.txt"
-    echo "[launcher] Подпись обновления ($PLATFORM): $SIG"
-    echo "[launcher] Сохранена в $PACKAGE_DIR/signature.txt — вставьте её в поле «Подпись» при заливке релиза."
-  fi
+if [[ -n "$SIGNING_KEY" ]]; then
+  SIG="$(run_updatesign sign -key "$SIGNING_KEY" "$PLAYER_BIN")" || exit 1
+  echo "$SIG" > "$PACKAGE_DIR/signature.txt"
+  # Сразу проверяем подпись тем же публичным ключом — ровно как это сделает лаунчер.
+  run_updatesign verify -pub "$PUBKEY" -sig "$SIG" "$PLAYER_BIN" || {
+    echo "[launcher] ОШИБКА: собственная проверка подписи не прошла." >&2; exit 1; }
+  echo "[launcher] Подпись обновления ($PLATFORM): $SIG"
+  echo "[launcher] Сохранена в $PACKAGE_DIR/signature.txt — вставьте её в поле «Подпись» при заливке релиза."
 else
-  echo "[launcher] (подпись не создана: LAUNCHER_SIGNING_KEY не задан; лаунчер со вшитым ключом отвергнет неподписанный релиз)" >&2
+  echo "[launcher] (без подписи: --signing-key не задан; лаунчер со вшитым ключом отвергнет неподписанный релиз)" >&2
 fi
 
 mkdir -p "$OUT_DIR"
