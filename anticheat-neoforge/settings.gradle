@@ -5,8 +5,4 @@ pluginManagement {
     }
 }
 
-plugins {
-    id 'net.neoforged.moddev.repositories' version '2.0.+'
-}
-
 rootProject.name = 'anticheat-neoforge'

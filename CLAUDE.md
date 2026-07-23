@@ -287,12 +287,14 @@ NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Jav
 **Осталось:**
 - **P5** — серверно-авторитетный in-game handshake. **Бэкенд ГОТОВ и оттестирован**
   (`POST /api/anticheat/p5/verify`, `internal/anticheat/p5.go`; конфиг `ANTICHEAT_P5_SECRET`
-  + `ANTICHEAT_P5_ENFORCE`, репорт-онли по дефолту). **NeoForge-мод — референс-реализация в
-  `anticheat-neoforge/`, НЕ собран/не протестирован в игре** (нет Gradle/NeoForge-тулчейна
-  здесь): собрать `./gradlew build` под точную версию NeoForge игрового сервера, сверить
-  network-API, обкатать на dev-сервере в репорт-онли, разложить (серверный jar → на игровой
-  сервер; клиентский → в профиль mods/ + «Сканировать файлы»), дать игрокам обновиться,
-  потом `ANTICHEAT_P5_ENFORCE=true`. Rollout и протокол — `anticheat-neoforge/README.md`.
+  + `ANTICHEAT_P5_ENFORCE`, репорт-онли по дефолту; секрет уже в прод `.env`, enforce=false).
+  **NeoForge-мод в `anticheat-neoforge/` СОБИРАЕТСЯ чисто против NeoForge 21.1.233 / MC 1.21.1**
+  (`gradle build` → валидный jar, 0 предупреждений; network-API проверен), но **в игре НЕ
+  протестирован** (нет игрового рантайма здесь): обкатать на dev-сервере в репорт-онли,
+  разложить (серверный jar → на игровой сервер + `ANTICHEAT_P5_SECRET` в его env; клиентский
+  → в профиль mods/ + «Сканировать файлы»), дать игрокам обновиться, потом
+  `ANTICHEAT_P5_ENFORCE=true`. Сборка: `cd anticheat-neoforge && gradle build` (Gradle 8.10+,
+  JDK 21; версия NeoForge в `gradle.properties`). Rollout и протокол — `anticheat-neoforge/README.md`.
   ⚠️ Честный потолок: accessToken есть и у читера → P5 это ПРИНУЖДЕНИЕ ПРИСУТСТВИЯ (клиент
   без мода кикается), не крипто-невозможность против полностью переписанного клиента.
 - ~~Включить attestation~~ — сделано, `ANTICHEAT_REQUIRE_ATTESTATION=true` на проде (см. P3 выше).

@@ -39,3 +39,7 @@ docker-compose.override.yml
 # Сторонний authlib-injector пользователя (отдельный репозиторий, не часть монорепо)
 /Gml.Authlib.Injector/
 .aider*
+
+# NeoForge-мод: сборочные артефакты
+anticheat-neoforge/build/
+anticheat-neoforge/.gradle/
