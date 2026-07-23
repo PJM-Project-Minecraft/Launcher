@@ -34,6 +34,10 @@ services:
       # Без passthrough .env-значения ДО контейнера не доходят (гоча ANTICHEAT_SECRET).
       ANTICHEAT_AUTO_BAN: "${ANTICHEAT_AUTO_BAN:-false}"
       ANTICHEAT_REQUIRE_ATTESTATION: "${ANTICHEAT_REQUIRE_ATTESTATION:-false}"
+      # P5 (серверно-авторитетный handshake). SECRET пуст → выключено; ENFORCE=false → репорт-онли.
+      # Включать ENFORCE=true ТОЛЬКО после раздачи мода и обкатки (иначе кикнет всех).
+      ANTICHEAT_P5_SECRET: "${ANTICHEAT_P5_SECRET:-}"
+      ANTICHEAT_P5_ENFORCE: "${ANTICHEAT_P5_ENFORCE:-false}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}"
       # База публичного бакета с файлами сборок. Пусто (dev) → файлы качаются с бэкенда.
       # Включать только когда mandatory-версия лаунчера >= 0.4.1: до неё лаунчер слал
