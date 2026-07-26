@@ -25,3 +25,11 @@
 -optimizationpasses 3
 -dontusemixedcaseclassnames
 -repackageclasses 'x'
+
+# --- CJK-манглинг имён: классы/методы/поля переименовываются в иероглифы (cjk-dict.txt) ---
+# Декомпилятор показывает 私.四() вместо checkKillaura(); имена по .class валидны (JVM
+# разрешает Unicode-идентификаторы). Это RENAMING, не защита строк — строки шифруются
+# отдельно (в agent.jar). Словарь общий для имён всех видов: коллизий ProGuard избегает сам.
+-obfuscationdictionary cjk-dict.txt
+-classobfuscationdictionary cjk-dict.txt
+-packageobfuscationdictionary cjk-dict.txt

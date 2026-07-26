@@ -38,10 +38,24 @@ public final class AgentResilienceTest {
             (cls, t) -> { throw new RuntimeException("reporter boom"); });
         if (!stillFell) { System.err.println("FAIL: сбой onError не должен ломать guardedIteration"); failures++; }
 
+        // 5. Обфускация строк (O.d): декодер обязан вернуть ТОЧНЫЕ маркеры, иначе детект
+        //    молча ломается (список читов не совпадёт ни с одним классом). Проверяем, что
+        //    обфусцированный DEFAULT_MARKERS содержит ключевые имена в исходном виде.
+        for (String want : new String[]{"wurst", "killaura", "meteorclient", "huzuni"}) {
+            if (!Agent.DEFAULT_MARKERS.contains(want)) {
+                System.err.println("FAIL: обфускация сломала маркер '" + want + "'");
+                failures++;
+            }
+        }
+        if (Agent.DEFAULT_MARKERS.size() != 10) {
+            System.err.println("FAIL: ожидалось 10 маркеров, получено " + Agent.DEFAULT_MARKERS.size());
+            failures++;
+        }
+
         if (failures > 0) {
             System.err.println(failures + " проверок упало");
             System.exit(1);
         }
-        System.out.println("AgentResilienceTest: OK (4 проверки)");
+        System.out.println("AgentResilienceTest: OK (5 проверок)");
     }
 }
