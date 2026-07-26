@@ -32,6 +32,9 @@ const INGAME_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// процессов (для in-game скана во время игры).
 pub struct LaunchGuard {
     launch_token: String,
+    /// Токен скриншот-эндпоинтов. Живёт ТОЛЬКО в процессе лаунчера — в jvm_args не
+    /// попадает, иначе мод читает его через System.getProperty и подменяет кадр.
+    screenshot_token: String,
     nonce: String,
     challenge: String,
     manifest: Option<IntegrityManifest>,
@@ -56,10 +59,12 @@ impl LaunchGuard {
         match handshake::init(config, token, &components, &detections) {
             handshake::InitOutcome::Allowed {
                 token,
+                screenshot_token,
                 nonce,
                 challenge,
             } => Ok(Self {
                 launch_token: token,
+                screenshot_token,
                 nonce,
                 challenge,
                 manifest,
@@ -72,6 +77,7 @@ impl LaunchGuard {
             // fail-open: недоступность бэкенда не блокирует игрока.
             handshake::InitOutcome::Unavailable => Ok(Self {
                 launch_token: String::new(),
+                screenshot_token: String::new(),
                 nonce: String::new(),
                 challenge: String::new(),
                 manifest,
@@ -86,10 +92,9 @@ impl LaunchGuard {
         &self.nonce
     }
 
-    /// launch-token античита: по нему лаунчер опрашивает скриншот-запросы и грузит
-    /// JPEG. Пустой — античит недоступен (fail-open), опрос в этом случае no-op.
-    pub fn launch_token(&self) -> &str {
-        &self.launch_token
+    /// Токен скриншот-эндпоинтов (в JVM не передаётся). Пустой — опрос no-op.
+    pub fn screenshot_token(&self) -> &str {
+        &self.screenshot_token
     }
 
     /// Ожидаемый SHA authlib-injector.jar (для верифицированной доставки в main).

@@ -160,6 +160,50 @@ type initRequest struct {
 	Detections     []DetectionInput `json:"detections"`
 }
 
+const (
+	// maxInitDetections — потолок pre-launch детектов в одном init.
+	maxInitDetections = 32
+	// maxHwidMacs — потолок хешей MAC-адресов в компонентах HWID.
+	maxHwidMacs = 16
+	// hwidHashLen — длина солёного SHA-256 в hex (формат всех хешей HWID лаунчера,
+	// launcher-slint/src/anticheat/hwid.rs).
+	hwidHashLen = 64
+)
+
+// validHwidHash — пусто (клиент не собрал отпечаток) либо 64 hex-символа.
+// Проверка формата НЕ делает HWID доверенным (его считает клиент, и подделать его
+// может любой), но не даёт засорять таблицу HWID и баны значениями вроде "1".
+func validHwidHash(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) != hwidHashLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validHwidComponents(comps HwidComponents) bool {
+	if !validHwidHash(comps.MachineID) || !validHwidHash(comps.BoardUUID) {
+		return false
+	}
+	if len(comps.Macs) > maxHwidMacs {
+		return false
+	}
+	for _, m := range comps.Macs {
+		if !validHwidHash(m) {
+			return false
+		}
+	}
+	return true
+}
+
 func (h Handler) init(c fiber.Ctx) error {
 	// Форс-апдейт: старый лаунчер не получает launch-token, пока не обновится.
 	// Запрос без заголовка — легаси-версия (≤0.1.0), считается "0.0.0".
@@ -200,6 +244,14 @@ func (h Handler) init(c fiber.Ctx) error {
 	var req initRequest
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
+	}
+	if !validHwidHash(req.HwidHash) || !validHwidComponents(req.HwidComponents) {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный HWID"})
+	}
+	// Потолок pre-launch детектов: тело init не ограничено BodyLimit'ом, и поддельный
+	// клиент иначе заливает в БД сколько угодно записей одним запросом.
+	if len(req.Detections) > maxInitDetections {
+		req.Detections = req.Detections[:maxInitDetections]
 	}
 	userUUID := yggdrasil.NormalizeUUID(user.ProviderUUID, user.Login)
 	result, err := h.service.InitHandshakeWithComponents(c.Context(), userUUID, user.Login, req.HwidHash, req.HwidComponents, req.Detections)
@@ -623,7 +675,7 @@ func (h Handler) screenshotPending(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNoContent).Send(nil)
 	}
-	claims, err := h.service.VerifySessionToken(launchTokenFromHeader(c))
+	claims, err := h.service.VerifyScreenshotToken(launchTokenFromHeader(c))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -656,7 +708,7 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, err := h.service.VerifySessionToken(launchTokenFromHeader(c))
+	claims, err := h.service.VerifyScreenshotToken(launchTokenFromHeader(c))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -702,7 +754,7 @@ func (h Handler) screenshotFail(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, err := h.service.VerifySessionToken(launchTokenFromHeader(c))
+	claims, err := h.service.VerifyScreenshotToken(launchTokenFromHeader(c))
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}

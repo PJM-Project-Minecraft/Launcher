@@ -29,6 +29,10 @@ struct InitResult {
     reason: String,
     #[serde(default)]
     launch_token: String,
+    /// Токен скриншот-эндпоинтов: остаётся в процессе лаунчера, в JVM не уходит.
+    /// serde default — старый сервер поля не отдаёт (скриншоты просто не работают).
+    #[serde(default)]
+    screenshot_token: String,
     #[serde(default)]
     nonce: String,
     #[serde(default)]
@@ -41,6 +45,7 @@ struct InitResult {
 pub enum InitOutcome {
     Allowed {
         token: String,
+        screenshot_token: String,
         nonce: String,
         challenge: String,
     },
@@ -142,6 +147,7 @@ pub fn init(
         }
         return InitOutcome::Allowed {
             token: result.launch_token,
+            screenshot_token: result.screenshot_token,
             nonce: result.nonce,
             challenge: result.challenge,
         };

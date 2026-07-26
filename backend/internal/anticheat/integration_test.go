@@ -51,7 +51,9 @@ func TestEnforcementFlow(t *testing.T) {
 		LaunchToken string `json:"launchToken"`
 		Nonce       string `json:"nonce"`
 	}
-	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"hw-1"}`, http.StatusOK, &initRes)
+	// Мусорный HWID (наблюдалось на проде: игрок слал hwidHash:"1" curl'ом) — отказ.
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"1"}`, http.StatusBadRequest, nil)
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"3a611a1537039f61c8cf8f73c3f5f94b44c16247aa2d9627630a283f2d9642f6"}`, http.StatusOK, &initRes)
 	if !initRes.Allowed || initRes.LaunchToken == "" || initRes.Nonce == "" {
 		t.Fatalf("init не выдал токен: %+v", initRes)
 	}
@@ -125,7 +127,7 @@ func TestServerKickRevokesSession(t *testing.T) {
 		LaunchToken string `json:"launchToken"`
 		Nonce       string `json:"nonce"`
 	}
-	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"hw-k"}`, http.StatusOK, &initRes)
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"9022fe70095076e8ff384ed57306dfba988287631b2cc670ab5ee7d3c60f9d9d"}`, http.StatusOK, &initRes)
 	var sess struct {
 		AccessToken string `json:"accessToken"`
 		UUID        string `json:"uuid"`
@@ -201,7 +203,7 @@ func TestBlacklistETagAndRulesHTTP(t *testing.T) {
 	var initRes struct {
 		LaunchToken string `json:"launchToken"`
 	}
-	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"hw-r"}`, http.StatusOK, &initRes)
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"146d851b7a8a91a9866ab475ad657fb41ee8ef1c251654df283f526f9190ac99"}`, http.StatusOK, &initRes)
 	reqR := httptest.NewRequest("GET", "/api/anticheat/rules", nil)
 	reqR.Header.Set("X-Launch-Token", initRes.LaunchToken)
 	respR, _ := app.Test(reqR, fiber.TestConfig{Timeout: 5 * time.Second})
@@ -256,7 +258,7 @@ func TestScreenshotPollSurvivesLaunchTokenTTL(t *testing.T) {
 		LaunchToken string `json:"launchToken"`
 		Nonce       string `json:"nonce"`
 	}
-	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"hw-s"}`, http.StatusOK, &initRes)
+	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"72cb9419bc43de7d05ec6bbb01838eec7b2ffe05d29ea47b8a35eddffe3b8749"}`, http.StatusOK, &initRes)
 	var sess struct {
 		AccessToken string `json:"accessToken"`
 	}
@@ -268,6 +270,7 @@ func TestScreenshotPollSurvivesLaunchTokenTTL(t *testing.T) {
 	// «Долго в игре»: тот же nonce, но токен уже просрочен (выдан 10 минут назад).
 	past := time.Now().Add(-10 * time.Minute)
 	expiredToken, err := NewTokenSigner(acSecret).Sign(LaunchClaims{
+		Aud:      audScreenshot, // скриншот-роуты принимают только токен процесса лаунчера
 		UUID:     user.ProviderUUID,
 		Login:    user.Login,
 		HwidHash: "hw-s",

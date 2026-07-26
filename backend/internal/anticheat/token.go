@@ -14,6 +14,12 @@ import (
 // и предъявляется агентами на /handshake/confirm и при репортах. Подписан HMAC-SHA256
 // серверным секретом — валидирует только backend, агенты лишь пересылают значение.
 type LaunchClaims struct {
+	// Aud — область действия токена. "" — launch-token (уходит в JVM как -Dac.token,
+	// им пользуются агенты); audScreenshot — токен процесса лаунчера, в JVM НЕ попадает.
+	// Разделение закрывает impersonation: мод читает System.getProperty("ac.token") и
+	// раньше мог им опрашивать /screenshot/pending и заливать «чистый» кадр вместо
+	// реального захвата экрана.
+	Aud       string `json:"aud,omitempty"`
 	UUID      string `json:"uuid"`
 	Login     string `json:"login"`
 	HwidHash  string `json:"hwid"`
@@ -23,7 +29,11 @@ type LaunchClaims struct {
 	Expires   int64  `json:"exp"`
 }
 
+// audScreenshot — область действия токена скриншот-эндпоинтов (только процесс лаунчера).
+const audScreenshot = "shot"
+
 var (
+	ErrTokenAudience  = errors.New("wrong launch token audience")
 	ErrTokenMalformed = errors.New("malformed launch token")
 	ErrTokenSignature = errors.New("invalid launch token signature")
 	ErrTokenExpired   = errors.New("launch token expired")

@@ -178,3 +178,29 @@ func TestScreenshotFailScreenshot(t *testing.T) {
 		t.Fatalf("ожидался failed с причиной, получил %s/%q", got.Status, got.Error)
 	}
 }
+
+// Регрессия (RE-отчёт 26.07.2026): X-Launch-Token скриншот-эндпоинтов совпадал с
+// -Dac.token, который читает любой мод внутри JVM (System.getProperty). Мод
+// опрашивал /screenshot/pending и заливал «чистый» кадр вместо реального экрана.
+// Теперь скриншот-токен — отдельный (aud=shot) и в JVM не передаётся: launch-token
+// на скриншот-роутах обязан отлетать, а скриншот-токен — не работать на /detect.
+func TestScreenshotTokenIsSeparateFromLaunchToken(t *testing.T) {
+	svc := NewService(newTestDB(t), "secret", false, nil, "")
+	res, err := svc.InitHandshake(context.Background(), "uuid-shot", "Liko", "", nil)
+	if err != nil || !res.Allowed {
+		t.Fatalf("init: %v %+v", err, res)
+	}
+	if res.ScreenshotToken == "" || res.ScreenshotToken == res.LaunchToken {
+		t.Fatalf("скриншот-токен не выдан или совпал с launch-token")
+	}
+	if _, err := svc.VerifyScreenshotToken(res.LaunchToken); err == nil {
+		t.Fatal("launch-token принят на скриншот-эндпоинте — мод сможет подменить кадр")
+	}
+	if _, err := svc.VerifySessionToken(res.ScreenshotToken); err == nil {
+		t.Fatal("скриншот-токен принят на in-game эндпоинте")
+	}
+	claims, err := svc.VerifyScreenshotToken(res.ScreenshotToken)
+	if err != nil || claims.Nonce != res.Nonce {
+		t.Fatalf("скриншот-токен не проходит свою же проверку: %v %+v", err, claims)
+	}
+}

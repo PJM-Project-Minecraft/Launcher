@@ -1,7 +1,7 @@
 //! Захват экрана игрока для античита: админ запрашивает скриншот через дашборд,
 //! бэкенд создаёт pending-запрос по nonce онлайн-сессии. Лаунчер, пока игра
-//! запущена, периодически опрашивает `/api/anticheat/screenshot/pending` по
-//! launch-token, и если есть запрос — захватывает экран (X11/Win32), кодирует в
+//! запущена, периодически опрашивает `/api/anticheat/screenshot/pending` по отдельному
+//! скриншот-токену (в JVM не передаётся), и если есть запрос — захватывает экран (X11/Win32), кодирует в
 //! JPEG и грузит на бэкенд. Best-effort: ошибки не роняют игру.
 
 use std::sync::atomic::AtomicBool;
@@ -18,19 +18,19 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Запускает фоновый цикл опроса и выполнения скриншот-запросов. Работает, пока
 /// игра запущена (stop не взведён). Гаснет вместе с keepalive на закрытии игры.
-/// No-op без launch-token (античит недоступен — fail-open, опрос не идёт).
+/// No-op без скриншот-токена (античит недоступен — fail-open, опрос не идёт).
 pub fn spawn_screenshot_loop(
     api_url: &str,
-    launch_token: &str,
+    screenshot_token: &str,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     let api_url = api_url.to_string();
-    let launch_token = launch_token.to_string();
-    thread::spawn(move || run(&api_url, &launch_token, &stop))
+    let screenshot_token = screenshot_token.to_string();
+    thread::spawn(move || run(&api_url, &screenshot_token, &stop))
 }
 
-fn run(api_url: &str, launch_token: &str, stop: &AtomicBool) {
-    if launch_token.is_empty() {
+fn run(api_url: &str, screenshot_token: &str, stop: &AtomicBool) {
+    if screenshot_token.is_empty() {
         return; // fail-open: без launch-token опрос бессмысленен.
     }
     // Один HTTP-клиент на весь цикл — переиспользуем TCP/TLS-пул между опросами
@@ -41,18 +41,18 @@ fn run(api_url: &str, launch_token: &str, stop: &AtomicBool) {
     };
     let client = std::sync::Arc::new(client);
     poll_until(stop, POLL_INTERVAL, || {
-        poll_and_capture(&client, api_url, launch_token)
+        poll_and_capture(&client, api_url, screenshot_token)
     });
 }
 
 /// Один цикл: опрашивает pending, при наличии — захватывает экран и грузит JPEG.
-fn poll_and_capture(client: &reqwest::blocking::Client, api_url: &str, launch_token: &str) {
+fn poll_and_capture(client: &reqwest::blocking::Client, api_url: &str, screenshot_token: &str) {
     let base = api_url.trim_end_matches('/');
     let pending_url = format!("{}/api/anticheat/screenshot/pending", base);
 
     let resp = match client
         .get(&pending_url)
-        .header("X-Launch-Token", launch_token)
+        .header("X-Launch-Token", screenshot_token)
         .send()
     {
         Ok(r) => r,
@@ -75,8 +75,8 @@ fn poll_and_capture(client: &reqwest::blocking::Client, api_url: &str, launch_to
     };
 
     match capture_screen_jpeg() {
-        Ok((data, w, h)) => upload_screenshot(client, base, launch_token, &id, &data, w, h),
-        Err(e) => fail_screenshot(client, base, launch_token, &id, &e),
+        Ok((data, w, h)) => upload_screenshot(client, base, screenshot_token, &id, &data, w, h),
+        Err(e) => fail_screenshot(client, base, screenshot_token, &id, &e),
     }
 }
 
@@ -89,7 +89,7 @@ struct PendingResponse {
 fn upload_screenshot(
     client: &reqwest::blocking::Client,
     base: &str,
-    launch_token: &str,
+    screenshot_token: &str,
     id: &str,
     data: &[u8],
     width: u32,
@@ -105,7 +105,7 @@ fn upload_screenshot(
     });
     let _ = client
         .post(&url)
-        .header("X-Launch-Token", launch_token)
+        .header("X-Launch-Token", screenshot_token)
         .json(&body)
         .send();
 }
@@ -115,7 +115,7 @@ fn upload_screenshot(
 fn fail_screenshot(
     client: &reqwest::blocking::Client,
     base: &str,
-    launch_token: &str,
+    screenshot_token: &str,
     id: &str,
     reason: &str,
 ) {
@@ -123,7 +123,7 @@ fn fail_screenshot(
     let body = serde_json::json!({ "reason": reason });
     let _ = client
         .post(&url)
-        .header("X-Launch-Token", launch_token)
+        .header("X-Launch-Token", screenshot_token)
         .json(&body)
         .send();
 }

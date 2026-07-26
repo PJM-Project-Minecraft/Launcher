@@ -2335,7 +2335,7 @@ fn launch_profile(
     // админ скриншот экрана. Делит stop-флаг с keepalive — гаснет на закрытии игры.
     let screenshot_handle = anticheat::screenshot::spawn_screenshot_loop(
         &config.api_url(),
-        guard.launch_token(),
+        guard.screenshot_token(),
         keepalive_stop.clone(),
     );
 

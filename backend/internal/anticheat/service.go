@@ -371,6 +371,11 @@ const (
 	tempBanDuration = 7 * 24 * time.Hour
 	// detectDedupWindow — окно, в котором повторный идентичный детект не пишется снова.
 	detectDedupWindow = 30 * time.Second
+	// maxDetectionField — потолок длины клиентских полей детекта (type/signature).
+	maxDetectionField = 128
+	// detectionStatusUnmatched — детект, не совпавший ни с системным типом, ни с
+	// блэклистом: хранится для разбора, но не алертит и не попадает в review-очередь.
+	detectionStatusUnmatched = "unmatched"
 )
 
 // systemSeverity — СЕРВЕРНАЯ (не клиентская) серьёзность для системных типов детекта.
@@ -382,6 +387,11 @@ var systemSeverity = map[string]int{
 	"tamper":   8,
 	"debugger": 6,
 }
+
+// heuristicTypes — типы нативного агента, которым не с чем совпадать: сигнал в самом
+// факте находки (неизвестный модуль в процессе, LD_PRELOAD). Считаются сопоставленными
+// наравне с системными типами, иначе попали бы в unmatched вместе с мусором.
+var heuristicTypes = map[string]bool{"module-unknown": true, "ld-preload": true}
 
 // normalizeSource валидирует источник детекта по whitelist (анти-спуф source).
 // Пустой источник трактуется как "launcher" (pre-launch скан лаунчера), невалидный —
@@ -595,8 +605,11 @@ type InitResult struct {
 	Allowed     bool   `json:"allowed"`
 	Reason      string `json:"reason,omitempty"`
 	LaunchToken string `json:"launchToken,omitempty"`
-	Nonce       string `json:"nonce,omitempty"`
-	Challenge   string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
+	// ScreenshotToken — токен скриншот-эндпоинтов. Остаётся в процессе лаунчера,
+	// в JVM не передаётся (см. LaunchClaims.Aud).
+	ScreenshotToken string `json:"screenshotToken,omitempty"`
+	Nonce           string `json:"nonce,omitempty"`
+	Challenge       string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
 }
 
 // HwidComponents — раздельные солёные хеши компонентов железа (для fuzzy-матча HWID).
@@ -651,7 +664,7 @@ func (s *Service) InitHandshakeWithComponents(ctx context.Context, userUUID, log
 
 	nonce := randomHex(16)
 	challenge := randomHex(16)
-	token, err := s.signer.Sign(LaunchClaims{
+	claims := LaunchClaims{
 		UUID:      userUUID,
 		Login:     login,
 		HwidHash:  hwidHash,
@@ -659,11 +672,26 @@ func (s *Service) InitHandshakeWithComponents(ctx context.Context, userUUID, log
 		Challenge: challenge,
 		IssuedAt:  now.Unix(),
 		Expires:   now.Add(launchTokenTTL).Unix(),
-	})
+	}
+	token, err := s.signer.Sign(claims)
 	if err != nil {
 		return InitResult{}, err
 	}
-	return InitResult{Allowed: true, LaunchToken: token, Nonce: nonce, Challenge: challenge}, nil
+	// Второй токен — только для скриншот-эндпоинтов. Лаунчер держит его в памяти
+	// своего процесса и НЕ передаёт в JVM, поэтому мод внутри игры (у которого есть
+	// -Dac.token) не может ни узнать о запросе скриншота, ни залить свой кадр.
+	claims.Aud = audScreenshot
+	shotToken, err := s.signer.Sign(claims)
+	if err != nil {
+		return InitResult{}, err
+	}
+	return InitResult{
+		Allowed:         true,
+		LaunchToken:     token,
+		ScreenshotToken: shotToken,
+		Nonce:           nonce,
+		Challenge:       challenge,
+	}, nil
 }
 
 // VerifyToken проверяет launch-token (для аутентификации репортов и confirm).
@@ -679,11 +707,29 @@ func (s *Service) VerifyToken(token string) (LaunchClaims, error) {
 // kick → токен снова недействителен. Confirm остаётся на строгом VerifyToken:
 // короткое окно — анти-replay-свойство attestation-handshake.
 func (s *Service) VerifySessionToken(token string) (LaunchClaims, error) {
+	claims, err := s.verifySessionAud(token, "")
+	return claims, err
+}
+
+// VerifyScreenshotToken — то же, но принимает ТОЛЬКО токен с aud=shot (процесс
+// лаунчера). Launch-token из JVM здесь не проходит: иначе мод, читающий
+// -Dac.token, опрашивает /screenshot/pending и заливает подготовленный кадр.
+func (s *Service) VerifyScreenshotToken(token string) (LaunchClaims, error) {
+	return s.verifySessionAud(token, audScreenshot)
+}
+
+func (s *Service) verifySessionAud(token, aud string) (LaunchClaims, error) {
 	claims, err := s.signer.Verify(token, s.now())
 	if errors.Is(err, ErrTokenExpired) && s.verifier != nil && s.verifier.IsActiveByNonce(claims.Nonce) {
-		return claims, nil
+		err = nil
 	}
-	return claims, err
+	if err != nil {
+		return claims, err
+	}
+	if claims.Aud != aud {
+		return claims, ErrTokenAudience
+	}
+	return claims, nil
 }
 
 // RecordDetection пишет обнаружение, аутентифицированное launch-token, и возвращает
@@ -694,8 +740,23 @@ func (s *Service) RecordDetection(ctx context.Context, claims LaunchClaims, d De
 }
 
 func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash, sessionID string, d DetectionInput, now time.Time) (int, string, error) {
+	// type/signature приходят из тела запроса, т.е. от клиента, которого мог заменить
+	// игрок. Обрезаем, чтобы произвольная строка не раздувала БД и алерты.
+	d.Type = truncate(d.Type, maxDetectionField)
+	d.Signature = truncate(d.Signature, maxDetectionField)
 	severity, matchType := s.resolveDetection(ctx, d.Type, d.Signature, detectionHash(d.Details))
 	confidence := detectionConfidence(d.Type, matchType)
+	// Детект «ни с чем не совпал»: не системный тип И не совпал с блэклистом. Легальный
+	// клиент такого не шлёт (лаунчер репортит только матчи блэклиста, агент — свои
+	// системные типы), а поддельный — шлёт что угодно. Такие записи сохраняем как
+	// unmatched: без алерта и вне review-очереди, иначе любой игрок с curl'ом флудит
+	// оператора и топит настоящие детекты в шуме.
+	_, systemType := systemSeverity[d.Type]
+	matched := systemType || heuristicTypes[d.Type] || matchType != ""
+	status := "new"
+	if !matched {
+		status = detectionStatusUnmatched
+	}
 	// Дедуп: одинаковый детект в пределах окна не пишем повторно, но severity/confidence
 	// всё равно возвращаем — kick-решение должно срабатывать и на спамящем агенте.
 	if s.isDuplicate(userUUID, sessionID, d.Type, d.Signature, now) {
@@ -718,7 +779,7 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 		Signature:  d.Signature,
 		Severity:   severity,
 		Confidence: confidence,
-		Status:     "new",
+		Status:     status,
 		Raw:        raw,
 		CreatedAt:  now,
 	}
@@ -733,7 +794,7 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 	if autoBanned {
 		s.autoBanEscalated(ctx, userUUID, login, hwidHash, d.Signature, now)
 	}
-	if s.notifier != nil {
+	if s.notifier != nil && matched {
 		// Алерт не должен задерживать ответ лаунчеру/агенту.
 		go s.notifier.NotifyDetection(rec, autoBanned)
 	}
@@ -979,7 +1040,7 @@ func (s *Service) UnbanHwid(ctx context.Context, hwidHash string) error {
 
 // DetectionFilter — необязательные фильтры review-очереди (пустые поля игнорируются).
 type DetectionFilter struct {
-	Status      string // new|reviewed|confirmed|dismissed
+	Status      string // new|reviewed|confirmed|dismissed|unmatched
 	Confidence  string // hard|soft
 	MinSeverity int
 }
@@ -991,6 +1052,10 @@ func (s *Service) ListDetections(ctx context.Context, limit int, filter Detectio
 	q := s.db.WithContext(ctx).Order("created_at desc").Limit(limit)
 	if filter.Status != "" {
 		q = q.Where("status = ?", filter.Status)
+	} else {
+		// Без явного фильтра unmatched не показываем: это мусор от поддельных клиентов,
+		// он должен запрашиваться осознанно (status=unmatched), а не забивать очередь.
+		q = q.Where("status <> ?", detectionStatusUnmatched)
 	}
 	if filter.Confidence != "" {
 		q = q.Where("confidence = ?", filter.Confidence)
@@ -1050,7 +1115,7 @@ func (s *Service) SignatureStats(ctx context.Context, since time.Time) ([]Signat
 			SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
 			SUM(CASE WHEN status = 'dismissed' THEN 1 ELSE 0 END) AS dismissed,
 			SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS new_count`).
-		Where("created_at >= ?", since).
+		Where("created_at >= ? AND status <> ?", since, detectionStatusUnmatched).
 		Group("signature, type, confidence").
 		Order("total DESC").
 		Scan(&out).Error
