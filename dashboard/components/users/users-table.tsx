@@ -68,7 +68,7 @@ export function UsersTable() {
         <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Поиск: логин, e-mail, UUID"
+          placeholder="Поиск: логин, e-mail, @telegram, UUID"
         />
 
         {loading ? (

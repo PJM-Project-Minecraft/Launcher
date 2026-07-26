@@ -62,10 +62,14 @@ func ListUsersAdmin(ctx context.Context, db *gorm.DB, q string, page int) ([]Adm
 	if q != "" {
 		// LOWER + CAST: поиск регистронезависимый, а сравнение uuid-колонки с
 		// произвольной строкой не роняет запрос в Postgres (id имеет тип uuid).
-		like := "%" + strings.ToLower(q) + "%"
+		lower := strings.ToLower(q)
+		like := "%" + lower + "%"
+		// @username вводят вместе с «собакой» — по ней в БД совпадений нет (храним
+		// голый username), поэтому ищем и по варианту без префикса.
+		likeTG := "%" + strings.TrimPrefix(lower, "@") + "%"
 		base = base.Where(
-			"LOWER(login) LIKE ? OR LOWER(email) LIKE ? OR CAST(id AS TEXT) = ? OR provider_uuid = ?",
-			like, like, strings.ToLower(q), q,
+			"LOWER(login) LIKE ? OR LOWER(email) LIKE ? OR LOWER(telegram_username) LIKE ? OR CAST(id AS TEXT) = ? OR provider_uuid = ?",
+			like, like, likeTG, lower, q,
 		)
 	}
 	var total int64

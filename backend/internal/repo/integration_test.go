@@ -7,6 +7,7 @@ import (
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/database"
 	"launcher-backend/internal/mcuuid"
+	"launcher-backend/internal/models"
 	"launcher-backend/internal/repo"
 
 	"golang.org/x/crypto/bcrypt"
@@ -162,5 +163,36 @@ func TestPwdResetLifecycle(t *testing.T) {
 	_, created3, err := repo.CreatePwdReset(ctx, db, uid, 500)
 	if err != nil || !created3 {
 		t.Fatalf("re-create: created3=%v err=%v", created3, err)
+	}
+}
+
+// Поиск в админке по Telegram-username: админ ищет игрока по «@ник» из чата, а в
+// БД username лежит без «собаки». Логин/e-mail при этом не должны совпадать.
+func TestListUsersAdminFindsByTelegramUsername(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	tgID := int64(555001)
+	if err := db.Create(&models.User{
+		ID:               "aa000000-0000-0000-0000-0000000000aa",
+		Login:            "SvoCraft",
+		Email:            "svo@example.com",
+		TelegramID:       &tgID,
+		TelegramUsername: "TgSearchProbe",
+	}).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	for _, q := range []string{"tgsearchprobe", "@TgSearchProbe", "searchpro"} {
+		items, total, err := repo.ListUsersAdmin(ctx, db, q, 1)
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		if total != 1 || len(items) != 1 || items[0].Login != "SvoCraft" {
+			t.Fatalf("по запросу %q ожидался 1 игрок, получено total=%d items=%d", q, total, len(items))
+		}
+	}
+	if _, total, err := repo.ListUsersAdmin(ctx, db, "нетакого", 1); err != nil || total != 0 {
+		t.Fatalf("несуществующий username не должен ничего находить: total=%d err=%v", total, err)
 	}
 }
