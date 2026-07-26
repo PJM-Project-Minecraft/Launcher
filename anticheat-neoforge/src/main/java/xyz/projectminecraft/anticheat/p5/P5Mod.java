@@ -1,7 +1,9 @@
 package xyz.projectminecraft.anticheat.p5;
 
+import com.mojang.logging.LogUtils;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.IEventBus;
+import org.slf4j.Logger;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
@@ -23,6 +25,9 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
  */
 @Mod(P5Payloads.MOD_ID)
 public final class P5Mod {
+    /** Общий логгер мода — на консоли сервера с префиксом [P5], чтобы обкатку было видно. */
+    static final Logger LOG = LogUtils.getLogger();
+
     public P5Mod(IEventBus modBus) {
         modBus.addListener(P5Mod::registerPayloads);
         NeoForge.EVENT_BUS.addListener(P5Mod::onPlayerJoin);
@@ -40,6 +45,11 @@ public final class P5Mod {
 
     /** Опрос отзывов доступа: бэкенд решает, кого кикнуть, сервер исполняет. */
     private static void onServerStarted(ServerStartedEvent event) {
+        if (P5Config.active()) {
+            LOG.info("[P5] активен: вход-хэндшейк + опрос отзывов каждые 25с, бэкенд {}", P5Config.API);
+        } else {
+            LOG.warn("[P5] ВЫКЛЮЧЕН: пустой ANTICHEAT_P5_SECRET в env сервера — защита не работает");
+        }
         P5RevokePoller.start(event.getServer());
     }
 

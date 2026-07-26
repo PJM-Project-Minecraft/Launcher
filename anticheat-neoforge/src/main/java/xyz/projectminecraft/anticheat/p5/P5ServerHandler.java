@@ -100,9 +100,20 @@ final class P5ServerHandler {
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                     .build();
             HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() / 100 != 2) return true; // fail-open
+            if (resp.statusCode() / 100 != 2) {
+                P5Mod.LOG.warn("[P5] бэкенд ответил {} на /p5/verify для {} — проверь ANTICHEAT_P5_SECRET",
+                        resp.statusCode(), name);
+                return true; // fail-open
+            }
             JsonObject o = JsonParser.parseString(resp.body()).getAsJsonObject();
-            return !o.has("allow") || o.get("allow").getAsBoolean();
+            boolean allow = !o.has("allow") || o.get("allow").getAsBoolean();
+            String reason = o.has("reason") ? o.get("reason").getAsString() : "";
+            if (!reason.isEmpty()) {
+                // Есть reason → proof не сошёлся. reportOnly:true — пускаем, но это сигнал обкатки.
+                P5Mod.LOG.info("[P5] хэндшейк {}: allow={} reason={} (reportOnly={})",
+                        name, allow, reason, o.has("reportOnly"));
+            }
+            return allow;
         } catch (Exception e) {
             return true; // fail-open при недоступности бэкенда
         }
