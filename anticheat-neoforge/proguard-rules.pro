@@ -1,10 +1,17 @@
-# ProGuard для обфускации мода P5. Подключается отдельным шагом после build (proguard
-# -injars build/libs/pjmac.jar ...) либо через gradle-плагин. ⚠️ После обфускации
-# ОБЯЗАТЕЛЬНО перепроверь мод в игре — обфускация Java часто ломает рефлексию/загрузку
-# в рантайме, а не на компиляции.
+# ProGuard для обфускации мода P5. Подключается ОТДЕЛЬНЫМ ручным шагом после build (в
+# gradle-сборку НЕ включён — `gradle build` отдаёт чистые jar-ы). Обфусцировать КАЖДЫЙ
+# артефакт по отдельности:
+#   proguard @proguard-rules.pro -injars build/libs/anticheat-neoforge-0.1.0-server.jar -outjars server-obf.jar
+#   proguard @proguard-rules.pro -injars build/libs/anticheat-neoforge-0.1.0-client.jar -outjars client-obf.jar
+# ⚠️ После обфускации ОБЯЗАТЕЛЬНО перепроверь мод в игре — обфускация Java часто ломает
+# рефлексию/загрузку в рантайме, а не на компиляции.
 
 # --- НЕ переименовывать: точки входа, которые NeoForge грузит по имени/через рефлексию ---
--keep public class xyz.projectminecraft.anticheat.p5.P5Mod {
+# Обе @Mod-точки (клиентская и серверная) — по одной на свой jar, держим обе.
+-keep public class xyz.projectminecraft.anticheat.p5.P5ModClient {
+    public <init>(net.neoforged.bus.api.IEventBus);
+}
+-keep public class xyz.projectminecraft.anticheat.p5.P5ModServer {
     public <init>(net.neoforged.bus.api.IEventBus);
 }
 # Payload-record'ы и их TYPE/CODEC читаются каналом по имени.
