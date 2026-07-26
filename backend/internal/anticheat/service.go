@@ -61,7 +61,11 @@ type Service struct {
 
 	hbMu       sync.Mutex
 	heartbeats map[string]time.Time // nonce -> последний heartbeat (живость агента)
+	hbLogins   map[string]string    // nonce -> логин (reaper знает только nonce, отзыв — по логину)
 	hbTimeout  time.Duration        // без heartbeat дольше hbTimeout → сессия гасится reaper'ом
+
+	revokeMu sync.Mutex
+	revoked  map[string]revocation // логин (lower) -> отзыв доступа; исполняет P5-мод (revoke.go)
 }
 
 func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifier, agentPath string) *Service {
@@ -76,6 +80,8 @@ func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifi
 		recent:       make(map[string]time.Time),
 		shaEntries:   make(map[string]shaEntry),
 		heartbeats:   make(map[string]time.Time),
+		hbLogins:     make(map[string]string),
+		revoked:      make(map[string]revocation),
 		hbTimeout:    90 * time.Second,
 	}
 }
@@ -124,6 +130,9 @@ func (s *Service) EvaluateKick(claims LaunchClaims, severity int, confidence, dt
 	if s.verifier != nil {
 		s.verifier.InvalidateByNonce(claims.Nonce)
 	}
+	// Гашения сессии мало: игрок УЖЕ на игровом сервере, а самокик исполняет агент,
+	// которого читер мог прибить. Отзыв исполнит игровой сервер (P5-мод).
+	s.Revoke(claims.Login, "детект: "+dtype)
 	return true, dtype
 }
 
@@ -197,7 +206,9 @@ func (s *Service) Confirm(token string, proof ConfirmProof) error {
 		}
 	}
 	// Трекинг живости стартует после успешного confirm.
-	s.touchHeartbeat(claims.Nonce)
+	s.touchHeartbeat(claims.Nonce, claims.Login)
+	// Новый подтверждённый запуск игры снимает отзыв прошлой сессии.
+	s.clearRevocation(claims.Login)
 	return nil
 }
 
@@ -222,13 +233,17 @@ func (s *Service) verifyProof(claims LaunchClaims, p ConfirmProof) error {
 	return nil
 }
 
-// touchHeartbeat фиксирует время живости агента по nonce.
-func (s *Service) touchHeartbeat(nonce string) {
+// touchHeartbeat фиксирует время живости агента по nonce. Логин запоминается рядом:
+// reaper оперирует nonce, а отзыв доступа (revoke.go) — логином игрока.
+func (s *Service) touchHeartbeat(nonce, login string) {
 	if nonce == "" {
 		return
 	}
 	s.hbMu.Lock()
 	s.heartbeats[nonce] = s.now()
+	if login != "" {
+		s.hbLogins[nonce] = login
+	}
 	s.hbMu.Unlock()
 }
 
@@ -236,7 +251,7 @@ func (s *Service) touchHeartbeat(nonce string) {
 // (сессия погашена detect'ом → IsActiveByNonce=false) и текущую версию блэклиста
 // (агент по её изменению ре-фетчит правила).
 func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool, blacklistVersion int64) {
-	s.touchHeartbeat(claims.Nonce)
+	s.touchHeartbeat(claims.Nonce, claims.Login)
 	// Продлеваем игровую сессию: heartbeat доказывает, что игра ещё запущена, и держит
 	// yggdrasil-токен живым на весь сеанс (иначе реконнект после 15 мин → invalid session).
 	// No-op, если сессию уже погасили (detect-kick) — IsActiveByNonce ниже вернёт kick.
@@ -266,14 +281,16 @@ const launcherOutliveGrace = 60 * time.Second
 func (s *Service) reapStale(now time.Time) {
 	type staleSession struct {
 		nonce string
+		login string
 		last  time.Time // время последнего heartbeat — нужно для сравнения с keepalive
 	}
 	s.hbMu.Lock()
 	var silent []staleSession
 	for nonce, last := range s.heartbeats {
 		if now.Sub(last) > s.hbTimeout {
-			silent = append(silent, staleSession{nonce, last})
+			silent = append(silent, staleSession{nonce, s.hbLogins[nonce], last})
 			delete(s.heartbeats, nonce)
+			delete(s.hbLogins, nonce)
 		}
 	}
 	s.hbMu.Unlock()
@@ -289,8 +306,11 @@ func (s *Service) reapStale(now time.Time) {
 			!s.verifier.LauncherSeenAfter(st.nonce, st.last.Add(launcherOutliveGrace)) {
 			continue
 		}
-		slog.Warn("anticheat: agent heartbeat silent (мягкий детект, сессию не гасим)",
-			"nonce", st.nonce, "timeout", s.hbTimeout)
+		slog.Warn("anticheat: agent heartbeat silent (сессию не гасим, отзываем доступ)",
+			"nonce", st.nonce, "login", st.login, "timeout", s.hbTimeout)
+		// Сессию по-прежнему НЕ гасим (это било по честным игрокам при реконнекте), но
+		// доступ отзываем: агента прибили в живой игре, кикнет игровой сервер.
+		s.Revoke(st.login, "агент античита перестал отвечать")
 		if s.notifier != nil {
 			s.notifier.NotifyAgentSilent(st.nonce)
 		}

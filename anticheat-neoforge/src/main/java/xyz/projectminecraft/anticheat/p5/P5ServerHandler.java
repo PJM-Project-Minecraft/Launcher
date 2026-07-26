@@ -40,6 +40,15 @@ final class P5ServerHandler {
     // Игрок → выданный challenge (пока ждём ответ).
     private static final ConcurrentHashMap<String, String> PENDING = new ConcurrentHashMap<>();
 
+    /** Общий HTTP-клиент и планировщик — переиспользует поллер отзывов (P5RevokePoller). */
+    static HttpClient http() {
+        return HTTP;
+    }
+
+    static ScheduledExecutorService timer() {
+        return TIMER;
+    }
+
     /** Вызывать на входе игрока (PlayerLoggedInEvent). No-op, если P5 не сконфигурен. */
     static void onPlayerJoin(ServerPlayer player) {
         if (!P5Config.active()) return;
@@ -107,7 +116,7 @@ final class P5ServerHandler {
         return sb.toString();
     }
 
-    private static String jsonStr(String s) {
+    static String jsonStr(String s) {
         StringBuilder sb = new StringBuilder("\"");
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

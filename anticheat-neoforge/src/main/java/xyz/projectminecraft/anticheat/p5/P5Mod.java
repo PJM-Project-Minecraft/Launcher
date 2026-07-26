@@ -5,6 +5,8 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.server.ServerStartedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
@@ -24,6 +26,8 @@ public final class P5Mod {
     public P5Mod(IEventBus modBus) {
         modBus.addListener(P5Mod::registerPayloads);
         NeoForge.EVENT_BUS.addListener(P5Mod::onPlayerJoin);
+        NeoForge.EVENT_BUS.addListener(P5Mod::onServerStarted);
+        NeoForge.EVENT_BUS.addListener(P5Mod::onServerStopping);
     }
 
     private static void registerPayloads(RegisterPayloadHandlersEvent event) {
@@ -32,6 +36,15 @@ public final class P5Mod {
                 P5ClientHandler::onChallenge);
         registrar.playToServer(P5Payloads.P5Response.TYPE, P5Payloads.P5Response.CODEC,
                 P5ServerHandler::onResponse);
+    }
+
+    /** Опрос отзывов доступа: бэкенд решает, кого кикнуть, сервер исполняет. */
+    private static void onServerStarted(ServerStartedEvent event) {
+        P5RevokePoller.start(event.getServer());
+    }
+
+    private static void onServerStopping(ServerStoppingEvent event) {
+        P5RevokePoller.stop();
     }
 
     private static void onPlayerJoin(PlayerEvent.PlayerLoggedInEvent event) {

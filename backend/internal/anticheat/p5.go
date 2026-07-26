@@ -93,3 +93,50 @@ func p5Proof(challenge, accessToken string) string {
 	mac.Write([]byte(challenge))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// p5RevokedRequest — игровой сервер шлёт ников, кто сейчас онлайн.
+type p5RevokedRequest struct {
+	Players []string `json:"players"`
+}
+
+// maxP5Players — потолок ников в одном опросе (защита от мусорного тела; на сервере
+// физически не бывает столько онлайна).
+const maxP5Players = 200
+
+// p5Revoked — периодический опрос игрового сервера: «кого из этих кикнуть?». Замыкает
+// разрыв, из-за которого молчание heartbeat давало лишь алерт: решение принимает
+// бэкенд, исполняет игровой сервер, а не агент внутри JVM игрока.
+//
+// Репорт-онли (ANTICHEAT_P5_ENFORCE=false) отдаёт ПУСТОЙ список — но логирует, кого бы
+// кикнул. Это тот же поэтапный rollout, что у p5Verify: сначала смотрим в логи, потом
+// включаем enforce.
+func (h Handler) p5Revoked(c fiber.Ctx) error {
+	if h.p5.secret == "" {
+		return c.JSON(fiber.Map{"kick": []KickOrder{}, "reason": "p5_disabled"})
+	}
+	if subtle.ConstantTimeCompare([]byte(c.Get("X-AC-P5-Secret")), []byte(h.p5.secret)) != 1 {
+		return c.SendStatus(http.StatusUnauthorized)
+	}
+	var req p5RevokedRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"kick": []KickOrder{}})
+	}
+	if len(req.Players) > maxP5Players {
+		req.Players = req.Players[:maxP5Players]
+	}
+	orders := h.service.RevokedAmong(req.Players)
+	if len(orders) == 0 {
+		return c.JSON(fiber.Map{"kick": []KickOrder{}})
+	}
+	if !h.p5.enforce {
+		for _, o := range orders {
+			slog.Error("anticheat P5: отзыв доступа (репорт-онли, игрок НЕ кикнут)",
+				"player", o.Player, "reason", o.Reason)
+		}
+		return c.JSON(fiber.Map{"kick": []KickOrder{}, "reportOnly": true})
+	}
+	for _, o := range orders {
+		slog.Warn("anticheat P5: кик по отзыву доступа", "player", o.Player, "reason", o.Reason)
+	}
+	return c.JSON(fiber.Map{"kick": orders})
+}

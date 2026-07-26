@@ -107,6 +107,9 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// общий секрет ANTICHEAT_P5_SECRET в заголовке X-AC-P5-Secret (server-to-server, не JWT;
 	// per-route, как остальные не-JWT роуты этой группы).
 	group.Post("/p5/verify", h.p5Verify)
+	// P5-опрос: игровой сервер спрашивает, кого из онлайна кикнуть (отзыв доступа —
+	// молчание агента, detect-kick). Исполняет кик игровой сервер, не агент в JVM игрока.
+	group.Post("/p5/revoked", h.p5Revoked)
 	// Раздача agent.jar: лаунчер качает его и инжектит как -javaagent.
 	group.Get("/agent.jar", h.agentJar)
 	// Раздача нативной JVMTI-библиотеки по ОС: лаунчер инжектит как -agentpath.
