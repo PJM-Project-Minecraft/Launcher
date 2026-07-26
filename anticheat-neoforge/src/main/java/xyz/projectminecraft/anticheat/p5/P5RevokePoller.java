@@ -66,7 +66,7 @@ final class P5RevokePoller {
                 String player = o.has("player") ? o.get("player").getAsString() : "";
                 String reason = o.has("reason") ? o.get("reason").getAsString() : "проверка защиты";
                 if (player.isEmpty()) continue;
-                P5Mod.LOG.warn("[P5] кик по отзыву доступа: {} — {}", player, reason);
+                P5ModServer.LOG.warn("[P5] кик по отзыву доступа: {} — {}", player, reason);
                 // Кик строго на серверном треде (мы в планировщике).
                 server.execute(() -> {
                     ServerPlayer target = server.getPlayerList().getPlayerByName(player);
@@ -96,20 +96,20 @@ final class P5RevokePoller {
             HttpResponse<String> resp = P5ServerHandler.http().send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() / 100 != 2) {
                 // 401 = неверный/пустой секрет (самая частая тихая поломка обкатки).
-                P5Mod.LOG.warn("[P5] бэкенд ответил {} на /p5/revoked — проверь ANTICHEAT_P5_SECRET (совпадает с прод .env?)",
+                P5ModServer.LOG.warn("[P5] бэкенд ответил {} на /p5/revoked — проверь ANTICHEAT_P5_SECRET (совпадает с прод .env?)",
                         resp.statusCode());
                 linkOk = false;
                 return null;
             }
             if (!linkOk) {
-                P5Mod.LOG.info("[P5] связь с бэкендом OK (/p5/revoked отвечает 200)");
+                P5ModServer.LOG.info("[P5] связь с бэкендом OK (/p5/revoked отвечает 200)");
                 linkOk = true;
             }
             JsonObject o = JsonParser.parseString(resp.body()).getAsJsonObject();
             return o.has("kick") && o.get("kick").isJsonArray() ? o.getAsJsonArray("kick") : null;
         } catch (Exception e) {
             if (linkOk) {
-                P5Mod.LOG.warn("[P5] опрос /p5/revoked не удался: {}", e.toString());
+                P5ModServer.LOG.warn("[P5] опрос /p5/revoked не удался: {}", e.toString());
                 linkOk = false;
             }
             return null;

@@ -3,7 +3,6 @@ package xyz.projectminecraft.anticheat.p5;
 import com.mojang.logging.LogUtils;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.IEventBus;
-import org.slf4j.Logger;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
@@ -11,34 +10,34 @@ import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+import org.slf4j.Logger;
 
 /**
- * Точка входа мода P5. Регистрирует канал challenge/response и вешает обработчик входа
- * игрока. Мод грузится на ОБЕИХ сторонах; серверная логика активна только при заданном
- * ANTICHEAT_P5_SECRET (см. P5Config), клиентская отвечает на challenge всегда.
+ * СЕРВЕРНАЯ точка входа мода P5 (jar с classifier=server, на игровой сервер). Содержит
+ * серверную логику: выдачу challenge на входе, верификацию proof через бэкенд, опрос
+ * отзывов доступа. Клиентских классов (Minecraft, P5ClientHandler, P5Crypto) в этом jar НЕТ.
  *
- * ⚠️ Network-API NeoForge версионно-зависим (registrar.playToClient/playToServer,
- * RegisterPayloadHandlersEvent) — сверь со своей версией. P5ClientHandler ссылается на
- * client-only класс Minecraft: на сервере класс грузится, но onChallenge там не вызывается
- * (ленивое разрешение). Если твоя сборка ругается — регистрируй клиентский обработчик под
- * Dist.CLIENT отдельно.
+ * modId тот же "pjmac", что у клиентского jar — namespace сетевого канала совпадает,
+ * стороны связываются. Два @Mod("pjmac") в одном рантайме не встречаются (по jar на сторону).
  */
 @Mod(P5Payloads.MOD_ID)
-public final class P5Mod {
-    /** Общий логгер мода — на консоли сервера с префиксом [P5], чтобы обкатку было видно. */
+public final class P5ModServer {
+    /** Логгер мода — на консоли сервера с префиксом [P5], чтобы обкатку было видно. */
     static final Logger LOG = LogUtils.getLogger();
 
-    public P5Mod(IEventBus modBus) {
-        modBus.addListener(P5Mod::registerPayloads);
-        NeoForge.EVENT_BUS.addListener(P5Mod::onPlayerJoin);
-        NeoForge.EVENT_BUS.addListener(P5Mod::onServerStarted);
-        NeoForge.EVENT_BUS.addListener(P5Mod::onServerStopping);
+    public P5ModServer(IEventBus modBus) {
+        modBus.addListener(P5ModServer::registerPayloads);
+        NeoForge.EVENT_BUS.addListener(P5ModServer::onPlayerJoin);
+        NeoForge.EVENT_BUS.addListener(P5ModServer::onServerStarted);
+        NeoForge.EVENT_BUS.addListener(P5ModServer::onServerStopping);
     }
 
     private static void registerPayloads(RegisterPayloadHandlersEvent event) {
         PayloadRegistrar registrar = event.registrar("1");
-        registrar.playToClient(P5Payloads.P5Challenge.TYPE, P5Payloads.P5Challenge.CODEC,
-                P5ClientHandler::onChallenge);
+        // Сервер ОТПРАВЛЯЕТ challenge — тип надо зарегистрировать, но сервер его не принимает
+        // (noop-хендлер, на сервере не вызывается).
+        registrar.playToClient(P5Payloads.P5Challenge.TYPE, P5Payloads.P5Challenge.CODEC, (msg, ctx) -> {});
+        // Сервер ПРИНИМАЕТ ответ клиента.
         registrar.playToServer(P5Payloads.P5Response.TYPE, P5Payloads.P5Response.CODEC,
                 P5ServerHandler::onResponse);
     }

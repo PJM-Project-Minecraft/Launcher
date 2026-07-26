@@ -45,3 +45,34 @@ tasks.named('processResources') {
         expand version: project.version
     }
 }
+
+// --- Раздельные артефакты клиент/сервер ---
+// Один codebase, один modId "pjmac" → namespace сетевого канала совпадает. Каждый jar —
+// копия обработанного moddev-jar'а, из которой вырезаны классы чужой стороны и её @Mod-точка
+// входа (иначе два @Mod("pjmac") в одном рантайме). Клиентский jar (раздаётся игрокам) не
+// содержит серверной логики: секрета, URL-ов /p5/*, верификации, опроса отзывов.
+def serverOnly = [
+    '**/P5ModServer*.class', '**/P5ServerHandler*.class',
+    '**/P5RevokePoller*.class', '**/P5Config*.class',
+]
+def clientOnly = [
+    '**/P5ModClient*.class', '**/P5ClientHandler*.class', '**/P5Crypto*.class',
+]
+
+tasks.register('clientJar', Jar) {
+    dependsOn tasks.named('jar')
+    archiveClassifier = 'client'
+    from({ zipTree(tasks.named('jar').flatMap { it.archiveFile }) }) {
+        exclude serverOnly
+    }
+}
+
+tasks.register('serverJar', Jar) {
+    dependsOn tasks.named('jar')
+    archiveClassifier = 'server'
+    from({ zipTree(tasks.named('jar').flatMap { it.archiveFile }) }) {
+        exclude clientOnly
+    }
+}
+
+tasks.named('build') { dependsOn 'clientJar', 'serverJar' }

@@ -7,7 +7,7 @@ import net.minecraft.resources.ResourceLocation;
 
 /**
  * Кастомные пакеты канала P5. NeoForge 1.21.x: CustomPacketPayload + Type + StreamCodec,
- * регистрируются в RegisterPayloadHandlersEvent (см. P5Mod).
+ * регистрируются в RegisterPayloadHandlersEvent (см. P5ModClient/P5ModServer).
  *
  * ⚠️ Сигнатуры StreamCodec/CustomPacketPayload версионно-зависимы — сверь со своей NeoForge.
  */

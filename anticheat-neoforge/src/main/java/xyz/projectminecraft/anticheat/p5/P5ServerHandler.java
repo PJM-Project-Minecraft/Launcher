@@ -101,7 +101,7 @@ final class P5ServerHandler {
                     .build();
             HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() / 100 != 2) {
-                P5Mod.LOG.warn("[P5] бэкенд ответил {} на /p5/verify для {} — проверь ANTICHEAT_P5_SECRET",
+                P5ModServer.LOG.warn("[P5] бэкенд ответил {} на /p5/verify для {} — проверь ANTICHEAT_P5_SECRET",
                         resp.statusCode(), name);
                 return true; // fail-open
             }
@@ -110,7 +110,7 @@ final class P5ServerHandler {
             String reason = o.has("reason") ? o.get("reason").getAsString() : "";
             if (!reason.isEmpty()) {
                 // Есть reason → proof не сошёлся. reportOnly:true — пускаем, но это сигнал обкатки.
-                P5Mod.LOG.info("[P5] хэндшейк {}: allow={} reason={} (reportOnly={})",
+                P5ModServer.LOG.info("[P5] хэндшейк {}: allow={} reason={} (reportOnly={})",
                         name, allow, reason, o.has("reportOnly"));
             }
             return allow;
