@@ -424,6 +424,9 @@ const (
 	detectDedupWindow = 30 * time.Second
 	// maxDetectionField — потолок длины клиентских полей детекта (type/signature).
 	maxDetectionField = 128
+	// maxDetectionRaw — потолок клиентских Details, попадающих в Detection.Raw.
+	// Диагностике 4 КБ хватает, а без потолка это запись произвольного размера в БД.
+	maxDetectionRaw = 4096
 	// detectionStatusUnmatched — детект, не совпавший ни с системным типом, ни с
 	// блэклистом: хранится для разбора, но не алертит и не попадает в review-очередь.
 	detectionStatusUnmatched = "unmatched"
@@ -839,7 +842,10 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 	raw := ""
 	if d.Details != nil {
 		if b, err := json.Marshal(d.Details); err == nil {
-			raw = string(b)
+			// Details целиком приходят от клиента. Без обрезки один игрок с launch-token
+			// писал в БД сколько угодно (потолок — только app-wide BodyLimit), т.е. жёг
+			// диск прода мегабайтами на запрос.
+			raw = truncate(string(b), maxDetectionRaw)
 		}
 	}
 	rec := models.Detection{
