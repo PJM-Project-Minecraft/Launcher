@@ -91,7 +91,9 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// ко всем роутам /api/anticheat, включая launch-token-эндпоинты (им JWT не нужен).
 	group := app.Group("/api/anticheat")
 	// JWT-защищённые: лаунчер инициирует handshake и тянет блэклист.
-	group.Post("/handshake/init", authMiddleware, h.init)
+	// initMaxBodySize, а не app-wide 512МБ: init принимает от клиента списки компонентов
+	// и pre-launch детектов, каждый из которых оборачивается в запись БД.
+	group.Post("/handshake/init", authMiddleware, requestBodyLimit(initMaxBodySize, h.init))
 	group.Get("/blacklist", authMiddleware, h.blacklist)
 	// Launch-token-защищённые: confirm и репорты от лаунчера/агентов (без JWT).
 	group.Post("/handshake/confirm", h.confirm)
@@ -854,6 +856,9 @@ const detectMaxBodySize = 64 * 1024
 
 // filesMaxBodySize — потолок тела /files: maxReportedFiles записей по ~(путь + 64 hex).
 const filesMaxBodySize = 256 * 1024
+
+// initMaxBodySize — потолок тела /handshake/init (HWID-компоненты + pre-launch детекты).
+const initMaxBodySize = 128 * 1024
 
 // requestBodyLimit отвергает запрос по Content-Length ДО буферизации тела Fiber'ом
 // (ранняя защита от memory-DoS; в Fiber v3 нет встроенного per-route bodylimit).
