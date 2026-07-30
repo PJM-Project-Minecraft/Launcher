@@ -19,8 +19,13 @@ func TestKeepaliveEndpoint(t *testing.T) {
 	svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-ka")
 
 	app := fiber.New()
-	noAuth := func(c fiber.Ctx) error { return c.Next() }
-	NewHandler(svc).RegisterRoutes(app, noAuth)
+	// keepalive требует владельца сессии: nonce приходит из тела, и без привязки к
+	// авторизованному игроку чужую сессию мог продлевать любой держатель JWT.
+	asLiko := func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "Liko", ProviderUUID: "u"})
+		return c.Next()
+	}
+	NewHandler(svc).RegisterRoutes(app, asLiko)
 
 	post := func(body string) int {
 		req := httptest.NewRequest(http.MethodPost,
@@ -53,5 +58,14 @@ func TestKeepaliveEndpoint(t *testing.T) {
 	}
 	if code := post(`{"nonce":"never-issued"}`); code != http.StatusNotFound {
 		t.Fatalf("неизвестный nonce: ожидался 404, получен %d", code)
+	}
+
+	// Чужой nonce: сессия жива, но принадлежит другому игроку — продлевать нельзя.
+	svc.IssueSession(models.User{Login: "Victim", ProviderUUID: "v"}, "nonce-victim")
+	if code := post(`{"nonce":"nonce-victim"}`); code != http.StatusNotFound {
+		t.Fatalf("чужой nonce: ожидался 404, получен %d", code)
+	}
+	if svc.Store().LauncherSustainedAfter("nonce-victim", before) {
+		t.Fatal("чужой keepalive не должен отмечать живость лаунчера жертвы")
 	}
 }

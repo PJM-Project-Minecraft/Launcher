@@ -123,6 +123,17 @@ func (h Handler) launcherSessionKeepalive(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil || req.Nonce == "" {
 		return c.Status(http.StatusBadRequest).JSON(yggError{Error: "IllegalArgumentException", ErrorMessage: "Не указан nonce"})
 	}
+	// Nonce приходит из тела, поэтому обязателен владелец: иначе любой игрок с JWT
+	// продлевал чужую сессию (и подставлял её владельца под отзыв доступа за
+	// «лаунчер жив, а агент молчит»). Единственный вход, где nonce не из подписанного
+	// launch-token, — этот.
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		return c.Status(http.StatusUnauthorized).JSON(yggError{Error: "Unauthorized", ErrorMessage: "Требуется авторизация"})
+	}
+	if sess, found := h.service.Store().SessionByNonce(req.Nonce); !found || sess.Name != user.Login {
+		return c.SendStatus(http.StatusNotFound)
+	}
 	if !h.service.Store().TouchByNonce(req.Nonce) {
 		return c.SendStatus(http.StatusNotFound)
 	}
