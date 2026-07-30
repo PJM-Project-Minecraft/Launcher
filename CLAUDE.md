@@ -10,7 +10,7 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `launcher-slint/` — десктоп-лаунчер на Rust + Slint. Текущая версия: `0.4.3` (в `Cargo.toml`).
+- `launcher-slint/` — десктоп-лаунчер на Rust + Slint. Текущая версия: `0.4.4` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
 - `src/` + Vite — **легаси** React-прототип UI, для лаунчера не нужен (`npm run dev:web`).
