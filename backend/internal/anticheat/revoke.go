@@ -11,9 +11,9 @@ import (
 // что происходило, это Telegram-алерт. Здесь бэкенд помечает игрока отозванным, а
 // исполняет кик ИГРОВОЙ СЕРВЕР (P5-мод поллит /api/anticheat/p5/revoked).
 //
-// Ключ — логин в нижнем регистре, а не nonce: сессию detect-kick уже мог погасить,
-// и мод, знающий только ник, до nonce не доберётся. Запись живёт revokeTTL и снимается
-// на успешном Confirm — новый запуск игры (новая сессия) начинает с чистого листа.
+// Ключ — логин, а не nonce: сессию detect-kick уже мог погасить, и мод, знающий только
+// ник, до nonce не доберётся. Запись живёт revokeTTL и снимается на успешном Confirm —
+// новый запуск игры (новая сессия) начинает с чистого листа.
 
 // revokeTTL — сколько отзыв остаётся в силе. Должен с запасом перекрывать интервал
 // поллинга мода (~25с), чтобы кик пережил пару пропущенных опросов, но не тянуться
@@ -24,6 +24,11 @@ const revokeTTL = 10 * time.Minute
 // вернувшийся heartbeat доказывает, что агент жив, и повод отпал. Отзывы по детекту
 // («детект: …») так не снимаются — их гасит только новый подтверждённый запуск игры.
 const reasonAgentSilent = "агент античита перестал отвечать"
+
+// revokeKey — ключ реестра отзывов. Регистр ЗНАЧИМ: логины в БД регистрозависимы, и
+// схлопывание регистра означало, что отзыв «Liko» кикает игрока «liko» (кик другого
+// игрока через регистрацию ника-двойника).
+func revokeKey(login string) string { return strings.TrimSpace(login) }
 
 type revocation struct {
 	reason string
@@ -39,7 +44,7 @@ type KickOrder struct {
 // Revoke помечает игрока отозванным: следующий опрос P5-мода вернёт его в списке на
 // кик. Повторный вызов не продлевает отзыв — время первого события важнее.
 func (s *Service) Revoke(login, reason string) {
-	key := strings.ToLower(strings.TrimSpace(login))
+	key := revokeKey(login)
 	if key == "" {
 		return
 	}
@@ -55,7 +60,7 @@ func (s *Service) Revoke(login, reason string) {
 
 // clearRevocation снимает отзыв (новый подтверждённый запуск игры).
 func (s *Service) clearRevocation(login string) {
-	key := strings.ToLower(strings.TrimSpace(login))
+	key := revokeKey(login)
 	if key == "" {
 		return
 	}
@@ -67,7 +72,7 @@ func (s *Service) clearRevocation(login string) {
 // clearSilenceRevocation снимает отзыв, выданный за молчание агента (агент снова на
 // связи). Отзыв по детекту не трогает — иначе heartbeat читера отменял бы собственный бан.
 func (s *Service) clearSilenceRevocation(login string) {
-	key := strings.ToLower(strings.TrimSpace(login))
+	key := revokeKey(login)
 	if key == "" {
 		return
 	}
@@ -93,7 +98,7 @@ func (s *Service) RevokedAmong(names []string) []KickOrder {
 	}
 	var out []KickOrder
 	for _, name := range names {
-		r, ok := s.revoked[strings.ToLower(strings.TrimSpace(name))]
+		r, ok := s.revoked[revokeKey(name)]
 		if !ok {
 			continue
 		}

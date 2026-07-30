@@ -110,8 +110,17 @@ func TestRevokeOnAgentSilentAndDetectKick(t *testing.T) {
 		t.Fatalf("ожидался отзыв только для Liko, получено %+v", orders)
 	}
 
-	// Новый запуск игры снимает отзыв.
+	// Регистр в ключе отзыва значим: ник-двойник не должен ни снимать, ни ловить отзыв.
 	svc.clearRevocation("liko")
+	if orders := svc.RevokedAmong([]string{"liko"}); len(orders) != 0 {
+		t.Fatal("отзыв для Liko не должен распространяться на другого игрока liko")
+	}
+	if orders := svc.RevokedAmong([]string{"Liko"}); len(orders) != 1 {
+		t.Fatalf("ник-двойник не должен снимать отзыв: %+v", orders)
+	}
+
+	// Новый запуск игры снимает отзыв (Confirm передаёт claims.Login как есть).
+	svc.clearRevocation(claims.Login)
 	if orders := svc.RevokedAmong([]string{"Liko"}); len(orders) != 0 {
 		t.Fatalf("после Confirm отзыв должен сниматься: %+v", orders)
 	}
