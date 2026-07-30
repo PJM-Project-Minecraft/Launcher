@@ -177,6 +177,14 @@ func (s *Store) PutSession(sess Session) {
 	defer s.mu.Unlock()
 	s.sessions[sess.AccessToken] = sess
 	if sess.Nonce != "" {
+		// Инвариант «один nonce = ровно одна живая сессия». Без вытеснения повторный
+		// launcher-session с тем же nonce оставлял прежнюю сессию жить, а kick по nonce
+		// (InvalidateByNonce) гасил только последнюю — читер продолжал играть по старому
+		// accessToken. Легальный перезапуск игры приходит с новым nonce из handshake/init.
+		if old, busy := s.nonces[sess.Nonce]; busy && old != sess.AccessToken {
+			delete(s.sessions, old)
+			s.deleteSession(old)
+		}
 		s.nonces[sess.Nonce] = sess.AccessToken
 	}
 	s.persistSession(sess)
