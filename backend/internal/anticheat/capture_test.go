@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -107,5 +108,30 @@ func TestVerifiedCaptureRejectsTamperedFrame(t *testing.T) {
 	// Чужая сессия ключа не знает.
 	if _, err := svc.VerifiedCaptureJPEG("unknown-nonce", "shot-2", 16, 16, pngData, sig); err == nil {
 		t.Fatal("без секрета сессии кадр принимать нельзя")
+	}
+}
+
+// Тег источника кадра приходит из JVM игрока и уходит в лог как есть — проверяем, что
+// перевод строки (подделка соседних записей лога) и мусор туда не пролезут.
+func TestCaptureSourceSanitized(t *testing.T) {
+	cases := map[string]string{
+		"dxgi":      "dxgi",
+		"dxgi-idle": "dxgi-idle",
+		"":          "unknown",
+		"!!!":       "unknown",
+		// Обрезка до 16 символов, затем фильтр: от подделки записи лога остаётся огрызок.
+		"dxgi\nlevel=INFO msg=\"забанен\"": "dxgilevel",
+	}
+	for in, want := range cases {
+		got := captureSource(in)
+		if strings.ContainsAny(got, "\n\r ") {
+			t.Fatalf("captureSource(%q) = %q: в логе не должно быть переводов строк", in, got)
+		}
+		if len(got) > 16 {
+			t.Fatalf("captureSource(%q) = %q: длиннее 16 символов", in, got)
+		}
+		if got != want {
+			t.Fatalf("captureSource(%q) = %q, ожидалось %q", in, got, want)
+		}
 	}
 }

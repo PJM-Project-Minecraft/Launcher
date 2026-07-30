@@ -800,12 +800,15 @@ public final class Agent {
         try {
             String[] lines = new String(Files.readAllBytes(sig),
                 java.nio.charset.StandardCharsets.UTF_8).split("\n");
-            // Формат .sig: "<id>\n<hex подписи>\n<ширина> <высота>\n" (id проверен в frameReady).
+            // Формат .sig: "<id>\n<hex подписи>\n<ширина> <высота>\n<чем снято>\n"
+            // (id проверен в frameReady). Четвёртой строки нет у старой нативки — тогда
+            // источник просто неизвестен, кадр от этого не хуже.
             if (lines.length < 3) {
                 failScreenshot(id, "bad-sig");
                 return;
             }
             String signature = lines[1].trim();
+            String source = lines.length >= 4 ? lines[3].trim() : "";
             String[] dims = lines[2].trim().split(" ");
             int width = Integer.parseInt(dims[0]);
             int height = Integer.parseInt(dims[1]);
@@ -836,6 +839,7 @@ public final class Agent {
                 + "\"width\":" + width + ","
                 + "\"height\":" + height + ","
                 + "\"signature\":\"" + escape(signature) + "\","
+                + "\"source\":\"" + escape(source) + "\","
                 + "\"data\":\"" + java.util.Base64.getEncoder().encodeToString(png.toByteArray()) + "\""
                 + "}";
             postWithToken("/api/anticheat/screenshot/" + id, body);

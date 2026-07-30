@@ -19,8 +19,11 @@
  *                     выполнится хоть один Java-класс. Мод внутри игры секрет не увидит.
  *   <flag>.shot.req — id запроса скриншота (пишет Java, получив его с бэкенда).
  *   <flag>.shot.raw — сырые пиксели RGB24 построчно (пишет нативка).
- *   <flag>.shot.sig — «<hex подписи>\n<ширина> <высота>\n». Пишется ПОСЛЕДНИМ = маркер
- *                     готовности кадра.
+ *   <flag>.shot.sig — «<id>\n<hex подписи>\n<ширина> <высота>\n<чем снято>\n». Пишется
+ *                     ПОСЛЕДНИМ = маркер готовности кадра. Последняя строка —
+ *                     диагностика: dxgi / dxgi-idle / gdi / x11. Она ВНЕ подписи, то есть
+ *                     мод в JVM может её подменить: годится, чтобы отличить «залип
+ *                     захват» от «залипла игра», и не годится как основание для санкций.
  *   <flag>.shot.err — причина неудачи (нативка), Java репортит fail на бэкенд.
  *
  * Подпись: HMAC-SHA256(секрет, "<id>\n<w>\n<h>\n" || сырые RGB). Бэкенд декодирует
@@ -103,8 +106,8 @@ static int hex_val(char c) {
 
 /* ───────────────────────── Захват экрана по платформам ───────────────────────── */
 
-/* Возвращает malloc'нутый буфер RGB24 (w*h*3) или NULL. */
-static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err);
+/* Возвращает malloc'нутый буфер RGB24 (w*h*3) или NULL. В *src кладёт, чем снято. */
+static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err, const char **src);
 
 #ifdef _WIN32
 
@@ -182,7 +185,7 @@ static unsigned char *capture_gdi(int *out_w, int *out_h, const char **err) {
 
 /* DXGI Desktop Duplication: снимает то, что реально выводится на монитор, включая
  * эксклюзивный фуллскрин (именно поэтому чёрных/застывших кадров здесь не бывает). */
-static unsigned char *capture_dxgi(int *out_w, int *out_h, const char **err) {
+static unsigned char *capture_dxgi(int *out_w, int *out_h, const char **err, const char **src) {
     ID3D11Device *dev = NULL;
     ID3D11DeviceContext *ctx = NULL;
     IDXGIDevice *dxdev = NULL;
@@ -215,7 +218,14 @@ static unsigned char *capture_dxgi(int *out_w, int *out_h, const char **err) {
     }
 
     /* Ждём НОВЫЙ кадр: AcquireNextFrame отдаёт и «пустые» события (только курсор),
-     * у которых LastPresentTime == 0 — сохранив такой, получили бы устаревшую картинку. */
+     * у которых LastPresentTime == 0. Первые ~2с ждём настоящий present — на живой игре
+     * он приходит за миллисекунды, и кадр гарантированно свежий.
+     *
+     * Дальше берём пустое событие как есть: поверхность дупликации всегда содержит
+     * ТЕКУЩИЙ вывод монитора, а раз новых present'ов нет — экран статичен (пауза, AFK,
+     * зависший при загрузке модлоадер). Раньше в этом случае мы 10 секунд ждали
+     * впустую и падали на GDI, который в эксклюзивном фуллскрине отдаёт чёрный кадр. */
+    int idle_frame = 0;
     for (int attempt = 0; attempt < 40 && !rgb; attempt++) {
         DXGI_OUTDUPL_FRAME_INFO info;
         IDXGIResource *res = NULL;
@@ -227,11 +237,12 @@ static unsigned char *capture_dxgi(int *out_w, int *out_h, const char **err) {
             *err = "dxgi-acquire";
             break;
         }
-        if (info.LastPresentTime.QuadPart == 0) {
+        if (info.LastPresentTime.QuadPart == 0 && attempt < 8) {
             IDXGIResource_Release(res);
             IDXGIOutputDuplication_ReleaseFrame(dup);
             continue;
         }
+        idle_frame = info.LastPresentTime.QuadPart == 0;
         ID3D11Texture2D *tex = NULL;
         if (SUCCEEDED(IDXGIResource_QueryInterface(res, &IID_ID3D11Texture2D, (void **)&tex)) && tex) {
             D3D11_TEXTURE2D_DESC desc;
@@ -250,6 +261,7 @@ static unsigned char *capture_dxgi(int *out_w, int *out_h, const char **err) {
                     if (rgb) {
                         *out_w = (int)desc.Width;
                         *out_h = (int)desc.Height;
+                        *src = idle_frame ? "dxgi-idle" : "dxgi";
                     }
                     ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
                 }
@@ -273,11 +285,12 @@ done:
     return rgb;
 }
 
-static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err) {
-    unsigned char *rgb = capture_dxgi(out_w, out_h, err);
+static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err, const char **src) {
+    unsigned char *rgb = capture_dxgi(out_w, out_h, err, src);
     if (rgb) {
         return rgb;
     }
+    *src = "gdi";
     return capture_gdi(out_w, out_h, err);
 }
 
@@ -302,7 +315,8 @@ typedef struct {
     /* дальше в XImage идут маски и функции — нам не нужны, читаем только начало */
 } ac_ximage;
 
-static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err) {
+static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err, const char **src) {
+    *src = "x11";
     void *lib = dlopen("libX11.so.6", RTLD_LAZY);
     if (!lib) {
         lib = dlopen("libX11.so", RTLD_LAZY);
@@ -375,8 +389,8 @@ static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err) {
 
 #else
 
-static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err) {
-    (void)out_w; (void)out_h;
+static unsigned char *ac_capture_rgb(int *out_w, int *out_h, const char **err, const char **src) {
+    (void)out_w; (void)out_h; (void)src;
     *err = "unsupported-os";
     return NULL;
 }
@@ -439,7 +453,8 @@ static void write_err(const char *reason) {
 static void handle_request(const char *id) {
     int w = 0, h = 0;
     const char *err = "capture";
-    unsigned char *rgb = ac_capture_rgb(&w, &h, &err);
+    const char *src = "unknown";
+    unsigned char *rgb = ac_capture_rgb(&w, &h, &err, &src);
     if (!rgb || w <= 0 || h <= 0) {
         free(rgb);
         write_err(err);
@@ -481,7 +496,7 @@ static void handle_request(const char *id) {
         write_err("sig-open");
         return;
     }
-    fprintf(f, "%s\n%s\n%d %d\n", id, sig, w, h);
+    fprintf(f, "%s\n%s\n%d %d\n%s\n", id, sig, w, h, src);
     fclose(f);
 }
 

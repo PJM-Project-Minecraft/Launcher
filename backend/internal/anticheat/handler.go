@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"launcher-backend/internal/auth"
@@ -758,6 +759,10 @@ type screenshotUploadBody struct {
 	// Signature — HMAC-SHA256 пикселей ключом сессии (нативный агент). Обязателен для
 	// аплоада из JVM.
 	Signature string `json:"signature"`
+	// Source — чем снят кадр (dxgi/dxgi-idle/gdi/x11). Диагностика: по картинке
+	// «залип захват» и «залипла игра» неразличимы. Подписью НЕ покрыт — мод в JVM может
+	// соврать, поэтому только в лог, без последствий для игрока.
+	Source string `json:"source"`
 }
 
 // screenshotUpload — лаунчер грузит JPEG-скриншот по ID из pending-ответа.
@@ -814,6 +819,8 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if err := h.screenshots.CompleteScreenshot(c.Context(), id, data, req.Width, req.Height); err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось сохранить скриншот"})
 	}
+	slog.Info("anticheat: скриншот принят", "login", claims.Login, "id", id,
+		"source", captureSource(req.Source), "width", req.Width, "height", req.Height)
 	return c.SendStatus(http.StatusNoContent)
 }
 
@@ -903,6 +910,26 @@ func launchTokenFromBody(c fiber.Ctx, bodyToken string) string {
 		return bodyToken
 	}
 	return c.Get("X-Launch-Token")
+}
+
+// captureSource нормализует диагностический тег источника кадра перед записью в лог.
+// Значение приходит из JVM игрока, то есть из-под контроля потенциального чит-мода:
+// в лог нельзя пускать ни перевод строки (подделка соседних записей), ни мегабайт
+// мусора. Оставляем только [a-z0-9-] и 16 символов.
+func captureSource(s string) string {
+	if len(s) > 16 {
+		s = s[:16]
+	}
+	clean := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, s)
+	if clean == "" {
+		return "unknown"
+	}
+	return clean
 }
 
 // base64Decode декодирует base64 (standard или URL-safe) JPEG от лаунчера.
