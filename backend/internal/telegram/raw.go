@@ -4,15 +4,28 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// unwrapURLErr прячет URL из транспортной ошибки: в нём лежит токен бота
+// (https://api.telegram.org/bot<TOKEN>/...), и *url.Error печатает его целиком —
+// т.е. любая сетевая ошибка (таймаут, отказ прокси, DNS) сливала токен в логи.
+func unwrapURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
 
 type KeyboardBtn struct {
 	Text              string
@@ -90,7 +103,7 @@ func SendHTTPMessageHTML(client *http.Client, token string, chatID int64, text s
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return unwrapURLErr(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -150,7 +163,7 @@ func SendPhotoPNG(client *http.Client, token string, chatID int64, fileName stri
 	req.Header.Set("Content-Type", ct)
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return unwrapURLErr(err)
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer
@@ -236,7 +249,7 @@ func SendDocument(client *http.Client, token string, chatID int64, filePath, doc
 	req.Header.Set("Content-Type", ct)
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return unwrapURLErr(err)
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer
@@ -283,7 +296,7 @@ func postBotAPI(client *http.Client, token, method string, payload map[string]an
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return unwrapURLErr(err)
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer
@@ -401,7 +414,7 @@ func DeleteMessage(client *http.Client, token string, chatID int64, messageID in
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return unwrapURLErr(err)
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer

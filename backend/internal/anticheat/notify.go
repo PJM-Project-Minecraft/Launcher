@@ -3,9 +3,11 @@ package anticheat
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -119,6 +121,11 @@ func (n *TelegramNotifier) send(text string) {
 		bytes.NewReader(payload),
 	)
 	if err != nil {
+		// В URL лежит токен бота, а *url.Error печатает URL целиком — логируем причину.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		slog.Warn("anticheat: telegram alert failed", "error", err)
 		return
 	}
