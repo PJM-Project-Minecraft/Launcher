@@ -454,9 +454,15 @@ func (s *Store) ConsumeJoin(serverID string) (JoinRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.joins[serverID]
+	if !ok {
+		// Промах — в БД не ходим: роут hasJoined анонимный, а DELETE выполнялся под
+		// глобальным мьютексом Store, т.е. поток мусорных serverId ставил в очередь
+		// весь игровой логин (и сессии, и join'ы).
+		return JoinRecord{}, false
+	}
 	delete(s.joins, serverID)
 	s.deleteJoin(serverID)
-	if !ok || time.Now().After(record.expiresAt) {
+	if time.Now().After(record.expiresAt) {
 		return JoinRecord{}, false
 	}
 	return record, true
