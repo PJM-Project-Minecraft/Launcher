@@ -27,13 +27,14 @@ type SessionVerifier interface {
 	// TouchByNonce продлевает игровую сессию (sliding TTL): heartbeat — сигнал живости
 	// игры, без которого 15-мин TTL сессии истекает прямо во время игры.
 	TouchByNonce(nonce string) bool
-	// LauncherSeenAfter — слал ли лаунчер keepalive по nonce ПОЗЖЕ момента t. reaper
-	// передаёт t = lastHeartbeat + grace: keepalive после того, как агент замолк, значит
-	// лаунчер пережил агента (его убили в живой игре → алерт). При резком закрытии лаунчера
-	// (kill -9/краш) cleanup не отрабатывает, но обрывается и keepalive: его метка ≤ времени
-	// гибели агента → условие ложно → ложного алерта нет. Это надёжнее прежнего TTL-окна,
-	// которое держало метку «свежей» ещё 5 минут после смерти лаунчера.
-	LauncherSeenAfter(nonce string, t time.Time) bool
+	// LauncherSustainedAfter — слал ли лаунчер keepalive по nonce НЕ МЕНЕЕ ДВУХ раз позже
+	// момента t. reaper передаёт t = lastHeartbeat + grace: серия keepalive после того, как
+	// агент замолк, значит связь у лаунчера была устойчивой всё это время, а агент реально
+	// мёртв (его убили в живой игре → алерт+отзыв). Одной метки МАЛО: при обрыве интернета
+	// молчат оба, и первый вернувшийся keepalive выглядел как «агента убили» → кик честного
+	// игрока. При резком закрытии лаунчера (kill -9/краш) keepalive обрывается вместе с
+	// агентом → меток после t нет → ложного алерта нет.
+	LauncherSustainedAfter(nonce string, t time.Time) bool
 }
 
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
@@ -66,23 +67,35 @@ type Service struct {
 
 	revokeMu sync.Mutex
 	revoked  map[string]revocation // логин (lower) -> отзыв доступа; исполняет P5-мод (revoke.go)
+
+	captureMu      sync.Mutex
+	captureSecrets map[string]captureEntry // nonce -> секрет подписи кадров (capture.go)
+
+	shots shotStreakTracker // серии проваленных скриншотов (screenshot_streak.go)
+
+	enforceUnknownMods bool // true — kick за посторонний jar в mods/ (иначе репорт-онли)
+	allowedMu          sync.Mutex
+	allowedHashes      map[string]struct{} // SHA-256 всех файлов сборок (кэш, files.go)
+	allowedAt          time.Time
 }
 
 func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifier, agentPath string) *Service {
 	return &Service{
-		db:           db,
-		signer:       NewTokenSigner(secret),
-		autoBan:      autoBan,
-		verifier:     verifier,
-		agentPath:    agentPath,
-		kickSeverity: 7,
-		now:          time.Now,
-		recent:       make(map[string]time.Time),
-		shaEntries:   make(map[string]shaEntry),
-		heartbeats:   make(map[string]time.Time),
-		hbLogins:     make(map[string]string),
-		revoked:      make(map[string]revocation),
-		hbTimeout:    90 * time.Second,
+		db:             db,
+		signer:         NewTokenSigner(secret),
+		autoBan:        autoBan,
+		verifier:       verifier,
+		agentPath:      agentPath,
+		kickSeverity:   7,
+		now:            time.Now,
+		recent:         make(map[string]time.Time),
+		shaEntries:     make(map[string]shaEntry),
+		heartbeats:     make(map[string]time.Time),
+		hbLogins:       make(map[string]string),
+		captureSecrets: make(map[string]captureEntry),
+		shots:          shotStreakTracker{streaks: make(map[string]shotStreak)},
+		revoked:        make(map[string]revocation),
+		hbTimeout:      90 * time.Second,
 	}
 }
 
@@ -252,6 +265,10 @@ func (s *Service) touchHeartbeat(nonce, login string) {
 // (агент по её изменению ре-фетчит правила).
 func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool, blacklistVersion int64) {
 	s.touchHeartbeat(claims.Nonce, claims.Login)
+	// Агент снова отвечает → повод отзыва «перестал отвечать» отпал (снимаем ТОЛЬКО его,
+	// отзыв по детекту так не снять). Без этого пережитый обрыв связи означал кик и
+	// невозможность вернуться, пока отзыв не протухнет через revokeTTL.
+	s.clearSilenceRevocation(claims.Login)
 	// Продлеваем игровую сессию: heartbeat доказывает, что игра ещё запущена, и держит
 	// yggdrasil-токен живым на весь сеанс (иначе реконнект после 15 мин → invalid session).
 	// No-op, если сессию уже погасили (detect-kick) — IsActiveByNonce ниже вернёт kick.
@@ -269,6 +286,12 @@ func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool
 // 60с (2× интервала, с запасом на джиттер) уверенно отделяет этот случай от ситуации,
 // когда лаунчер реально продолжал слать keepalive уже после смерти агента.
 const launcherOutliveGrace = 60 * time.Second
+
+// silenceDropAfter — предел трекинга молчащей сессии. Пока лаунчер не доказал устойчивую
+// связь (две метки), молчащий nonce остаётся на трекинге: агент может вернуться из обрыва
+// и обновить метку. Через этот срок запись просто снимается с трекинга (сессию всё равно
+// добьёт TTL) — иначе мёртвые nonce копились бы в памяти.
+const silenceDropAfter = 30 * time.Minute
 
 // reapStale ловит сессии, по которым давно (дольше hbTimeout) не было heartbeat от
 // агента, и шлёт по ним МЯГКИЙ детект (алерт), НЕ гася сессию. Раньше reaper гасил
@@ -289,28 +312,36 @@ func (s *Service) reapStale(now time.Time) {
 	for nonce, last := range s.heartbeats {
 		if now.Sub(last) > s.hbTimeout {
 			silent = append(silent, staleSession{nonce, s.hbLogins[nonce], last})
-			delete(s.heartbeats, nonce)
-			delete(s.hbLogins, nonce)
 		}
 	}
 	s.hbMu.Unlock()
 	for _, st := range silent {
-		// Алертим, только если лаунчер доказал живость ПОЗЖЕ, чем агент замолк: keepalive
-		// пришёл после lastHeartbeat+grace — значит лаунчер пережил агента, и того убили в
-		// живой игре. При резком закрытии лаунчера (kill -9/краш/выключение) cleanup не
-		// отрабатывает, но keepalive обрывается одновременно с агентом — его метка остаётся
-		// ≤ времени гибели агента, поэтому сравнение по ВРЕМЕНИ (в отличие от прежнего
-		// 5-мин TTL-окна) ложного алерта не даёт. Сессию проверяем заодно (detect-kick мог
-		// её уже погасить). Лаунчеры без keepalive (старые версии) метки не шлют → тишина.
-		if s.verifier == nil || !s.verifier.IsActiveByNonce(st.nonce) ||
-			!s.verifier.LauncherSeenAfter(st.nonce, st.last.Add(launcherOutliveGrace)) {
+		// Агента считаем убитым, только если лаунчер доказал УСТОЙЧИВУЮ связь после того,
+		// как агент замолк: две метки keepalive после lastHeartbeat+grace. Одной метки мало —
+		// при нестабильном интернете молчат оба, а keepalive лаунчера (интервал 120с, таймаут
+		// 30с) возвращается из обрыва раньше heartbeat агента (30с, таймаут 10с), и это
+		// кикало честных игроков. При резком закрытии лаунчера (kill -9/краш/выключение)
+		// cleanup не отрабатывает, но keepalive обрывается одновременно с агентом — меток
+		// после grace нет → ложного алерта нет. Сессию проверяем заодно (detect-kick мог её
+		// уже погасить). Лаунчеры без keepalive (старые версии) метки не шлют → тишина.
+		active := s.verifier != nil && s.verifier.IsActiveByNonce(st.nonce)
+		killed := active && s.verifier.LauncherSustainedAfter(st.nonce, st.last.Add(launcherOutliveGrace))
+		if active && !killed && now.Sub(st.last) < silenceDropAfter {
+			continue // ждём: агент может вернуться из обрыва, лаунчер — добить вторую метку
+		}
+		// Дальше решение принято — снимаем с трекинга (дедуп алерта).
+		s.hbMu.Lock()
+		delete(s.heartbeats, st.nonce)
+		delete(s.hbLogins, st.nonce)
+		s.hbMu.Unlock()
+		if !killed {
 			continue
 		}
 		slog.Warn("anticheat: agent heartbeat silent (сессию не гасим, отзываем доступ)",
 			"nonce", st.nonce, "login", st.login, "timeout", s.hbTimeout)
 		// Сессию по-прежнему НЕ гасим (это било по честным игрокам при реконнекте), но
 		// доступ отзываем: агента прибили в живой игре, кикнет игровой сервер.
-		s.Revoke(st.login, "агент античита перестал отвечать")
+		s.Revoke(st.login, reasonAgentSilent)
 		if s.notifier != nil {
 			s.notifier.NotifyAgentSilent(st.nonce)
 		}
@@ -402,10 +433,15 @@ const (
 // Клиент не может занизить severity реальной инъекции/тампера: значение берётся отсюда,
 // а не из тела запроса. Сигнатурные типы (process|class|jar|file) — из блэклиста.
 var systemSeverity = map[string]int{
-	"inject":   9,
-	"attach":   9,
-	"tamper":   8,
-	"debugger": 6,
+	"inject":       9,
+	"attach":       9,
+	"tamper":       8,
+	"debugger":     6,
+	unknownModType: 9,
+	// Серия проваленных скриншотов. Severity высокая (канал контроля заглушен), но
+	// confidence остаётся soft — кикать нельзя: у части игроков захват не работает
+	// по среде (Wayland без XWayland, RDP), а не по злому умыслу.
+	screenshotFailType: 7,
 }
 
 // heuristicTypes — типы нативного агента, которым не с чем совпадать: сигнал в самом
@@ -418,7 +454,10 @@ var heuristicTypes = map[string]bool{"module-unknown": true, "ld-preload": true}
 // как "unknown" (запись сохраняется, но не выдаёт себя за доверенный слой).
 func normalizeSource(src string) string {
 	switch src {
-	case "launcher", "java", "native":
+	// "server" — детекты, рождённые самим бэкендом (серия проваленных скриншотов).
+	// Поддельный клиент может лишь неверно подписать СВОЙ детект этим источником:
+	// severity и confidence всё равно считает сервер.
+	case "launcher", "java", "native", "server":
 		return src
 	case "":
 		return "launcher"
@@ -437,6 +476,11 @@ func normalizeSource(src string) string {
 func detectionConfidence(dtype, matchType string) string {
 	switch dtype {
 	case "inject", "attach":
+		return "hard"
+	// unknown-mod — не эвристика: сервер сам сверил SHA-256 файла со списком
+	// опубликованных в сборках. Совпадения нет → файла не было в манифесте, а всё,
+	// чего нет в манифесте, лаунчер удаляет при синке.
+	case unknownModType:
 		return "hard"
 	}
 	switch matchType {
@@ -630,6 +674,10 @@ type InitResult struct {
 	ScreenshotToken string `json:"screenshotToken,omitempty"`
 	Nonce           string `json:"nonce,omitempty"`
 	Challenge       string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
+	// CaptureSecret — ключ подписи скриншотов (hex). Лаунчер кладёт его в файл рядом с
+	// нативным агентом и в JVM НЕ передаёт: нативка стирает файл до старта Java-кода,
+	// поэтому подписать кадр может только она (см. capture.go).
+	CaptureSecret string `json:"captureSecret,omitempty"`
 }
 
 // HwidComponents — раздельные солёные хеши компонентов железа (для fuzzy-матча HWID).
@@ -705,12 +753,18 @@ func (s *Service) InitHandshakeWithComponents(ctx context.Context, userUUID, log
 	if err != nil {
 		return InitResult{}, err
 	}
+	// Секрет подписи кадров: уходит лаунчеру и нативному агенту, в JVM не попадает.
+	captureSecret := randomHex(32)
+	if raw, err := hex.DecodeString(captureSecret); err == nil {
+		s.rememberCaptureSecret(nonce, raw)
+	}
 	return InitResult{
 		Allowed:         true,
 		LaunchToken:     token,
 		ScreenshotToken: shotToken,
 		Nonce:           nonce,
 		Challenge:       challenge,
+		CaptureSecret:   captureSecret,
 	}, nil
 }
 

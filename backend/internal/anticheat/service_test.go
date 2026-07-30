@@ -101,11 +101,12 @@ type fakeVerifier struct {
 	invalid      map[string]bool
 	touched      map[string]int
 	launcherSeen map[string]time.Time // nonce -> время последнего keepalive от лаунчера
+	launcherPrev map[string]time.Time // nonce -> предыдущий keepalive (устойчивость связи)
 }
 
-func (f *fakeVerifier) LauncherSeenAfter(nonce string, t time.Time) bool {
-	seen, ok := f.launcherSeen[nonce]
-	return ok && seen.After(t)
+func (f *fakeVerifier) LauncherSustainedAfter(nonce string, t time.Time) bool {
+	prev, ok := f.launcherPrev[nonce]
+	return ok && prev.After(t)
 }
 
 func (f *fakeVerifier) MarkVerifiedByNonce(nonce string) bool {
@@ -363,7 +364,8 @@ func (n *fakeNotifier) silentCount() int {
 // держит keepalive от лаунчера, а reaper при молчании агента лишь шлёт мягкий детект
 // (алерт), НЕ гася сессию. Реальный чит гасит сессию отдельно (detect-kick).
 func TestHeartbeatSilentSoftDetect(t *testing.T) {
-	v := &fakeVerifier{verified: map[string]bool{}, launcherSeen: map[string]time.Time{}}
+	v := &fakeVerifier{verified: map[string]bool{}, launcherSeen: map[string]time.Time{},
+		launcherPrev: map[string]time.Time{}}
 	svc := NewService(newTestDB(t), "secret", false, v, "")
 	n := &fakeNotifier{}
 	svc.SetNotifier(n)
@@ -376,8 +378,9 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 		t.Fatalf("confirm: %v", err)
 	}
 	// Агента убили в живой игре: его последний heartbeat — на base (из Confirm), а лаунчер
-	// ПРОДОЛЖАЛ слать keepalive уже после этого (на base+110s, далеко за grace 60s) —
-	// доказательство, что лаунчер пережил агента.
+	// ПРОДОЛЖАЛ слать keepalive уже после этого (base+70s и base+110s, обе за grace 60s) —
+	// устойчивая связь без агента = лаунчер пережил агента.
+	v.launcherPrev[res.Nonce] = base.Add(70 * time.Second)
 	v.launcherSeen[res.Nonce] = base.Add(110 * time.Second)
 	// В пределах таймаута — тихо, без алертов.
 	svc.reapStale(base.Add(60 * time.Second))

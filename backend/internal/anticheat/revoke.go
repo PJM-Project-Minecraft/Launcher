@@ -20,6 +20,11 @@ import (
 // в следующий игровой сеанс: перезапуск игры снимает отзыв через Confirm.
 const revokeTTL = 10 * time.Minute
 
+// reasonAgentSilent — отзыв за молчание агента. Единственный, который снимается САМ:
+// вернувшийся heartbeat доказывает, что агент жив, и повод отпал. Отзывы по детекту
+// («детект: …») так не снимаются — их гасит только новый подтверждённый запуск игры.
+const reasonAgentSilent = "агент античита перестал отвечать"
+
 type revocation struct {
 	reason string
 	at     time.Time
@@ -56,6 +61,21 @@ func (s *Service) clearRevocation(login string) {
 	}
 	s.revokeMu.Lock()
 	delete(s.revoked, key)
+	s.revokeMu.Unlock()
+}
+
+// clearSilenceRevocation снимает отзыв, выданный за молчание агента (агент снова на
+// связи). Отзыв по детекту не трогает — иначе heartbeat читера отменял бы собственный бан.
+func (s *Service) clearSilenceRevocation(login string) {
+	key := strings.ToLower(strings.TrimSpace(login))
+	if key == "" {
+		return
+	}
+	s.revokeMu.Lock()
+	if r, ok := s.revoked[key]; ok && r.reason == reasonAgentSilent {
+		delete(s.revoked, key)
+		slog.Info("anticheat: отзыв снят — агент снова отвечает", "login", login)
+	}
 	s.revokeMu.Unlock()
 }
 

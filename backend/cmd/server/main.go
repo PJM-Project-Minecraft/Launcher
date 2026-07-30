@@ -133,12 +133,14 @@ func main() {
 	acService.SetKickSeverity(cfg.AnticheatKickSeverity)
 	acService.SetHeartbeatTimeout(time.Duration(cfg.AnticheatHeartbeatSeconds) * time.Second)
 	acService.SetRequireAttestation(cfg.AnticheatRequireAttestation)
+	acService.SetEnforceUnknownMods(cfg.AnticheatUnknownModEnforce)
 	acService.StartHeartbeatReaper(30 * time.Second)
 	if notifier := anticheat.NewTelegramNotifier(cfg.AnticheatAlertBotToken, cfg.AnticheatAlertChatID); notifier != nil {
 		acService.SetNotifier(notifier)
 		slog.Info("anticheat: telegram alerts enabled", "chat_id", cfg.AnticheatAlertChatID)
 	}
 	screenshotSvc := anticheat.NewScreenshotService(db, cfg.ScreenshotStorageRoot)
+	screenshotSvc.SetDetector(acService) // серия проваленных скриншотов → детект
 	screenshotSvc.StartReaper(30 * time.Second)
 	anticheat.NewHandler(acService).
 		WithVersionGate(releaseService).

@@ -34,6 +34,22 @@ fn native_args(native_path: &Path, flag_path: &Path) -> Vec<String> {
     ]
 }
 
+/// Пишет ключ подписи скриншотов для нативного агента (файл читается и удаляется им
+/// на Agent_OnLoad). Пустой секрет — старый бэкенд: файла нет, нативка съёмку не
+/// включает, скриншоты просто не работают.
+fn write_capture_key(path: &Path, secret: &str) {
+    let _ = fs::remove_file(path); // ключ прошлой сессии, если игра завершилась аварийно
+    if secret.is_empty() {
+        return;
+    }
+    let _ = fs::write(path, format!("{}\n", secret));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// Аргументы Java-агента: токен, URL бэкенда, kick-файл, attestation-challenge, javaagent.
 fn agent_args(
     token: &str,
@@ -57,6 +73,7 @@ fn agent_args(
 pub fn build(
     token: &str,
     challenge: &str,
+    capture_secret: &str,
     manifest: Option<&IntegrityManifest>,
     config: &AppConfig,
 ) -> Result<InjectionPlan, String> {
@@ -71,6 +88,11 @@ pub fn build(
         // КРИТИЧНО: чистим и файл событий, иначе Java-поллер при новом запуске
         // перечитает старые детекты прошлой (читерской) сессии и кикнет чистую игру.
         let _ = fs::remove_file(native.with_file_name(format!("{}.events", NATIVE_FLAG)));
+        // Ключ подписи скриншотов — единственный секрет, который получает нативка.
+        // Кладём его В ФАЙЛ, а не в JVM-аргументы: аргументы командной строки видны
+        // любому моду внутри игры (RuntimeMXBean.getInputArguments), а файл нативка
+        // читает и удаляет в Agent_OnLoad — до того, как выполнится первый Java-класс.
+        write_capture_key(&native.with_file_name(format!("{}.key", NATIVE_FLAG)), capture_secret);
         args.extend(native_args(&native, &flag));
     }
 

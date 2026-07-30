@@ -1,0 +1,120 @@
+package anticheat
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"time"
+
+	"launcher-backend/internal/models"
+)
+
+// ReportedFile — один jar из mods/ игрока: путь относительно игровой папки и SHA-256.
+// Missing — jar, из которого классы уже загрузились, но которого на диске больше нет
+// (чит, удаливший себя после загрузки); хеш посчитать не с чего, сверять нечего.
+type ReportedFile struct {
+	Path    string `json:"path"`
+	Sha256  string `json:"sha256"`
+	Missing bool   `json:"missing"`
+}
+
+const (
+	// unknownModType — тип детекта «в mods/ лежит jar, которого нет ни в одной сборке».
+	// Блэклист имён ловит только ИЗВЕСТНЫЕ читы; здесь работает whitelist: всё, чего
+	// админ не публиковал, считается посторонним независимо от названия.
+	unknownModType = "unknown-mod"
+	// allowedHashesTTL — окно кэша множества разрешённых хешей. Набор меняется только
+	// при пересканировании сборки в дашборде, а запрос идёт на каждый старт игры.
+	allowedHashesTTL = 60 * time.Second
+	// maxReportedFiles — потолок файлов в одном отчёте (защита от флуда БД детектами).
+	maxReportedFiles = 512
+)
+
+// SetEnforceUnknownMods включает kick за посторонний jar в mods/. По умолчанию false
+// (репорт-онли): детект пишется и алертит, но игрока не выкидывает — чтобы сначала
+// увидеть в проде, не шлёт ли легальный мод свои jar-ы в mods/ на рантайме.
+func (s *Service) SetEnforceUnknownMods(v bool) { s.enforceUnknownMods = v }
+
+// CheckFiles сверяет инвентарь mods/ игрока с хешами файлов, опубликованных админом
+// в сборках, и возвращает решение о kick.
+//
+// Зачем: лаунчер удаляет посторонние файлы при синке (cleanup_unmanaged_files), но
+// между cleanup и чтением mods/ модлоадером есть окно в десятки секунд — туда и
+// подкидывают чит. Проверка изнутри JVM смотрит на диск уже ПОСЛЕ старта игры, а
+// сверку делает сервер: у агента нет списка разрешённых хешей, подделать нечего.
+func (s *Service) CheckFiles(ctx context.Context, claims LaunchClaims, files []ReportedFile) (bool, error) {
+	allowed, err := s.allowedFileHashes(ctx)
+	if err != nil {
+		return false, err
+	}
+	// Пустой набор — БД пуста или запрос деградировал: fail-open, иначе одним махом
+	// кикнем всех играющих.
+	if len(allowed) == 0 {
+		slog.Warn("anticheat: список хешей сборок пуст, проверка mods/ пропущена")
+		return false, nil
+	}
+
+	kick := false
+	for _, f := range files {
+		hash := strings.ToLower(strings.TrimSpace(f.Sha256))
+		if !f.Missing {
+			if len(hash) != 64 {
+				continue // не хеш — мусор от поддельного клиента
+			}
+			if _, ok := allowed[hash]; ok {
+				continue
+			}
+		}
+		name := baseName(f.Path)
+		severity, confidence, err := s.RecordDetection(ctx, claims, DetectionInput{
+			Source:    "java",
+			Type:      unknownModType,
+			Signature: name,
+			Details:   map[string]any{"name": name, "path": truncate(f.Path, 512), "hash": hash, "missing": f.Missing},
+		})
+		if err != nil {
+			return kick, err
+		}
+		if !s.enforceUnknownMods {
+			continue
+		}
+		if k, _ := s.EvaluateKick(claims, severity, confidence, unknownModType); k {
+			kick = true
+		}
+	}
+	return kick, nil
+}
+
+// allowedFileHashes — множество SHA-256 всех файлов, опубликованных в сборках.
+// Сверяем по хешу, а не по пути: переименованный игроком легальный мод не должен
+// давать ложный детект, а посторонний jar не спрячется под именем легального.
+func (s *Service) allowedFileHashes(ctx context.Context) (map[string]struct{}, error) {
+	s.allowedMu.Lock()
+	defer s.allowedMu.Unlock()
+	if s.allowedHashes != nil && s.now().Sub(s.allowedAt) < allowedHashesTTL {
+		return s.allowedHashes, nil
+	}
+	var hashes []string
+	if err := s.db.WithContext(ctx).Model(&models.GameFile{}).
+		Distinct().Pluck("hash_sha256", &hashes).Error; err != nil {
+		return nil, err
+	}
+	set := make(map[string]struct{}, len(hashes))
+	for _, h := range hashes {
+		if h = strings.ToLower(strings.TrimSpace(h)); len(h) == 64 {
+			set[h] = struct{}{}
+		}
+	}
+	s.allowedHashes, s.allowedAt = set, s.now()
+	return set, nil
+}
+
+// baseName — имя файла из относительного пути (сигнатура детекта должна читаться
+// в панели, а не быть путём на диске игрока).
+func baseName(path string) string {
+	path = strings.ReplaceAll(path, "\\", "/")
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		path = path[i+1:]
+	}
+	return truncate(path, maxDetectionField)
+}

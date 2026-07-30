@@ -34,16 +34,22 @@ func TestKeepaliveEndpoint(t *testing.T) {
 	}
 
 	before := time.Now()
-	if svc.Store().LauncherSeenAfter("nonce-ka", before) {
+	if svc.Store().LauncherSustainedAfter("nonce-ka", before) {
 		t.Fatal("до keepalive отметки живости лаунчера быть не должно")
 	}
 	if code := post(`{"nonce":"nonce-ka"}`); code != http.StatusNoContent {
 		t.Fatalf("живой nonce: ожидался 204, получен %d", code)
 	}
-	// keepalive должен зафиксировать живость лаунчера (сигнал «игра идёт» для reaper):
-	// метка должна оказаться позже момента before.
-	if !svc.Store().LauncherSeenAfter("nonce-ka", before) {
-		t.Fatal("после keepalive должна появиться свежая метка живости лаунчера")
+	// Одна метка — ещё не устойчивая связь (может быть первый пинг после обрыва).
+	if svc.Store().LauncherSustainedAfter("nonce-ka", before) {
+		t.Fatal("одиночный keepalive не должен считаться устойчивой связью")
+	}
+	// Второй keepalive: связь держится — сигнал «игра идёт» для reaper.
+	if code := post(`{"nonce":"nonce-ka"}`); code != http.StatusNoContent {
+		t.Fatalf("живой nonce: ожидался 204, получен %d", code)
+	}
+	if !svc.Store().LauncherSustainedAfter("nonce-ka", before) {
+		t.Fatal("после двух keepalive должна появиться отметка устойчивой связи")
 	}
 	if code := post(`{"nonce":"never-issued"}`); code != http.StatusNotFound {
 		t.Fatalf("неизвестный nonce: ожидался 404, получен %d", code)

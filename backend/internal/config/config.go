@@ -60,6 +60,10 @@ type Config struct {
 	// обкатки на dev-сервере, иначе кикнет всех).
 	AnticheatP5Secret  string
 	AnticheatP5Enforce bool
+	// AnticheatUnknownModEnforce — kick за jar в mods/, которого нет ни в одной сборке
+	// (подкинут в окно между cleanup лаунчера и загрузкой модов). false (дефолт) —
+	// репорт-онли: детект пишется и алертит, игрока не выкидывает.
+	AnticheatUnknownModEnforce bool
 }
 
 func Load() Config {
@@ -113,6 +117,7 @@ func Load() Config {
 		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),
 		AnticheatP5Secret:      env("ANTICHEAT_P5_SECRET", ""),
 		AnticheatP5Enforce:     env("ANTICHEAT_P5_ENFORCE", "false") == "true",
+		AnticheatUnknownModEnforce: env("ANTICHEAT_UNKNOWN_MOD_ENFORCE", "false") == "true",
 	}
 
 	if cfg.JWTSecret == "dev-only-change-me" {

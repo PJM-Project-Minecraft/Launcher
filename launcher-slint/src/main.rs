@@ -2331,13 +2331,9 @@ fn launch_profile(
     // скан его не видел). Делит stop-флаг с keepalive — оба гаснут на закрытии игры.
     let ingame_scan_handle = anticheat::spawn_ingame_scan(config, &guard, keepalive_stop.clone());
 
-    // Опрос скриншот-запросов: пока игра запущена, лаунчер проверяет, не запросил ли
-    // админ скриншот экрана. Делит stop-флаг с keepalive — гаснет на закрытии игры.
-    let screenshot_handle = anticheat::screenshot::spawn_screenshot_loop(
-        &config.api_url(),
-        guard.screenshot_token(),
-        keepalive_stop.clone(),
-    );
+    // Скриншоты по запросу админа теперь снимает НАТИВНЫЙ агент внутри игровой JVM
+    // (DXGI/X11), а доставляет Java-агент: лаунчер в этой цепочке больше не участвует —
+    // его можно было убить после старта игры, и съёмка умирала.
 
     let status = child
         .wait()
@@ -2348,7 +2344,6 @@ fn launch_profile(
     keepalive_stop.store(true, Ordering::Relaxed);
     let _ = keepalive_handle.join();
     let _ = ingame_scan_handle.join();
-    let _ = screenshot_handle.join();
     invalidate_yggdrasil_session(config, &session.access_token);
 
     // Наиграно: копим только реальные сессии, краш на старте (быстрый выход с

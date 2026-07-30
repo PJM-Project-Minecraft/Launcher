@@ -97,6 +97,9 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Post("/handshake/confirm", h.confirm)
 	group.Post("/detect", requestBodyLimit(detectMaxBodySize, h.detect))
 	group.Post("/heartbeat", h.heartbeat)
+	// Инвентарь mods/ от Java-агента (по launch-token): сервер сверяет SHA-256 со
+	// сборками и решает, кикать ли за посторонний jar.
+	group.Post("/files", requestBodyLimit(filesMaxBodySize, h.files))
 	// Лёгкая телеметрия агента (по launch-token): агент сообщает о самовосстановлении
 	// своих фоновых тредов (heartbeat/event-poller пережили interrupt/Throwable).
 	// Только лог — ни БД, ни бана, ни алерта.
@@ -330,6 +333,38 @@ func (h Handler) detect(c fiber.Ctx) error {
 	// Решаем, кикать ли игрока (по СЕРВЕРНЫМ severity+confidence): ответ читает агент и убивает JVM.
 	if kick, reason := h.service.EvaluateKick(claims, severity, confidence, input.Type); kick {
 		return c.JSON(fiber.Map{"action": "kick", "reason": reason})
+	}
+	return c.JSON(fiber.Map{"action": "none"})
+}
+
+type filesRequest struct {
+	LaunchToken string         `json:"launchToken"`
+	Files       []ReportedFile `json:"files"`
+}
+
+// files принимает список jar-ов из mods/ игрока (путь + SHA-256) и отвечает kick'ом,
+// если среди них есть файл, которого нет ни в одной сборке.
+func (h Handler) files(c fiber.Ctx) error {
+	var req filesRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректный запрос"})
+	}
+	claims, err := h.service.VerifySessionToken(launchTokenFromBody(c, req.LaunchToken))
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
+	}
+	if !h.detectLimiter.allow(claims.UUID) {
+		return c.Status(http.StatusTooManyRequests).JSON(ErrorResponse{Message: "Слишком много запросов"})
+	}
+	if len(req.Files) > maxReportedFiles {
+		req.Files = req.Files[:maxReportedFiles]
+	}
+	kick, err := h.service.CheckFiles(c.Context(), claims, req.Files)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось проверить файлы"})
+	}
+	if kick {
+		return c.JSON(fiber.Map{"action": "kick", "reason": unknownModType})
 	}
 	return c.JSON(fiber.Map{"action": "none"})
 }
@@ -672,13 +707,30 @@ func (h Handler) screenshotImage(c fiber.Ctx) error {
 	return c.SendFile(path)
 }
 
-// screenshotPending — лаунчер опрашивает: есть ли pending-запрос скриншота для
-// его игровой сессии (по launch-token → claims.Nonce). Аутентификация launch-token.
+// screenshotClaims принимает токен любого из двух каналов съёмки:
+//   - shot-token процесса лаунчера (старая схема: кадр снимал сам лаунчер);
+//   - launch-token из JVM (новая: снимает нативный агент, а Java-агент только несёт
+//     кадр на бэкенд). Второй возврат — true, если запрос пришёл из JVM: такому
+//     аплоаду обязательна подпись нативки, иначе кадр мог подменить мод в той же JVM.
+//
+// Каналы не пересекаются: лаунчер новой версии съёмку не ведёт (нативка получила ключ),
+// старый лаунчер ключа не кладёт → Java-агент в этот канал не лезет.
+func (h Handler) screenshotClaims(c fiber.Ctx) (LaunchClaims, bool, error) {
+	tok := launchTokenFromHeader(c)
+	if claims, err := h.service.VerifyScreenshotToken(tok); err == nil {
+		return claims, false, nil
+	}
+	claims, err := h.service.VerifySessionToken(tok)
+	return claims, true, err
+}
+
+// screenshotPending — клиент опрашивает: есть ли pending-запрос скриншота для
+// его игровой сессии (токен → claims.Nonce).
 func (h Handler) screenshotPending(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNoContent).Send(nil)
 	}
-	claims, err := h.service.VerifyScreenshotToken(launchTokenFromHeader(c))
+	claims, _, err := h.screenshotClaims(c)
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -700,7 +752,10 @@ func (h Handler) screenshotPending(c fiber.Ctx) error {
 type screenshotUploadBody struct {
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
-	Data   string `json:"data"` // base64 JPEG
+	Data   string `json:"data"` // base64: JPEG от лаунчера, PNG от нативки (подписан)
+	// Signature — HMAC-SHA256 пикселей ключом сессии (нативный агент). Обязателен для
+	// аплоада из JVM.
+	Signature string `json:"signature"`
 }
 
 // screenshotUpload — лаунчер грузит JPEG-скриншот по ID из pending-ответа.
@@ -711,7 +766,7 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, err := h.service.VerifyScreenshotToken(launchTokenFromHeader(c))
+	claims, fromJVM, err := h.screenshotClaims(c)
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -735,9 +790,23 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if err != nil || len(data) == 0 {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректные данные скриншота"})
 	}
-	// Магия JPEG (FF D8 FF): не сохраняем произвольные байты, которые потом отдаются
-	// дашборду как image/jpeg. Лаунчер грузит только JPEG (image crate, feature "jpeg").
-	if len(data) < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF {
+	if fromJVM {
+		// Кадр прошёл через JVM, где мог быть подменён модом. Доверяем только тому, что
+		// подписала нативка: сверяем HMAC пикселей и сами перекодируем PNG → JPEG.
+		jpegData, verr := h.service.VerifiedCaptureJPEG(
+			claims.Nonce, id, req.Width, req.Height, data, req.Signature)
+		if verr != nil {
+			// Не сошлась подпись = либо битая передача, либо подмена кадра. И то и другое
+			// админ должен увидеть как провал, а не как «чистый» скриншот.
+			slog.Warn("anticheat: скриншот с неверной подписью", "login", claims.Login,
+				"uuid", claims.UUID, "id", id, "error", verr)
+			_ = h.screenshots.FailScreenshot(c.Context(), id, "подпись кадра не сошлась")
+			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Подпись кадра не сошлась"})
+		}
+		data = jpegData
+	} else if len(data) < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF {
+		// Старый канал (лаунчер грузит JPEG сам): не сохраняем произвольные байты,
+		// которые потом отдаются дашборду как image/jpeg.
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Ожидается JPEG"})
 	}
 	if err := h.screenshots.CompleteScreenshot(c.Context(), id, data, req.Width, req.Height); err != nil {
@@ -757,7 +826,7 @@ func (h Handler) screenshotFail(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, err := h.service.VerifyScreenshotToken(launchTokenFromHeader(c))
+	claims, _, err := h.screenshotClaims(c)
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -782,6 +851,9 @@ const screenshotMaxBodySize = maxBase64Len + 2*1024*1024 // base64 + JSON-ове
 // detectMaxBodySize — потолок тела /detect: держатель launch-token иначе мог бы слать
 // произвольно большой Details (пишется целиком в Raw) под app-wide 512МБ-лимитом.
 const detectMaxBodySize = 64 * 1024
+
+// filesMaxBodySize — потолок тела /files: maxReportedFiles записей по ~(путь + 64 hex).
+const filesMaxBodySize = 256 * 1024
 
 // requestBodyLimit отвергает запрос по Content-Length ДО буферизации тела Fiber'ом
 // (ранняя защита от memory-DoS; в Fiber v3 нет встроенного per-route bodylimit).

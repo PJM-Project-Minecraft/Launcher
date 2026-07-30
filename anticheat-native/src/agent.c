@@ -138,8 +138,11 @@ static int debugger_present(void) {
 #endif
 }
 
-/* Пишет флаги присутствия/состояния в flag-файл для Java-агента. */
-static void write_flag_file(const char *path, int debug, int classhook) {
+/* Пишет флаги присутствия/состояния в flag-файл для Java-агента. capture=1 означает,
+ * что скриншоты снимает нативка (получен ключ подписи) — по нему Java-агент понимает,
+ * что можно опрашивать бэкенд; при capture=0 съёмка осталась за лаунчером (старая
+ * версия), и Java в этот канал не лезет, иначе перехватит запрос и завалит его. */
+static void write_flag_file(const char *path, int debug, int classhook, int capture) {
     if (!path || !*path) {
         return;
     }
@@ -147,7 +150,8 @@ static void write_flag_file(const char *path, int debug, int classhook) {
     if (!f) {
         return;
     }
-    fprintf(f, "present=1\ndebug=%d\nclasshook=%d\n", debug ? 1 : 0, classhook ? 1 : 0);
+    fprintf(f, "present=1\ndebug=%d\nclasshook=%d\ncapture=%d\n",
+            debug ? 1 : 0, classhook ? 1 : 0, capture ? 1 : 0);
     fclose(f);
 }
 
@@ -296,10 +300,15 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
         }
     }
 
+    /* Канал скриншотов: ключ подписи читается и стирается с диска ДО того, как в JVM
+     * выполнится хоть один Java-класс. */
+    int capture = ac_screenshot_init(flag_path);
+
     jvmtiEnv *jvmti = NULL;
     if ((*vm)->GetEnv(vm, (void **)&jvmti, JVMTI_VERSION_1_2) != JNI_OK || jvmti == NULL) {
         AC_LOG("[anticheat-native] failed to get JVMTI env\n");
-        write_flag_file(flag_path, debug, 0);
+        write_flag_file(flag_path, debug, 0, capture);
+        ac_screenshot_start();
         return JNI_OK; /* не роняем JVM — enforcement обеспечивает сервер */
     }
 
@@ -316,10 +325,14 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
         classhook = 1;
     }
 
-    /* Канал с Java-агентом: present/debug/classhook → flag-файл. */
-    write_flag_file(flag_path, debug, classhook);
+    /* Канал с Java-агентом: present/debug/classhook/capture → flag-файл. */
+    write_flag_file(flag_path, debug, classhook, capture);
 
-    AC_LOG("[anticheat-native] loaded (debug=%d classhook=%d)\n", debug, classhook);
+    AC_LOG("[anticheat-native] loaded (debug=%d classhook=%d capture=%d)\n",
+           debug, classhook, capture);
+
+    /* Поллер запросов скриншота (no-op, если ключа нет). */
+    ac_screenshot_start();
 
     /* Фоновый guard: поллинг загруженных модулей (анти-инжект DLL/.so) + непрерывный
      * anti-debug. Реализация в guard.c, кроссплатформенно. */
