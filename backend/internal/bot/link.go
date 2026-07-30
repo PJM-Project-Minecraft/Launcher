@@ -68,6 +68,15 @@ func (s *Service) handleLinkPassword(chatID int64, messageID int, sender *tele.U
 		return repo.EmptyPayload(), nil
 	}
 
+	// Тот же per-account замок, что и на входе в лаунчер: без него привязка через бота
+	// давала неограниченный онлайн-перебор пароля (и bcrypt-флуд) в обход лимита.
+	// На этой ветке auth_log НЕ пишем — иначе лок никогда не истечёт.
+	if repo.LoginLocked(s.ctx(), s.DB, user.Login) {
+		_ = s.notifyWarn(chatID, "Слишком много неудачных попыток. Попробуйте позже.")
+		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+		return repo.EmptyPayload(), nil
+	}
+
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(pw)) != nil {
 		ui := user.ID
 		_ = repo.InsertAuthLog(s.ctx(), s.DB, &ui, user.Login, "telegram-bot-link", false, strPtr("bad_password"))

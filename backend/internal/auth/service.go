@@ -176,7 +176,10 @@ func (s Service) roleForLogin(ctx context.Context, login string, providerUUID st
 		return "", err
 	}
 
-	if _, ok := s.adminLogins[normalizeLogin(login)]; ok {
+	// Сравнение ТОЧНОЕ, регистр значим: пространство логинов в БД регистрозависимо
+	// (uniqueIndex по login), поэтому регистронезависимый матч здесь давал эскалацию —
+	// зарегистрировав «Admin» при админе «admin», игрок получал роль admin.
+	if _, ok := s.adminLogins[strings.TrimSpace(login)]; ok {
 		return "admin", nil
 	}
 
@@ -199,7 +202,8 @@ func (s Service) roleForLogin(ctx context.Context, login string, providerUUID st
 func normalizeAdminLogins(logins []string) map[string]struct{} {
 	normalized := make(map[string]struct{}, len(logins))
 	for _, login := range logins {
-		login = normalizeLogin(login)
+		// Только TrimSpace: ключ должен совпадать с users.login побайтово (см. roleForLogin).
+		login = strings.TrimSpace(login)
 		if login != "" {
 			normalized[login] = struct{}{}
 		}

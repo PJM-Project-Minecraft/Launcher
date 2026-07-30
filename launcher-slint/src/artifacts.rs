@@ -77,11 +77,31 @@ fn download_and_verify(
     if fs::write(&tmp, &bytes).is_err() {
         return Ok(false);
     }
-    if fs::rename(&tmp, path).is_err() {
-        let _ = fs::remove_file(&tmp);
+    install_verified(&tmp, path, expected)
+}
+
+// Ставит скачанный файл на место ТОЛЬКО после сверки хэша: иначе недоверенный ответ
+// (подменённое зеркало, битая раздача) затирал уже проверенный кэш, и следующий запуск
+// блокировался навсегда — даже оффлайн-откат брать было уже нечего.
+fn install_verified(
+    tmp: &Path,
+    path: &Path,
+    expected: Option<&str>,
+) -> Result<bool, IntegrityError> {
+    if verify_sha(tmp, expected).is_err() {
+        let _ = fs::remove_file(tmp);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("файл агента")
+            .to_string();
+        return Err(IntegrityError::Tampered(name));
+    }
+    if fs::rename(tmp, path).is_err() {
+        let _ = fs::remove_file(tmp);
         return Ok(false);
     }
-    verify_sha(path, expected).map(|_| true)
+    Ok(true)
 }
 
 /// Скачивает артефакт с SHA-сверкой (до 2 попыток при подмене/битой загрузке), с
@@ -130,6 +150,23 @@ mod tests {
     fn verify_sha_without_expected_is_ok() {
         // Несуществующий путь, но ожидаемого хэша нет → сверка не требуется.
         assert!(verify_sha(Path::new("/nonexistent/x"), None).is_ok());
+    }
+
+    // Битая/подменённая загрузка не должна затирать уже проверенный файл на месте.
+    #[test]
+    fn install_verified_keeps_previous_file_on_mismatch() {
+        let dir = std::env::temp_dir().join("pjm_install_verified_test");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("agent.jar");
+        let tmp = path.with_extension("part");
+        fs::write(&path, b"good").unwrap();
+        fs::write(&tmp, b"evil").unwrap();
+
+        let res = install_verified(&tmp, &path, Some("deadbeef"));
+        assert!(matches!(res, Err(IntegrityError::Tampered(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"good", "старый файл должен остаться");
+        assert!(!tmp.exists(), "мусорный .part должен удаляться");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -120,6 +120,20 @@ public final class Agent {
             startEventPoller(flag + ".events");
         }
 
+        // 4.1. Инвентарь mods/ по циклу: сверка jar-ов со сборками на сервере. Цикл, а
+        //      не разовый скан на premain, — модлоадер читает mods/ уже после нас, и
+        //      подкинутый в это окно jar виден только при повторном проходе.
+        runResilient("anticheat-mods", 10_000, Agent::reportMods);
+
+        // 4.2. Скриншоты: съёмку делает нативка (DXGI/X11), мы только носим кадр на
+        //      бэкенд — у нативки нет HTTPS, у нас нет доступа к экрану поверх
+        //      эксклюзивного фуллскрина. Опрашиваем, только если нативка подтвердила,
+        //      что получила ключ подписи (capture=1); иначе кадр снимает лаунчер старой
+        //      версии, и лезть в этот канал нельзя — перехватим его запрос и завалим.
+        if (nativeState.capture && !flag.isEmpty()) {
+            runResilient("anticheat-shot", SHOT_POLL_MS, () -> pollScreenshot(flag));
+        }
+
         // 5. Фоновый heartbeat — задел под realtime-контроль (M5).
         startHeartbeat();
     }
@@ -223,6 +237,8 @@ public final class Agent {
         boolean present;
         boolean debug;
         boolean classhook;
+        /** true — скриншоты снимает нативка (лаунчер передал ей ключ подписи). */
+        boolean capture;
     }
 
     private static NativeState readNativeState() {
@@ -243,6 +259,7 @@ public final class Agent {
                     case "present" -> s.present = val;
                     case "debug" -> s.debug = val;
                     case "classhook" -> s.classhook = val;
+                    case "capture" -> s.capture = val;
                     default -> { /* игнор неизвестных ключей */ }
                 }
             }
@@ -275,6 +292,132 @@ public final class Agent {
                   .forEach(p -> checkAndReport("jar", p.getFileName().toString()));
         } catch (Exception ignored) {
             // Скан best-effort: ошибки чтения каталога не должны ронять игру.
+        }
+    }
+
+    // ── Инвентарь mods/ (whitelist) ─────────────────────────────────────────────
+    // Блэклист выше ловит только ИЗВЕСТНЫЕ читы по имени. Подкинутый в mods/ jar с
+    // произвольным именем ловится инвентарём: список путь+SHA-256 уходит на сервер, он
+    // сверяет хеши с файлами сборок и отвечает kick'ом. Лаунчер чистит лишние файлы при
+    // синке, но между его cleanup и чтением mods/ модлоадером есть окно в десятки секунд —
+    // именно туда и подкидывают чит, поэтому проверять надо изнутри уже запущенной JVM.
+
+    /** Отпечаток каталога (имя+размер+mtime): пока не менялся — не пересчитываем хеши. */
+    private static volatile String modsFingerprint = "";
+    /** Максимум файлов в отчёте (совпадает с потолком сервера). */
+    private static final int MAX_REPORTED_FILES = 512;
+    /** Jar-ы, из которых реально грузились классы (собирает трансформер). */
+    private static final java.util.Set<String> codeSources =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final int MAX_CODE_SOURCES = 4096;
+
+    /** Запоминает jar, из которого пришёл класс (для детекта «загрузился и исчез»). */
+    private static void noteCodeSource(ProtectionDomain pd) {
+        try {
+            if (pd == null || pd.getCodeSource() == null || pd.getCodeSource().getLocation() == null
+                    || codeSources.size() >= MAX_CODE_SOURCES) {
+                return;
+            }
+            String path = Paths.get(pd.getCodeSource().getLocation().toURI())
+                .toAbsolutePath().normalize().toString();
+            if (path.toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                codeSources.add(path);
+            }
+        } catch (Exception ignored) {
+            // не файловый URL (jrt:/, jar:) — не наш случай
+        }
+    }
+
+    /**
+     * Собирает инвентарь mods/ и отправляет на сверку. Вызывается по циклу: подкинуть
+     * jar можно и после старта агента (модлоадер читает mods/ позже premain).
+     */
+    private static void reportMods() {
+        try {
+            Path mods = Paths.get("mods");
+            if (!Files.isDirectory(mods)) {
+                return;
+            }
+            List<Path> jars = new ArrayList<>();
+            try (var stream = Files.walk(mods, 2)) {
+                stream.filter(Files::isRegularFile)
+                      .filter(p -> p.toString().toLowerCase(Locale.ROOT).endsWith(".jar"))
+                      .sorted()
+                      .limit(MAX_REPORTED_FILES)
+                      .forEach(jars::add);
+            }
+            // Исчезнувшие jar-ы, из которых УЖЕ загрузились классы: чит, удаливший себя
+            // после загрузки (на Linux файл можно удалить при открытом дескрипторе).
+            List<Path> vanished = vanishedModJars(mods);
+
+            StringBuilder fingerprint = new StringBuilder();
+            for (Path p : jars) {
+                fingerprint.append(p).append(':').append(Files.size(p)).append(':')
+                           .append(Files.getLastModifiedTime(p).toMillis()).append('\n');
+            }
+            for (Path p : vanished) {
+                fingerprint.append(p).append(":gone\n");
+            }
+            String signature = fingerprint.toString();
+            if (signature.equals(modsFingerprint)) {
+                return; // ничего не менялось — не хешируем гигабайты каждые 10с
+            }
+            modsFingerprint = signature;
+
+            List<String> items = new ArrayList<>(jars.size() + vanished.size());
+            for (Path p : jars) {
+                items.add("{\"path\":\"" + escape(p.toString()) + "\",\"sha256\":\""
+                    + escape(sha256File(p)) + "\"}");
+            }
+            for (Path p : vanished) {
+                items.add("{\"path\":\"" + escape(p.toString()) + "\",\"missing\":true}");
+            }
+            if (items.isEmpty()) {
+                return;
+            }
+            String body = "{\"launchToken\":\"" + escape(token) + "\",\"files\":["
+                + String.join(",", items) + "]}";
+            String resp = postRead("/api/anticheat/files", body);
+            if (resp != null && resp.contains("\"action\":\"kick\"")) {
+                kickGame("unknown-mod");
+            }
+        } catch (Exception ignored) {
+            // best-effort: сбой скана не должен ронять игру, enforcement держит сервер
+        }
+    }
+
+    /** Пути под mods/, из которых грузились классы, но которых больше нет на диске. */
+    private static List<Path> vanishedModJars(Path mods) {
+        List<Path> gone = new ArrayList<>();
+        String prefix = mods.toAbsolutePath().normalize().toString() + java.io.File.separator;
+        for (String source : codeSources) {
+            if (!source.startsWith(prefix)) {
+                continue;
+            }
+            Path p = Paths.get(source);
+            if (!Files.exists(p)) {
+                gone.add(p);
+            }
+        }
+        return gone;
+    }
+
+    /** SHA-256 файла потоково (мод-jar может весить сотни МБ — не читаем целиком в память). */
+    private static String sha256File(Path path) {
+        try (var in = Files.newInputStream(path)) {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                digest.update(buffer, 0, read);
+            }
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : digest.digest()) {
+                sb.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 
@@ -550,6 +693,183 @@ public final class Agent {
         // Бэкенд решает реакцию: при kick убиваем игру и оставляем причину лаунчеру.
         if (resp != null && resp.contains("\"action\":\"kick\"")) {
             kickGame(signature);
+        }
+    }
+
+    // ── Скриншоты: канал «нативка снимает → мы доставляем» ─────────────────────────
+    // Съёмка живёт в нативном агенте: он видит вывод монитора через DXGI (кадр игры даже
+    // в эксклюзивном фуллскрине, где GDI отдавал чёрный/застывший экран) и умирает вместе
+    // с игрой — убить его отдельно, как раньше лаунчер, нельзя. Мы отвечаем только за
+    // сеть. Подменить кадр по дороге нельзя: нативка подписывает пиксели HMAC-ключом,
+    // которого в JVM нет (лаунчер кладёт его в файл, нативка стирает файл до старта Java).
+
+    private static final long SHOT_POLL_MS = 6_000L;
+    /** Сколько ждём кадр от нативки: съёмка + ужатие + запись мегабайт на диск. */
+    private static final long SHOT_WAIT_MS = 20_000L;
+
+    /** Один цикл: спросить бэкенд про запрос скриншота и, если есть, отдать его нативке. */
+    private static void pollScreenshot(String flag) {
+        String id = pendingScreenshotId();
+        if (id == null || id.isEmpty()) {
+            return;
+        }
+        Path raw = Paths.get(flag + ".shot.raw");
+        Path sig = Paths.get(flag + ".shot.sig");
+        Path err = Paths.get(flag + ".shot.err");
+        try {
+            Files.write(Paths.get(flag + ".shot.req"),
+                (id + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            long deadline = System.currentTimeMillis() + SHOT_WAIT_MS;
+            while (System.currentTimeMillis() < deadline) {
+                if (Files.exists(sig)) {
+                    // Готов ли кадр ИМЕННО этого запроса — решает id в .sig. Иначе кадр
+                    // прошлого запроса (или недописанный файл) уходил как «bad-sig», и
+                    // честный игрок получал серию провалов.
+                    if (frameReady(sig, id)) {
+                        uploadScreenshot(id, raw, sig);
+                        return;
+                    }
+                    deleteQuietly(sig);
+                    deleteQuietly(raw);
+                }
+                if (Files.exists(err)) {
+                    String reason = new String(Files.readAllBytes(err),
+                        java.nio.charset.StandardCharsets.UTF_8).trim();
+                    failScreenshot(id, reason.isEmpty() ? "capture" : reason);
+                    return;
+                }
+                Thread.sleep(300);
+            }
+            failScreenshot(id, "timeout");
+        } catch (Exception e) {
+            failScreenshot(id, "agent-error");
+        } finally {
+            deleteQuietly(raw);
+            deleteQuietly(sig);
+            deleteQuietly(err);
+        }
+    }
+
+    /**
+     * Кадр готов, если .sig дописан (3 строки) и первая строка — id ЭТОГО запроса.
+     * Нативка пишет .sig последним, но не атомарно, а id отличает свежий кадр от
+     * оставшегося с прошлого запроса.
+     */
+    private static boolean frameReady(Path sig, String id) {
+        try {
+            String[] lines = new String(Files.readAllBytes(sig),
+                java.nio.charset.StandardCharsets.UTF_8).split("\n");
+            return lines.length >= 3 && lines[0].trim().equals(id);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** id ожидающего запроса скриншота, либо null (204/ошибка/выключено). */
+    private static String pendingScreenshotId() {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/anticheat/screenshot/pending"))
+                .timeout(TIMEOUT)
+                .header("X-Launch-Token", token)
+                .GET()
+                .build();
+            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                return null;
+            }
+            String body = resp.body();
+            String key = "\"id\":\"";
+            int i = body.indexOf(key);
+            if (i < 0) {
+                return null;
+            }
+            return readJsonStringAt(body, i + key.length(), new int[1]);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Кодирует сырые пиксели в PNG и грузит вместе с подписью нативки. PNG, а не JPEG:
+     * сжатие обязано быть без потерь — бэкенд разжимает картинку и сверяет ИМЕННО эти
+     * пиксели с HMAC (после JPEG они бы не совпали). В JPEG для хранения бэкенд
+     * перекодирует уже сам, после проверки подписи.
+     */
+    private static void uploadScreenshot(String id, Path raw, Path sig) {
+        try {
+            String[] lines = new String(Files.readAllBytes(sig),
+                java.nio.charset.StandardCharsets.UTF_8).split("\n");
+            // Формат .sig: "<id>\n<hex подписи>\n<ширина> <высота>\n" (id проверен в frameReady).
+            if (lines.length < 3) {
+                failScreenshot(id, "bad-sig");
+                return;
+            }
+            String signature = lines[1].trim();
+            String[] dims = lines[2].trim().split(" ");
+            int width = Integer.parseInt(dims[0]);
+            int height = Integer.parseInt(dims[1]);
+            byte[] pixels = Files.readAllBytes(raw);
+            if (width <= 0 || height <= 0 || pixels.length != (long) width * height * 3) {
+                failScreenshot(id, "bad-frame");
+                return;
+            }
+
+            java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(
+                width, height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            int[] row = new int[width];
+            for (int y = 0; y < height; y++) {
+                int base = y * width * 3;
+                for (int x = 0; x < width; x++) {
+                    int i = base + x * 3;
+                    row[x] = ((pixels[i] & 0xff) << 16) | ((pixels[i + 1] & 0xff) << 8)
+                        | (pixels[i + 2] & 0xff);
+                }
+                img.setRGB(0, y, width, 1, row, 0, width);
+            }
+            java.io.ByteArrayOutputStream png = new java.io.ByteArrayOutputStream();
+            if (!javax.imageio.ImageIO.write(img, "png", png)) {
+                failScreenshot(id, "png-encode");
+                return;
+            }
+            String body = "{"
+                + "\"width\":" + width + ","
+                + "\"height\":" + height + ","
+                + "\"signature\":\"" + escape(signature) + "\","
+                + "\"data\":\"" + java.util.Base64.getEncoder().encodeToString(png.toByteArray()) + "\""
+                + "}";
+            postWithToken("/api/anticheat/screenshot/" + id, body);
+        } catch (Exception e) {
+            failScreenshot(id, "upload-error");
+        }
+    }
+
+    private static void failScreenshot(String id, String reason) {
+        postWithToken("/api/anticheat/screenshot/" + id + "/fail",
+            "{\"reason\":\"" + escape(reason) + "\"}");
+    }
+
+    /** POST со скриншот-заголовком: эти эндпоинты читают токен из X-Launch-Token. */
+    private static void postWithToken(String path, String json) {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + path))
+                .timeout(Duration.ofSeconds(60)) // кадр — мегабайты, 10с не хватит
+                .header("Content-Type", "application/json")
+                .header("X-Launch-Token", token)
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .build();
+            HTTP.send(req, HttpResponse.BodyHandlers.discarding());
+        } catch (Exception ignored) {
+            // сеть нестабильна — админ увидит запрос как failed по таймауту
+        }
+    }
+
+    private static void deleteQuietly(Path p) {
+        try {
+            Files.deleteIfExists(p);
+        } catch (Exception ignored) {
+            // best-effort
         }
     }
 
@@ -871,6 +1191,8 @@ public final class Agent {
         public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                                 ProtectionDomain protectionDomain, byte[] classfileBuffer) {
             String dotName = className == null ? "" : className.replace('/', '.');
+            // Откуда пришёл класс: нужно, чтобы поймать jar, удалённый после загрузки.
+            noteCodeSource(protectionDomain);
             if (className != null) {
                 // Проверяем сырое внутреннее имя (со слэшами) на нелегальные символы.
                 if (isIllegalClassName(className)) {

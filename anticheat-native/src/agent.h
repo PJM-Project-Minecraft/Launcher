@@ -17,4 +17,14 @@ void ac_append_event(const char *type, const char *name);
  * На прочих ОС — no-op. Вызывать один раз из Agent_OnLoad после write_flag_file. */
 void ac_guard_start(void);
 
+/* Готовит канал скриншотов: читает секрет подписи из <flagfile>.key и СРАЗУ удаляет файл
+ * (Java-код в этой JVM ещё не стартовал — мод секрет не увидит), чистит файлы прошлой
+ * сессии. Возвращает 1, если ключ получен (лаунчер новый) — тогда захват экрана делает
+ * нативка, и это надо сообщить Java-агенту флагом capture=1. Вызывать из Agent_OnLoad
+ * ДО write_flag_file. */
+int ac_screenshot_init(const char *flag_path);
+
+/* Запускает поток-поллер файла-триггера <flagfile>.shot.req. No-op без ключа. */
+void ac_screenshot_start(void);
+
 #endif /* ANTICHEAT_AGENT_H */

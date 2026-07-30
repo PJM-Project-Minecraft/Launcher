@@ -67,7 +67,7 @@ func postBotAPIResult(client *http.Client, token, method string, payload map[str
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, unwrapURLErr(err)
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer

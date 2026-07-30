@@ -2856,12 +2856,10 @@ dependencies = [
 name = "launcher-slint"
 version = "0.4.4"
 dependencies = [
- "base64",
  "directories",
  "discord-rich-presence",
  "ed25519-dalek",
  "hex",
- "image",
  "keyring",
  "obfstr",
  "rayon",
@@ -2874,7 +2872,6 @@ dependencies = [
  "slint-build",
  "windows 0.62.2",
  "winresource",
- "x11rb",
 ]
 
 [[package]]

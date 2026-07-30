@@ -60,13 +60,19 @@ type JoinRecord struct {
 // мутации дублируются write-through в таблицы (best-effort), а при старте
 // живые записи восстанавливаются — рестарт backend не выкидывает игроков.
 type Store struct {
-	mu       sync.Mutex
-	db       *gorm.DB              // nil — без персиста (тесты, отдельные сценарии)
-	sessions     map[string]Session    // accessToken -> session
-	joins        map[string]JoinRecord // serverId -> join
-	nonces       map[string]string     // nonce -> accessToken (для confirm от агентов)
-	launcherSeen map[string]time.Time  // nonce -> время последнего keepalive от лаунчера
+	mu           sync.Mutex
+	db           *gorm.DB                 // nil — без персиста (тесты, отдельные сценарии)
+	sessions     map[string]Session       // accessToken -> session
+	joins        map[string]JoinRecord    // serverId -> join
+	nonces       map[string]string        // nonce -> accessToken (для confirm от агентов)
+	launcherSeen map[string]launcherPings // nonce -> две последние метки keepalive лаунчера
 }
+
+// launcherPings — ПАРА последних keepalive, а не одна метка. «Агента убили в живой игре»
+// доказывает только СЕРИЯ пингов лаунчера после того, как агент замолк: одиночная метка
+// неотличима от «связь вернулась после обрыва» (при нестабильном интернете молчат оба, а
+// keepalive лаунчера возвращается раньше heartbeat агента) — и это кикало честных игроков.
+type launcherPings struct{ prev, last time.Time }
 
 func NewStore(db *gorm.DB) *Store {
 	s := &Store{
@@ -74,7 +80,7 @@ func NewStore(db *gorm.DB) *Store {
 		sessions:     make(map[string]Session),
 		joins:        make(map[string]JoinRecord),
 		nonces:       make(map[string]string),
-		launcherSeen: make(map[string]time.Time),
+		launcherSeen: make(map[string]launcherPings),
 	}
 	s.restore()
 	go s.collectGarbage()
@@ -171,6 +177,14 @@ func (s *Store) PutSession(sess Session) {
 	defer s.mu.Unlock()
 	s.sessions[sess.AccessToken] = sess
 	if sess.Nonce != "" {
+		// Инвариант «один nonce = ровно одна живая сессия». Без вытеснения повторный
+		// launcher-session с тем же nonce оставлял прежнюю сессию жить, а kick по nonce
+		// (InvalidateByNonce) гасил только последнюю — читер продолжал играть по старому
+		// accessToken. Легальный перезапуск игры приходит с новым nonce из handshake/init.
+		if old, busy := s.nonces[sess.Nonce]; busy && old != sess.AccessToken {
+			delete(s.sessions, old)
+			s.deleteSession(old)
+		}
 		s.nonces[sess.Nonce] = sess.AccessToken
 	}
 	s.persistSession(sess)
@@ -259,24 +273,25 @@ func (s *Store) RecordLauncherKeepalive(nonce string) {
 		return
 	}
 	s.mu.Lock()
-	s.launcherSeen[nonce] = time.Now()
+	p := s.launcherSeen[nonce]
+	s.launcherSeen[nonce] = launcherPings{prev: p.last, last: time.Now()}
 	s.mu.Unlock()
 }
 
-// LauncherSeenAfter сообщает, слал ли лаунчер keepalive по nonce ПОЗЖЕ момента t.
-// reaper передаёт t = время последнего heartbeat агента + grace: если лаунчер
-// keepalive'ил уже после того, как агент замолк, значит лаунчер пережил агента (того
-// убили в живой игре) → алерт. При резком закрытии лаунчера (kill -9/краш) keepalive
-// обрывается одновременно с агентом, его метка остаётся ≤ времени гибели → условие
-// ложно → ложного алерта нет (в отличие от TTL-окна, державшего метку «свежей» 5 минут).
-func (s *Store) LauncherSeenAfter(nonce string, t time.Time) bool {
+// LauncherSustainedAfter сообщает, слал ли лаунчер keepalive по nonce НЕ МЕНЕЕ ДВУХ раз
+// позже момента t. reaper передаёт t = время последнего heartbeat агента + grace: две
+// метки, разнесённые на интервал keepalive (~2 мин), доказывают, что связь у лаунчера
+// была УСТОЙЧИВОЙ всё время молчания агента — то есть агента действительно убили, а не
+// просто оборвался интернет у обоих. При резком закрытии лаунчера (kill -9/краш) keepalive
+// обрывается одновременно с агентом → меток после t нет → ложного алерта нет.
+func (s *Store) LauncherSustainedAfter(nonce string, t time.Time) bool {
 	if nonce == "" {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	last, ok := s.launcherSeen[nonce]
-	return ok && last.After(t)
+	p, ok := s.launcherSeen[nonce]
+	return ok && p.prev.After(t)
 }
 
 func (s *Store) Session(accessToken string) (Session, bool) {
@@ -439,9 +454,15 @@ func (s *Store) ConsumeJoin(serverID string) (JoinRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.joins[serverID]
+	if !ok {
+		// Промах — в БД не ходим: роут hasJoined анонимный, а DELETE выполнялся под
+		// глобальным мьютексом Store, т.е. поток мусорных serverId ставил в очередь
+		// весь игровой логин (и сессии, и join'ы).
+		return JoinRecord{}, false
+	}
 	delete(s.joins, serverID)
 	s.deleteJoin(serverID)
-	if !ok || time.Now().After(record.expiresAt) {
+	if time.Now().After(record.expiresAt) {
 		return JoinRecord{}, false
 	}
 	return record, true
@@ -461,8 +482,8 @@ func (s *Store) collectGarbage() {
 			}
 		}
 		// Подчищаем зависшие keepalive-метки (нет сессии или давно протухли).
-		for nonce, last := range s.launcherSeen {
-			if now.Sub(last) >= launcherKeepaliveTTL {
+		for nonce, p := range s.launcherSeen {
+			if now.Sub(p.last) >= launcherKeepaliveTTL {
 				delete(s.launcherSeen, nonce)
 			}
 		}

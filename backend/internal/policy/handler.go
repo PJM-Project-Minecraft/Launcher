@@ -60,6 +60,11 @@ func (h Handler) accept(currentUser CurrentUserFn) fiber.Handler {
 				"version": Version,
 			})
 		}
+		// Уже принято — новую строку в policy_consents не пишем: иначе один игрок с JWT
+		// набивает журнал согласий в цикле (роут не под лимитером).
+		if !NeedsConsent(&user) {
+			return c.SendStatus(http.StatusNoContent)
+		}
 		if err := RecordConsent(c.Context(), h.db, user.ID, SourceLauncher, c.IP()); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return c.Status(http.StatusNotFound).JSON(fiber.Map{"message": "Пользователь не найден"})

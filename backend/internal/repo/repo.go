@@ -172,6 +172,21 @@ func CountRecentFailedLogins(ctx context.Context, db *gorm.DB, username string, 
 	return n, err
 }
 
+const (
+	// LoginFailWindow / LoginFailMax — общий порог per-account анти-брутфорса. Живёт здесь,
+	// а не в auth: проверять пароль умеет и Telegram-бот (привязка аккаунта), а порог
+	// обязан быть ОДИН — иначе канал без проверки обнуляет замок другого канала.
+	LoginFailWindow = 15 * time.Minute
+	LoginFailMax    = 30
+)
+
+// LoginLocked — исчерпан ли лимит неудачных попыток для логина.
+// ВАЖНО: на true новых записей в auth_logs делать НЕЛЬЗЯ, иначе лок не истекает.
+func LoginLocked(ctx context.Context, db *gorm.DB, login string) bool {
+	n, err := CountRecentFailedLogins(ctx, db, login, time.Now().UTC().Add(-LoginFailWindow))
+	return err == nil && n >= LoginFailMax
+}
+
 func SetEmail(ctx context.Context, db *gorm.DB, userID, email string) error {
 	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).
 		Updates(map[string]any{"email": email, "updated_at": time.Now().UTC()}).Error
@@ -204,9 +219,13 @@ func UpdateUserAfterGMLLogin(ctx context.Context, db *gorm.DB, userID, ip, hardw
 	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error
 }
 
+// IsUsernameTaken — проверка занятости ника БЕЗ учёта регистра: ник-двойник («Admin»
+// при существующем «admin») даёт выдачу себя за другого игрока в игре и путает любые
+// сопоставления по нику (отзыв доступа в античите, ADMIN_LOGINS). Уже существующие
+// в БД двойники это не ломает — только новые не создаются.
 func IsUsernameTaken(ctx context.Context, db *gorm.DB, username string) (bool, error) {
 	var n int64
-	err := db.WithContext(ctx).Model(&models.User{}).Where("login = ?", username).Count(&n).Error
+	err := db.WithContext(ctx).Model(&models.User{}).Where("LOWER(login) = LOWER(?)", username).Count(&n).Error
 	return n > 0, err
 }
 

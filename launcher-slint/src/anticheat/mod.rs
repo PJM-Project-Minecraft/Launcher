@@ -9,7 +9,6 @@ mod inject;
 mod manifest;
 mod scan;
 mod selfdebug;
-pub mod screenshot;
 pub mod kick;
 
 use std::collections::HashSet;
@@ -32,9 +31,9 @@ const INGAME_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// процессов (для in-game скана во время игры).
 pub struct LaunchGuard {
     launch_token: String,
-    /// Токен скриншот-эндпоинтов. Живёт ТОЛЬКО в процессе лаунчера — в jvm_args не
-    /// попадает, иначе мод читает его через System.getProperty и подменяет кадр.
-    screenshot_token: String,
+    /// Ключ подписи скриншотов. В jvm_args не попадает: лаунчер кладёт его в файл
+    /// рядом с нативным агентом, тот читает и стирает файл до старта Java-кода.
+    capture_secret: String,
     nonce: String,
     challenge: String,
     manifest: Option<IntegrityManifest>,
@@ -59,12 +58,12 @@ impl LaunchGuard {
         match handshake::init(config, token, &components, &detections) {
             handshake::InitOutcome::Allowed {
                 token,
-                screenshot_token,
+                capture_secret,
                 nonce,
                 challenge,
             } => Ok(Self {
                 launch_token: token,
-                screenshot_token,
+                capture_secret,
                 nonce,
                 challenge,
                 manifest,
@@ -77,7 +76,7 @@ impl LaunchGuard {
             // fail-open: недоступность бэкенда не блокирует игрока.
             handshake::InitOutcome::Unavailable => Ok(Self {
                 launch_token: String::new(),
-                screenshot_token: String::new(),
+                capture_secret: String::new(),
                 nonce: String::new(),
                 challenge: String::new(),
                 manifest,
@@ -90,11 +89,6 @@ impl LaunchGuard {
     /// nonce связывает игровую сессию с launch-token (для fetch_yggdrasil_session).
     pub fn nonce(&self) -> &str {
         &self.nonce
-    }
-
-    /// Токен скриншот-эндпоинтов (в JVM не передаётся). Пустой — опрос no-op.
-    pub fn screenshot_token(&self) -> &str {
-        &self.screenshot_token
     }
 
     /// Ожидаемый SHA authlib-injector.jar (для верифицированной доставки в main).
@@ -115,6 +109,7 @@ impl LaunchGuard {
         let plan = inject::build(
             &self.launch_token,
             &self.challenge,
+            &self.capture_secret,
             self.manifest.as_ref(),
             config,
         )?;
@@ -136,7 +131,7 @@ impl LaunchGuard {
 /// Запускает фоновый поток in-game скана процессов во время игры: периодически сверяет
 /// запущенные процессы с блэклистом и шлёт НОВЫЕ совпадения на бэкенд по launch-token.
 /// poll_until — общий скелет polling-цикла для фоновых задач лаунчера (keepalive,
-/// in-game скан, опрос скриншот-запросов). Спит короткими квантами для отзывчивого
+/// in-game скан). Спит короткими квантами для отзывчивого
 /// завершения на закрытии игры (stop), вызывает work каждые interval. Единый
 /// источник истины для терминации/интервала — иначе три копии цикла разойдутся.
 pub fn poll_until(stop: &AtomicBool, interval: Duration, mut work: impl FnMut()) {

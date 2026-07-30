@@ -42,8 +42,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Доверие X-Forwarded-For: c.IP() (в т.ч. ключ брутфорс-лимитера) берёт последний hop
-	// из XFF ТОЛЬКО если непосредственный peer — доверенный прокси.
+	// Доверие X-Forwarded-For: c.IP() (в т.ч. ключ брутфорс-лимитера) берёт первый
+	// ВАЛИДНЫЙ адрес из XFF ТОЛЬКО если непосредственный peer — доверенный прокси.
 	//
 	// ПРЕДУПРЕЖДЕНИЕ О СПУФИНГЕ: если апстрим-прокси лишь ДОБАВЛЯЕТ X-Forwarded-For, не
 	// затирая пришедший от клиента, злоумышленник может подделать свой IP и обойти лимитер.
@@ -59,9 +59,13 @@ func main() {
 	app := fiber.New(fiber.Config{
 		AppName: "Launcher Backend",
 		// Бэкенд стоит за reverse-прокси: настоящий IP клиента приходит в X-Forwarded-For.
-		ProxyHeader:      fiber.HeaderXForwardedFor,
-		TrustProxy:       true,
-		TrustProxyConfig: trustCfg,
+		ProxyHeader: fiber.HeaderXForwardedFor,
+		TrustProxy:  true,
+		// Без валидации Fiber отдаёт из c.IP() СЫРУЮ строку заголовка целиком. Клиент
+		// дописывал в неё что угодно и получал новый ключ брутфорс-лимитера на каждую
+		// попытку (а также произвольную строку в PolicyConsent.IP и IP игровой сессии).
+		EnableIPValidation: true,
+		TrustProxyConfig:   trustCfg,
 		// Лимит тела запроса: загрузка бинарников релизов лаунчера через админку.
 		BodyLimit: 512 * 1024 * 1024,
 	})
@@ -133,12 +137,14 @@ func main() {
 	acService.SetKickSeverity(cfg.AnticheatKickSeverity)
 	acService.SetHeartbeatTimeout(time.Duration(cfg.AnticheatHeartbeatSeconds) * time.Second)
 	acService.SetRequireAttestation(cfg.AnticheatRequireAttestation)
+	acService.SetEnforceUnknownMods(cfg.AnticheatUnknownModEnforce)
 	acService.StartHeartbeatReaper(30 * time.Second)
 	if notifier := anticheat.NewTelegramNotifier(cfg.AnticheatAlertBotToken, cfg.AnticheatAlertChatID); notifier != nil {
 		acService.SetNotifier(notifier)
 		slog.Info("anticheat: telegram alerts enabled", "chat_id", cfg.AnticheatAlertChatID)
 	}
 	screenshotSvc := anticheat.NewScreenshotService(db, cfg.ScreenshotStorageRoot)
+	screenshotSvc.SetDetector(acService) // серия проваленных скриншотов → детект
 	screenshotSvc.StartReaper(30 * time.Second)
 	anticheat.NewHandler(acService).
 		WithVersionGate(releaseService).

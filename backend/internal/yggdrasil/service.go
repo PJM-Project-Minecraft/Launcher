@@ -15,6 +15,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// maxLookupNames — потолок ников в одном bulk-резолве (как у Mojang API).
+const maxLookupNames = 100
+
 // Service реализует Yggdrasil-логику: выпуск игровых сессий, join/hasJoined,
 // построение профилей. UUID игрока берётся из provider UUID (нормализованный).
 type Service struct {
@@ -85,6 +88,11 @@ func (s *Service) profileFor(uuid, name string) Profile {
 func (s *Service) LookupByNames(ctx context.Context, names []string) []Profile {
 	if len(names) == 0 {
 		return nil
+	}
+	// Как у Mojang: не больше 100 ников за запрос. Роут анонимный, поэтому без потолка
+	// один POST раздувался в SQL `IN` на миллионы элементов (память + CPU БД).
+	if len(names) > maxLookupNames {
+		names = names[:maxLookupNames]
 	}
 	var users []models.User
 	if err := s.db.WithContext(ctx).Where("login IN ?", names).Find(&users).Error; err != nil {

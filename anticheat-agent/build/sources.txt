@@ -1,1 +1,0 @@
-/home/liko/Разработка/Launcher/anticheat-agent/src/main/java/xyz/projectminecraft/anticheat/Agent.java

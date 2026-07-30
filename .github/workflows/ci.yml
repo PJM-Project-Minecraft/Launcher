@@ -47,3 +47,36 @@ jobs:
           workspaces: launcher-slint
       - run: cargo check --locked
         working-directory: launcher-slint
+      # Тесты лаунчера гоняем здесь же: в них лежат проверки безопасности (маркер версии
+      # обновления, safe_join, сверка SHA артефактов до установки) — без них CI пропускал
+      # регрессии, которые видны только в рантайме у игрока.
+      - run: cargo test --locked
+        working-directory: launcher-slint
+
+  # Нативный JVMTI-агент собирается вне Go/Rust/Node, поэтому раньше CI его вообще не
+  # компилировал: ошибка в C всплывала только при ручной сборке перед выкаткой.
+  # Собираем оба таргета — Linux (.so, gcc) и Windows (.dll, кросс-компиляция mingw).
+  anticheat-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: Linux .so
+        run: ./anticheat-native/build.sh
+      - name: Windows .dll (кросс-компиляция)
+        run: ./anticheat-native/build-win.sh
+      # Java-агент ходит с нативкой в паре (общий файловый протокол) — проверяем и его.
+      - name: Java-агент
+        run: ./anticheat-agent/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anticheat-agents-ci
+          path: |
+            backend/data/libanticheat.so
+            backend/data/anticheat.dll
+            backend/data/anticheat-agent.jar
+          if-no-files-found: error

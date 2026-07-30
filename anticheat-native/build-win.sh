@@ -37,7 +37,7 @@ cp "$HERE/include/win32/jni_md.h" "$INC_WIN/"
 # -s — strip символов (анти-RE: убирает имена внутренних функций).
 "$CC" -O2 -shared -static -static-libgcc -s \
   -I "$INC_WIN" \
-  -o "$OUT_DIR/$DLL" "$HERE/src/agent.c" "$HERE/src/guard.c" -lpsapi
+  -o "$OUT_DIR/$DLL" "$HERE/src/agent.c" "$HERE/src/guard.c" "$HERE/src/screenshot.c" -lpsapi -ld3d11 -ldxgi -ldxguid -lgdi32
 
 mkdir -p "$(dirname "$DEST")"
 cp "$OUT_DIR/$DLL" "$DEST"

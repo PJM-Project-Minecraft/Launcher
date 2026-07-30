@@ -74,12 +74,36 @@ fn api_mirrors(default_url: &str) -> Vec<(String, String)> {
     mirrors
 }
 
-/// Индекс сохранённого зеркала. Неизвестный/отсутствующий URL (зеркало выпилили
-/// из сборки) → основной, чтобы лаунчер не залипал на мёртвом адресе.
-fn mirror_index(mirrors: &[(String, String)], saved: Option<&str>) -> usize {
+/// Подпись пункта «Авто» в списке серверов. Первым пунктом всегда идёт он: без
+/// сохранённого выбора лаунчер сам берёт самый быстрый доступный сервер, а игрок с
+/// режущимся провайдером не должен угадывать, какое зеркало ему подходит.
+const AUTO_SERVER_LABEL: &str = "Авто — самый быстрый";
+
+/// Пункты селектора сервера: «Авто» + зеркала. Индекс 0 — авто, дальше зеркала
+/// в порядке `api_mirrors`.
+fn server_items(mirrors: &[(String, String)]) -> Vec<String> {
+    let mut items = vec![AUTO_SERVER_LABEL.to_string()];
+    items.extend(mirrors.iter().map(|(name, _)| name.clone()));
+    items
+}
+
+/// Индекс пункта селектора по сохранённому выбору: None (или мёртвый URL) → «Авто».
+fn server_item_index(mirrors: &[(String, String)], saved: Option<&str>) -> usize {
     saved
         .and_then(|url| mirrors.iter().position(|(_, m)| m == url))
+        .map(|i| i + 1)
         .unwrap_or(0)
+}
+
+/// Самый быстрый ДОСТУПНЫЙ сервер (None у недоступных отбрасываются). None — не
+/// ответил никто: тогда остаёмся на текущем адресе, а не выключаем лаунчер.
+fn best_ping_index(pings: &[Option<u128>]) -> Option<usize> {
+    pings
+        .iter()
+        .enumerate()
+        .filter_map(|(i, ms)| ms.map(|ms| (i, ms)))
+        .min_by_key(|(_, ms)| *ms)
+        .map(|(i, _)| i)
 }
 
 /// Пинг зеркала: время ответа публичного `/api/policy`. None — сеть/не-2xx, т.е.
@@ -529,9 +553,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // Выбор игрока (settings.json) применяется, только если такое зеркало ещё есть.
     let mirrors = api_mirrors(&std::env::var("LAUNCHER_API_URL").unwrap_or(default_api_url));
     let saved_mirror = load_settings().unwrap_or_default().api_url;
-    let mirror_idx = mirror_index(&mirrors, saved_mirror.as_deref());
+    let server_idx = server_item_index(&mirrors, saved_mirror.as_deref());
+    // В авто-режиме (нет сохранённого выбора) стартуем с основного адреса, а фоновый
+    // пинг переключит на самый быстрый: ждать результата пинга перед показом окна
+    // входа нельзя — мёртвое зеркало задержало бы запуск на таймаут.
+    let start_url = mirrors[server_idx.saturating_sub(1)].1.clone();
     let config = AppConfig {
-        api_url: Arc::new(RwLock::new(mirrors[mirror_idx].1.clone())),
+        api_url: Arc::new(RwLock::new(start_url)),
     };
 
     // Discord Rich Presence (опционально). Client ID — из env при сборке или
@@ -546,7 +574,7 @@ fn main() -> Result<(), slint::PlatformError> {
     updater::cleanup_leftovers();
     app.window().set_size(slint::LogicalSize::new(1152.0, 720.0));
     app.set_api_url(config.api_url().into());
-    register_mirror_handler(&app, config.clone(), mirrors, mirror_idx);
+    register_mirror_handler(&app, config.clone(), mirrors, server_idx);
     app.set_message("Готов к входу.".into());
     app.set_profile_status("Offline".into());
     app.set_selected_profile_name(SharedString::default());
@@ -2331,13 +2359,9 @@ fn launch_profile(
     // скан его не видел). Делит stop-флаг с keepalive — оба гаснут на закрытии игры.
     let ingame_scan_handle = anticheat::spawn_ingame_scan(config, &guard, keepalive_stop.clone());
 
-    // Опрос скриншот-запросов: пока игра запущена, лаунчер проверяет, не запросил ли
-    // админ скриншот экрана. Делит stop-флаг с keepalive — гаснет на закрытии игры.
-    let screenshot_handle = anticheat::screenshot::spawn_screenshot_loop(
-        &config.api_url(),
-        guard.screenshot_token(),
-        keepalive_stop.clone(),
-    );
+    // Скриншоты по запросу админа теперь снимает НАТИВНЫЙ агент внутри игровой JVM
+    // (DXGI/X11), а доставляет Java-агент: лаунчер в этой цепочке больше не участвует —
+    // его можно было убить после старта игры, и съёмка умирала.
 
     let status = child
         .wait()
@@ -2348,7 +2372,6 @@ fn launch_profile(
     keepalive_stop.store(true, Ordering::Relaxed);
     let _ = keepalive_handle.join();
     let _ = ingame_scan_handle.join();
-    let _ = screenshot_handle.join();
     invalidate_yggdrasil_session(config, &session.access_token);
 
     // Наиграно: копим только реальные сессии, краш на старте (быстрый выход с
@@ -2727,43 +2750,100 @@ fn selected_profile(state: &RuntimeState) -> Option<ProfileSummary> {
         .or_else(|| state.profiles.first().cloned())
 }
 
-/// Пинг зеркал в фоне: подписи в списке обновляются по мере ответов, поэтому
-/// окно входа не ждёт таймаут мёртвого зеркала. Строки правятся на месте
-/// (`set_row_data`) — замена модели сбросила бы выбор игрока на первый пункт.
-fn spawn_mirror_ping(app_weak: Weak<AppWindow>, mirrors: Vec<(String, String)>) {
+/// Пинг серверов в фоне + авто-выбор самого быстрого. Подписи в списке обновляются
+/// по мере ответов (`set_row_data` на месте — замена модели сбросила бы выбор игрока),
+/// а в режиме «Авто» лаунчер сам переключается на самый быстрый доступный адрес.
+///
+/// Пингуем ПАРАЛЛЕЛЬНО: последовательный обход держал бы выбор на таймаут каждого
+/// мёртвого зеркала (5с × число зеркал).
+fn spawn_mirror_probe(
+    app_weak: Weak<AppWindow>,
+    config: AppConfig,
+    mirrors: Vec<(String, String)>,
+) {
     if mirrors.len() < 2 {
-        return; // селектор скрыт — пинговать нечего
+        return; // выбирать не из чего
     }
     thread::spawn(move || {
-        for (index, (name, url)) in mirrors.iter().enumerate() {
-            let label = mirror_label(name, ping_mirror(url));
+        let pings: Vec<Option<u128>> = thread::scope(|scope| {
+            let handles: Vec<_> = mirrors
+                .iter()
+                .map(|(_, url)| scope.spawn(move || ping_mirror(url)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or(None))
+                .collect()
+        });
+
+        for (index, ((name, _), ms)) in mirrors.iter().zip(pings.iter()).enumerate() {
+            let label = mirror_label(name, *ms);
             let _ = app_weak.upgrade_in_event_loop(move |app| {
-                app.get_server_names().set_row_data(index, label.into());
+                // +1: нулевой пункт списка — «Авто».
+                app.get_server_names().set_row_data(index + 1, label.into());
             });
         }
+
+        // Ручной выбор игрока не перебиваем.
+        if load_settings().unwrap_or_default().api_url.is_some() {
+            return;
+        }
+        let Some(best) = best_ping_index(&pings) else {
+            return; // не ответил никто — остаёмся на текущем адресе
+        };
+        let (name, url) = mirrors[best].clone();
+        let ms = pings[best].unwrap_or(0);
+        let _ = app_weak.upgrade_in_event_loop(move |app| {
+            // Под живой сессией адрес не меняем: игровая сессия и yggdrasil живут на
+            // том бэкенде, где начался вход.
+            if app.get_is_authenticated() || app.get_is_loading() {
+                return;
+            }
+            config.set_api_url(&url);
+            app.set_api_url(url.into());
+            app.get_server_names()
+                .set_row_data(0, format!("{AUTO_SERVER_LABEL}: {name}").into());
+            app.set_message(format!("Сервер выбран автоматически: {name} — {ms} мс").into());
+        });
     });
 }
 
-/// Выбор зеркала бэкенда на окне входа. Переключает общий `api_url` (его читают
-/// все запросы и фоновые треды) и запоминает выбор до следующего запуска.
+/// Выбор сервера (окно входа и настройки — один и тот же список). Пункт 0 — «Авто»:
+/// сбрасывает ручной выбор и заново ищет самый быстрый. Остальные переключают общий
+/// `api_url` (его читают все запросы и фоновые треды) и запоминаются до смены.
 fn register_mirror_handler(
     app: &AppWindow,
     config: AppConfig,
     mirrors: Vec<(String, String)>,
     current: usize,
 ) {
-    let names: Vec<SharedString> = mirrors.iter().map(|(n, _)| n.into()).collect();
-    app.set_server_names(ModelRc::new(VecModel::from(names)));
+    let items: Vec<SharedString> = server_items(&mirrors)
+        .iter()
+        .map(SharedString::from)
+        .collect();
+    app.set_server_names(ModelRc::new(VecModel::from(items)));
     app.set_server_index(current as i32);
-    spawn_mirror_ping(app.as_weak(), mirrors.clone());
+    // Селектор показываем, только когда есть из чего выбирать (зеркал больше одного).
+    app.set_server_visible(mirrors.len() > 1);
+    spawn_mirror_probe(app.as_weak(), config.clone(), mirrors.clone());
 
     let app_weak = app.as_weak();
     app.on_server_selected(move |index| {
-        let Some((name, url)) = mirrors.get(index.max(0) as usize) else {
+        let mut settings = load_settings().unwrap_or_default();
+        let idx = index.max(0) as usize;
+        if idx == 0 {
+            settings.api_url = None;
+            let _ = save_settings(&settings);
+            if let Some(app) = app_weak.upgrade() {
+                app.set_message("Сервер выбирается автоматически…".into());
+            }
+            spawn_mirror_probe(app_weak.clone(), config.clone(), mirrors.clone());
+            return;
+        }
+        let Some((name, url)) = mirrors.get(idx - 1) else {
             return;
         };
         config.set_api_url(url);
-        let mut settings = load_settings().unwrap_or_default();
         settings.api_url = Some(url.clone());
         let _ = save_settings(&settings);
         if let Some(app) = app_weak.upgrade() {
@@ -3703,20 +3783,39 @@ mod tests {
     }
 
     #[test]
-    fn saved_mirror_resolves_or_falls_back_to_default() {
+    fn saved_mirror_resolves_or_falls_back_to_auto() {
         let mirrors = api_mirrors("https://main.example");
         assert_eq!(mirrors[0].1, "https://main.example");
-        // Нет сохранённого выбора → основной.
-        assert_eq!(mirror_index(&mirrors, None), 0);
-        assert_eq!(mirror_index(&mirrors, Some("https://main.example")), 0);
-        // Зеркало, которого больше нет в сборке → основной, а не мёртвый адрес.
-        assert_eq!(mirror_index(&mirrors, Some("https://gone.example")), 0);
+        // Пункт 0 — «Авто», дальше зеркала в порядке api_mirrors.
+        assert_eq!(server_items(&mirrors)[0], AUTO_SERVER_LABEL);
+        assert_eq!(server_items(&mirrors).len(), mirrors.len() + 1);
+        // Нет сохранённого выбора → «Авто».
+        assert_eq!(server_item_index(&mirrors, None), 0);
+        // Зеркало, которого больше нет в сборке → «Авто», а не мёртвый адрес.
+        assert_eq!(server_item_index(&mirrors, Some("https://gone.example")), 0);
 
         let mirrors = vec![
             ("Основной".to_string(), "https://main.example".to_string()),
             ("Зеркало".to_string(), "https://mirror.example".to_string()),
         ];
-        assert_eq!(mirror_index(&mirrors, Some("https://mirror.example")), 1);
+        assert_eq!(server_item_index(&mirrors, Some("https://main.example")), 1);
+        assert_eq!(server_item_index(&mirrors, Some("https://mirror.example")), 2);
+        // start_url в main: индекс 0 («Авто») стартует с основного адреса.
+        for (idx, want) in [(0usize, 0usize), (1, 0), (2, 1)] {
+            assert_eq!(mirrors[idx.saturating_sub(1)].1, mirrors[want].1);
+        }
+    }
+
+    // Авто-выбор: самый быстрый ИЗ ДОСТУПНЫХ; недоступные (None) не выбираются никогда,
+    // а если не ответил никто — переключать не на что.
+    #[test]
+    fn auto_server_picks_fastest_reachable() {
+        assert_eq!(best_ping_index(&[Some(120), Some(40), None]), Some(1));
+        assert_eq!(best_ping_index(&[None, Some(900)]), Some(1));
+        assert_eq!(best_ping_index(&[None, None]), None);
+        assert_eq!(best_ping_index(&[]), None);
+        // Равные пинги — берём первый (основной адрес приоритетнее зеркала).
+        assert_eq!(best_ping_index(&[Some(50), Some(50)]), Some(0));
     }
 
     #[test]

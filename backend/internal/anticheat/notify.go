@@ -3,9 +3,12 @@ package anticheat
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"sync"
 	"time"
 
 	"launcher-backend/internal/models"
@@ -25,6 +28,39 @@ type TelegramNotifier struct {
 	token  string
 	chatID string
 	client *http.Client
+
+	// Тип/сигнатуру детекта задаёт клиент, а лимитер детектов — per-UUID: с нескольких
+	// аккаунтов канал алертов забивался мусором, и настоящий детект терялся в шуме.
+	// Глобальный потолок — единственное место, через которое проходят ВСЕ алерты.
+	mu         sync.Mutex
+	sentAt     []time.Time
+	suppressed int
+}
+
+// alertsPerMinute — сколько алертов в минуту пропускаем в чат. Живой поток детектов
+// на проде — единицы в минуту, так что потолок бьёт только по флуду.
+const alertsPerMinute = 15
+
+// allow сообщает, можно ли отправить алерт, и сколько было подавлено с прошлой отправки.
+func (n *TelegramNotifier) allow() (bool, int) {
+	now := time.Now()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	kept := n.sentAt[:0]
+	for _, t := range n.sentAt {
+		if now.Sub(t) < time.Minute {
+			kept = append(kept, t)
+		}
+	}
+	n.sentAt = kept
+	if len(n.sentAt) >= alertsPerMinute {
+		n.suppressed++
+		return false, 0
+	}
+	n.sentAt = append(n.sentAt, now)
+	suppressed := n.suppressed
+	n.suppressed = 0
+	return true, suppressed
 }
 
 func NewTelegramNotifier(token, chatID string) *TelegramNotifier {
@@ -65,8 +101,16 @@ func (n *TelegramNotifier) NotifyAgentSilent(nonce string) {
 		"). Сессия не погашена (её держит лаунчер) — присмотритесь к игроку.")
 }
 
-// send отправляет произвольный текст в Telegram-чат алертов.
+// send отправляет произвольный текст в Telegram-чат алертов (сверх потолка — дропает,
+// не блокирует: иначе на флуде копились бы goroutine).
 func (n *TelegramNotifier) send(text string) {
+	ok, suppressed := n.allow()
+	if !ok {
+		return
+	}
+	if suppressed > 0 {
+		text += fmt.Sprintf("\n\n(подавлено алертов из-за флуда: %d)", suppressed)
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"chat_id": n.chatID,
 		"text":    text,
@@ -77,6 +121,11 @@ func (n *TelegramNotifier) send(text string) {
 		bytes.NewReader(payload),
 	)
 	if err != nil {
+		// В URL лежит токен бота, а *url.Error печатает URL целиком — логируем причину.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		slog.Warn("anticheat: telegram alert failed", "error", err)
 		return
 	}

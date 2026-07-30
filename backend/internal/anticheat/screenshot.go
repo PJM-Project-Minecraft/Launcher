@@ -37,7 +37,14 @@ type ScreenshotService struct {
 	db          *gorm.DB
 	storageRoot string
 	now         func() time.Time
+	// detector считает серии проваленных запросов (screenshot_streak.go). nil — детект
+	// выключен (тесты самого хранилища скриншотов).
+	detector *Service
 }
+
+// SetDetector подключает античит-сервис: он получает исход каждого запроса скриншота
+// и заводит детект на серию провалов подряд.
+func (s *ScreenshotService) SetDetector(svc *Service) { s.detector = svc }
 
 func NewScreenshotService(db *gorm.DB, storageRoot string) *ScreenshotService {
 	return &ScreenshotService{
@@ -127,6 +134,9 @@ func (s *ScreenshotService) CompleteScreenshot(ctx context.Context, id string, d
 		return err
 	}
 	now := s.now()
+	if s.detector != nil {
+		s.detector.NoteScreenshotOutcome(ctx, rec, "", false, true) // кадр получен — серия обнулена
+	}
 	return s.db.WithContext(ctx).Model(&models.Screenshot{}).Where("id = ?", id).
 		Updates(map[string]any{
 			"status":      "done",
@@ -141,8 +151,18 @@ func (s *ScreenshotService) CompleteScreenshot(ctx context.Context, id string, d
 
 // markFailed помечает запрос проваленным (ошибка захвата/загрузки).
 func (s *ScreenshotService) markFailed(ctx context.Context, id, reason string) {
-	_ = s.db.WithContext(ctx).Model(&models.Screenshot{}).Where("id = ?", id).
-		Updates(s.failedUpdates(reason)).Error
+	// Запись читаем до апдейта: детектору серии провалов нужны игрок и его сессия.
+	var rec models.Screenshot
+	found := s.db.WithContext(ctx).Where("id = ?", id).First(&rec).Error == nil
+	// Провалить можно только незавершённый запрос: иначе чит-мод внутри JVM, знающий id
+	// (он же его и передаёт нативке), отправлял /fail ПОСЛЕ успешной загрузки кадра и
+	// затирал доказательство. RowsAffected гейтит и счётчик серии провалов.
+	res := s.db.WithContext(ctx).Model(&models.Screenshot{}).
+		Where("id = ? AND status IN ?", id, []string{"pending", "capturing"}).
+		Updates(s.failedUpdates(reason))
+	if res.Error == nil && res.RowsAffected > 0 && found && s.detector != nil {
+		s.detector.NoteScreenshotOutcome(ctx, rec, reason, false, false)
+	}
 }
 
 // failedUpdates — единая схема failed-апдейта (источник истины для markFailed и
@@ -201,13 +221,30 @@ func (s *ScreenshotService) BelongsToNonce(ctx context.Context, id, nonce string
 // failedUpdates — общую схему с markFailed, чтобы таймаут-записи не расходились.
 func (s *ScreenshotService) reapStale(now time.Time) {
 	threshold := now.Add(-screenshotRequestTTL)
+	// Сначала выбираем протухшие записи: молчание в ответ на запрос — самый весомый
+	// вид провала (так выглядит заглушенный канал), и детектор должен видеть, ПО КОМУ
+	// оно было. Записей за тик единицы, лишний SELECT ничего не стоит.
+	var stale []models.Screenshot
+	if s.detector != nil {
+		if err := s.db.Where("status IN ? AND created_at < ?",
+			[]string{"pending", "capturing"}, threshold).Find(&stale).Error; err != nil {
+			slog.Warn("screenshot: reap stale select failed", "error", err)
+		}
+	}
 	err := s.db.Model(&models.Screenshot{}).
 		Where("status IN ? AND created_at < ?", []string{"pending", "capturing"}, threshold).
-		Updates(s.failedUpdates("таймаут ожидания лаунчера")).Error
+		Updates(s.failedUpdates(screenshotTimeoutReason)).Error
 	if err != nil {
 		slog.Warn("screenshot: reap stale failed", "error", err)
+		return
+	}
+	for _, rec := range stale {
+		s.detector.NoteScreenshotOutcome(context.Background(), rec, screenshotTimeoutReason, true, false)
 	}
 }
+
+// screenshotTimeoutReason — причина провала «клиент не ответил вовсе».
+const screenshotTimeoutReason = "таймаут ожидания клиента"
 
 // screenshotRetention — сколько хранить завершённые (done/failed) скриншоты и
 // их файлы на диске. Старше — удаляем (защита 40ГБ VPS от переполнения).

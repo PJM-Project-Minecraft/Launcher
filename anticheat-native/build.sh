@@ -25,7 +25,7 @@ mkdir -p "$OUT_DIR"
 # -s: strip символов (убирает имена внутренних функций из бинаря — анти-RE).
 gcc -O2 -fPIC -shared -pthread -s \
   -I"$JH/include" -I"$JH/include/linux" \
-  -o "$OUT_DIR/$LIB_NAME" "$HERE/src/agent.c" "$HERE/src/guard.c"
+  -o "$OUT_DIR/$LIB_NAME" "$HERE/src/agent.c" "$HERE/src/guard.c" "$HERE/src/screenshot.c" -ldl
 
 mkdir -p "$(dirname "$DEST")"
 cp "$OUT_DIR/$LIB_NAME" "$DEST"
