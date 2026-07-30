@@ -154,9 +154,13 @@ func (s *ScreenshotService) markFailed(ctx context.Context, id, reason string) {
 	// Запись читаем до апдейта: детектору серии провалов нужны игрок и его сессия.
 	var rec models.Screenshot
 	found := s.db.WithContext(ctx).Where("id = ?", id).First(&rec).Error == nil
-	_ = s.db.WithContext(ctx).Model(&models.Screenshot{}).Where("id = ?", id).
-		Updates(s.failedUpdates(reason)).Error
-	if found && s.detector != nil {
+	// Провалить можно только незавершённый запрос: иначе чит-мод внутри JVM, знающий id
+	// (он же его и передаёт нативке), отправлял /fail ПОСЛЕ успешной загрузки кадра и
+	// затирал доказательство. RowsAffected гейтит и счётчик серии провалов.
+	res := s.db.WithContext(ctx).Model(&models.Screenshot{}).
+		Where("id = ? AND status IN ?", id, []string{"pending", "capturing"}).
+		Updates(s.failedUpdates(reason))
+	if res.Error == nil && res.RowsAffected > 0 && found && s.detector != nil {
 		s.detector.NoteScreenshotOutcome(ctx, rec, reason, false, false)
 	}
 }
