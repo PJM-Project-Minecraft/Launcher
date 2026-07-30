@@ -722,8 +722,15 @@ public final class Agent {
             long deadline = System.currentTimeMillis() + SHOT_WAIT_MS;
             while (System.currentTimeMillis() < deadline) {
                 if (Files.exists(sig)) {
-                    uploadScreenshot(id, raw, sig);
-                    return;
+                    // Готов ли кадр ИМЕННО этого запроса — решает id в .sig. Иначе кадр
+                    // прошлого запроса (или недописанный файл) уходил как «bad-sig», и
+                    // честный игрок получал серию провалов.
+                    if (frameReady(sig, id)) {
+                        uploadScreenshot(id, raw, sig);
+                        return;
+                    }
+                    deleteQuietly(sig);
+                    deleteQuietly(raw);
                 }
                 if (Files.exists(err)) {
                     String reason = new String(Files.readAllBytes(err),
@@ -740,6 +747,21 @@ public final class Agent {
             deleteQuietly(raw);
             deleteQuietly(sig);
             deleteQuietly(err);
+        }
+    }
+
+    /**
+     * Кадр готов, если .sig дописан (3 строки) и первая строка — id ЭТОГО запроса.
+     * Нативка пишет .sig последним, но не атомарно, а id отличает свежий кадр от
+     * оставшегося с прошлого запроса.
+     */
+    private static boolean frameReady(Path sig, String id) {
+        try {
+            String[] lines = new String(Files.readAllBytes(sig),
+                java.nio.charset.StandardCharsets.UTF_8).split("\n");
+            return lines.length >= 3 && lines[0].trim().equals(id);
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -778,12 +800,13 @@ public final class Agent {
         try {
             String[] lines = new String(Files.readAllBytes(sig),
                 java.nio.charset.StandardCharsets.UTF_8).split("\n");
-            if (lines.length < 2) {
+            // Формат .sig: "<id>\n<hex подписи>\n<ширина> <высота>\n" (id проверен в frameReady).
+            if (lines.length < 3) {
                 failScreenshot(id, "bad-sig");
                 return;
             }
-            String signature = lines[0].trim();
-            String[] dims = lines[1].trim().split(" ");
+            String signature = lines[1].trim();
+            String[] dims = lines[2].trim().split(" ");
             int width = Integer.parseInt(dims[0]);
             int height = Integer.parseInt(dims[1]);
             byte[] pixels = Files.readAllBytes(raw);

@@ -464,17 +464,24 @@ static void handle_request(const char *id) {
 
     char header[128];
     int hlen = snprintf(header, sizeof(header), "%s\n%d\n%d\n", id, w, h);
+    if (hlen < 0 || (size_t)hlen >= sizeof(header)) {
+        free(rgb);
+        write_err("bad-id");
+        return;
+    }
     char sig[65];
     hmac_sha256(g_key, sizeof(g_key), (const unsigned char *)header, (size_t)hlen, rgb, n, sig);
     free(rgb);
 
-    /* .sig пишется последним — Java ждёт именно его как признак готовности кадра. */
+    /* .sig пишется последним — Java ждёт именно его как признак готовности кадра.
+     * Первая строка — id запроса: без него Java не могла отличить кадр ЭТОГО запроса от
+     * кадра предыдущего (устаревший .sig на диске давал ложный провал честному игроку). */
     f = fopen(g_sig_path, "w");
     if (!f) {
         write_err("sig-open");
         return;
     }
-    fprintf(f, "%s\n%d %d\n", sig, w, h);
+    fprintf(f, "%s\n%s\n%d %d\n", id, sig, w, h);
     fclose(f);
 }
 
@@ -485,11 +492,14 @@ static void shot_tick(void) {
         return;
     }
     char id[80];
-    if (!fgets(id, sizeof(id), f)) {
-        id[0] = '\0';
-    }
+    char *line = fgets(id, sizeof(id), f);
     fclose(f);
-    remove(g_req_path);
+    /* Java пишет "<id>\n". Нет перевода строки — файл ещё дописывается (create+write не
+     * атомарны): НЕ удаляем, дочитаем на следующем тике. Раньше запрос в этот момент
+     * уничтожался навсегда: Java ждала 20с и репортила ложный провал честному игроку. */
+    if (!line || !strchr(id, '\n')) {
+        return;
+    }
 
     /* id приходит из JVM — санитизируем: только [A-Za-z0-9-], иначе он попадёт в подпись
      * и в имена/логи как есть. */
@@ -502,6 +512,9 @@ static void shot_tick(void) {
         }
     }
     id[j] = '\0';
+    /* Запрос прочитан целиком — триггер убираем в любом случае, иначе мусорный id
+     * (поддельный клиент) заставлял бы поллер перечитывать файл вечно. */
+    remove(g_req_path);
     if (!id[0]) {
         return;
     }
