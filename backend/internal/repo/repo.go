@@ -172,6 +172,21 @@ func CountRecentFailedLogins(ctx context.Context, db *gorm.DB, username string, 
 	return n, err
 }
 
+const (
+	// LoginFailWindow / LoginFailMax — общий порог per-account анти-брутфорса. Живёт здесь,
+	// а не в auth: проверять пароль умеет и Telegram-бот (привязка аккаунта), а порог
+	// обязан быть ОДИН — иначе канал без проверки обнуляет замок другого канала.
+	LoginFailWindow = 15 * time.Minute
+	LoginFailMax    = 30
+)
+
+// LoginLocked — исчерпан ли лимит неудачных попыток для логина.
+// ВАЖНО: на true новых записей в auth_logs делать НЕЛЬЗЯ, иначе лок не истекает.
+func LoginLocked(ctx context.Context, db *gorm.DB, login string) bool {
+	n, err := CountRecentFailedLogins(ctx, db, login, time.Now().UTC().Add(-LoginFailWindow))
+	return err == nil && n >= LoginFailMax
+}
+
 func SetEmail(ctx context.Context, db *gorm.DB, userID, email string) error {
 	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).
 		Updates(map[string]any{"email": email, "updated_at": time.Now().UTC()}).Error

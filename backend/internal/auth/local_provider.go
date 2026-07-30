@@ -16,17 +16,15 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	// loginFailWindow / loginFailMax — per-account throттлинг перебора, НЕЗАВИСИМЫЙ от IP:
-	// per-IP лимитер обходится спреем с ботнета, а этот считает неудачи по логину.
-	// ponytail: жёсткий лок на окно (при ≥Max корректный пароль тоже даёт 429). Порог
-	// высокий, чтобы обычные опечатки не триггерили; griefing-лок максимум на окно и
-	// авто-истекает, т.к. на 429 мы НЕ пишем новую неудачу (иначе атакующий держал бы лок вечно).
-	loginFailWindow = 15 * time.Minute
-	loginFailMax    = 30
-	// totpPeriod — период TOTP (сек), как в totp.Validate по умолчанию.
-	totpPeriod = 30
-)
+// Порог per-account анти-брутфорса — repo.LoginFailWindow / repo.LoginFailMax (общий
+// с Telegram-ботом, который тоже проверяет пароль при привязке аккаунта).
+//
+// ponytail: жёсткий лок на окно (при ≥Max корректный пароль тоже даёт 429). Порог
+// высокий, чтобы опечатки не триггерили; griefing-лок максимум на окно и авто-истекает,
+// т.к. на 429 мы НЕ пишем новую неудачу (иначе атакующий держал бы лок вечно).
+//
+// totpPeriod — период TOTP (сек), как в totp.Validate по умолчанию.
+const totpPeriod = 30
 
 // dummyBcryptHash — валидный bcrypt-хеш для выравнивания времени ответа на путях
 // «логин не найден» / «пароль не задан»: без него эти ветки отвечают за микросекунды,
@@ -89,7 +87,7 @@ func (p LocalProvider) SignIn(ctx context.Context, login, password, totpCode str
 
 	// Per-account анти-брутфорс: при слишком многих недавних неудачах отклоняем ДО bcrypt.
 	// На этой ветке auth_log НЕ пишем — иначе счётчик не истечёт и лок стал бы вечным.
-	if fails, cErr := repo.CountRecentFailedLogins(ctx, p.db, user.Login, time.Now().UTC().Add(-loginFailWindow)); cErr == nil && fails >= loginFailMax {
+	if repo.LoginLocked(ctx, p.db, user.Login) {
 		return ProviderSignInResponse{}, ProviderError{
 			StatusCode: http.StatusTooManyRequests, Message: "Слишком много неудачных попыток входа. Попробуйте позже.",
 		}
