@@ -204,9 +204,13 @@ func UpdateUserAfterGMLLogin(ctx context.Context, db *gorm.DB, userID, ip, hardw
 	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error
 }
 
+// IsUsernameTaken — проверка занятости ника БЕЗ учёта регистра: ник-двойник («Admin»
+// при существующем «admin») даёт выдачу себя за другого игрока в игре и путает любые
+// сопоставления по нику (отзыв доступа в античите, ADMIN_LOGINS). Уже существующие
+// в БД двойники это не ломает — только новые не создаются.
 func IsUsernameTaken(ctx context.Context, db *gorm.DB, username string) (bool, error) {
 	var n int64
-	err := db.WithContext(ctx).Model(&models.User{}).Where("login = ?", username).Count(&n).Error
+	err := db.WithContext(ctx).Model(&models.User{}).Where("LOWER(login) = LOWER(?)", username).Count(&n).Error
 	return n > 0, err
 }
 
