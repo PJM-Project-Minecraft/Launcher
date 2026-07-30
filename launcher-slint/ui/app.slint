@@ -392,9 +392,11 @@ export component AppWindow inherits Window {
     }
 
     in property <string> api-url;
-    // Зеркала бэкенда: селектор на окне входа скрыт, если зеркало одно.
+    // Серверы бэкенда: нулевой пункт — «Авто» (лаунчер сам берёт самый быстрый),
+    // дальше зеркала. Селектор скрыт, если зеркало одно — выбирать не из чего.
     in property <[string]> server-names;
     in-out property <int> server-index;
+    in property <bool> server-visible;
     in property <string> message;
     in property <string> user-login;
     in property <string> user-uuid;
@@ -489,7 +491,7 @@ export component AppWindow inherits Window {
 	    Rectangle {
 	        // Селектор зеркала есть не всегда — карточка и всё под ним съезжают
 	        // на mirror-shift, только когда зеркал больше одного.
-	        property <length> mirror-shift: root.server-names.length > 1 ? 96px : 0px;
+	        property <length> mirror-shift: root.server-visible ? 96px : 0px;
 	        width: 474px;
 	        height: 484px + self.mirror-shift;
 	        x: (parent.width - 474px) / 2;
@@ -543,7 +545,7 @@ export component AppWindow inherits Window {
             background: #242424;
         }
 
-        if root.server-names.length > 1: Text {
+        if root.server-visible: Text {
             text: "Сервер";
             x: 40px;
             y: 158px;
@@ -552,7 +554,7 @@ export component AppWindow inherits Window {
             font-weight: 900;
         }
 
-        if root.server-names.length > 1: ComboBox {
+        if root.server-visible: ComboBox {
             x: 40px;
             y: 188px;
             width: parent.width - 80px;
@@ -1367,7 +1369,9 @@ export component AppWindow inherits Window {
             width: 560px;
             // Секция дискретной GPU добавляет высоту только когда она доступна.
             // +104px на секцию Discord Rich Presence (всегда видна).
-            height: root.discrete-gpu-available ? 678px : 574px;
+            // +140px на секцию «Сервер» — она есть только при нескольких зеркалах.
+            height: (root.discrete-gpu-available ? 678px : 574px)
+                + (root.server-visible ? 140px : 0px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2 + (root.settings-visible ? 0px : 28px);
             border-radius: 20px;
@@ -1832,6 +1836,58 @@ export component AppWindow inherits Window {
                         icon-source: @image-url("../assets/folder.svg");
                         enabled: root.settings-visible && root.is-authenticated;
                         clicked => { root.open-install-folder-requested(); }
+                    }
+                }
+            }
+
+            // Секция «Сервер»: тот же список, что на окне входа (нулевой пункт — «Авто»).
+            // Нужна здесь, потому что после логина окно входа уже не показать, а сменить
+            // сервер игроку может потребоваться в любой момент (провайдер режет домен).
+            // Идёт последней — иначе пришлось бы сдвигать y всех секций выше.
+            if root.server-visible: Rectangle {
+                x: 28px;
+                y: (root.discrete-gpu-available ? 496px : 392px) + 166px;
+                width: parent.width - 56px;
+                height: 124px;
+                border-radius: 14px;
+                background: #131313;
+                border-color: #ffffff12;
+                border-width: 1px;
+
+                Text {
+                    text: "Сервер";
+                    x: 22px;
+                    y: 18px;
+                    width: parent.width - 44px;
+                    height: 24px;
+                    color: #e0e2e5;
+                    font-size: 18px;
+                    font-weight: 800;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: "Адрес бэкенда. «Авто» — самый быстрый доступный";
+                    x: 22px;
+                    y: 44px;
+                    width: parent.width - 44px;
+                    height: 18px;
+                    color: #8c8f95;
+                    font-size: 12px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+
+                ComboBox {
+                    x: 22px;
+                    y: 68px;
+                    width: parent.width - 44px;
+                    height: 40px;
+                    enabled: root.settings-visible;
+                    model: root.server-names;
+                    current-index <=> root.server-index;
+                    selected(value) => {
+                        root.server-selected(self.current-index);
                     }
                 }
             }
