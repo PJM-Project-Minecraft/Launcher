@@ -65,6 +65,27 @@ func TestVerifiedCaptureAcceptsSignedFrame(t *testing.T) {
 	}
 }
 
+// PNG-бомба: заявленный размер крошечный, реальный холст — гигантский. Отказ обязан
+// произойти по IHDR, до аллокации холста декодером.
+func TestVerifiedCaptureRejectsOversizedCanvas(t *testing.T) {
+	svc := NewService(newTestDB(t), "secret", false, nil, "")
+	res, _ := svc.InitHandshake(t.Context(), "uuid-bomb", "Bomb", "", nil)
+
+	// 8000×8000 однотонных пикселей: PNG сжимается в десятки КБ, RGBA-холст — 256 МБ.
+	big := image.NewGray(image.Rect(0, 0, 8000, 8000))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, big); err != nil {
+		t.Fatalf("png: %v", err)
+	}
+	if _, err := svc.VerifiedCaptureJPEG(res.Nonce, "shot-bomb", 1, 1, buf.Bytes(), ""); err == nil {
+		t.Fatal("кадр с холстом больше заявленного не должен декодироваться")
+	}
+	// Заявленный размер сверх потолка отвергается ещё раньше — без чтения байтов.
+	if _, err := svc.VerifiedCaptureJPEG(res.Nonce, "shot-bomb", 8000, 8000, buf.Bytes(), ""); err == nil {
+		t.Fatal("размер сверх maxCaptureDimension не должен приниматься")
+	}
+}
+
 func TestVerifiedCaptureRejectsTamperedFrame(t *testing.T) {
 	svc := NewService(newTestDB(t), "secret", false, nil, "")
 	res, _ := svc.InitHandshake(t.Context(), "uuid-shot2", "Bob", "", nil)

@@ -27,9 +27,10 @@ const (
 	// captureSecretTTL — сколько храним секрет сессии. Игровая сессия живёт часами;
 	// после — запись всё равно бесполезна (nonce мёртв).
 	captureSecretTTL = 24 * time.Hour
-	// maxCaptureDimension — потолок стороны кадра. Нативка ужимает до 1920 по ширине;
-	// проверка защищает декодер от «PNG-бомбы» с гигапиксельным холстом.
-	maxCaptureDimension = 8192
+	// maxCaptureDimension — потолок стороны кадра. Нативка ужимает до 1920 по ширине,
+	// так что 3840 покрывает легитимный трафик с запасом; выше — только память жечь
+	// (3840² RGBA ≈ 59 МБ на кадр, и это уже после проверки IHDR).
+	maxCaptureDimension = 3840
 )
 
 type captureEntry struct {
@@ -73,6 +74,13 @@ func (s *Service) VerifiedCaptureJPEG(nonce, id string, width, height int, pngDa
 	}
 	if width <= 0 || height <= 0 || width > maxCaptureDimension || height > maxCaptureDimension {
 		return nil, fmt.Errorf("некорректный размер кадра")
+	}
+	// Размеры берём из IHDR ДО декодирования: png.Decode аллоцирует холст по заголовку,
+	// поэтому «PNG-бомба» на 30000×30000 (сжимается в сотни КБ) съела бы гигабайты
+	// раньше, чем сработала бы проверка bounds ниже.
+	cfg, err := png.DecodeConfig(bytes.NewReader(pngData))
+	if err != nil || cfg.Width != width || cfg.Height != height {
+		return nil, fmt.Errorf("размер кадра не совпадает с заявленным")
 	}
 	img, err := png.Decode(bytes.NewReader(pngData))
 	if err != nil {
