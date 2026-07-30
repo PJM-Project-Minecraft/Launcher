@@ -860,15 +860,26 @@ const filesMaxBodySize = 256 * 1024
 // initMaxBodySize — потолок тела /handshake/init (HWID-компоненты + pre-launch детекты).
 const initMaxBodySize = 128 * 1024
 
-// requestBodyLimit отвергает запрос по Content-Length ДО буферизации тела Fiber'ом
-// (ранняя защита от memory-DoS; в Fiber v3 нет встроенного per-route bodylimit).
+// requestBodyLimit отвергает слишком большое тело до его разбора хендлером (в Fiber v3
+// нет встроенного per-route bodylimit).
+//
+// Content-Length — только быстрая отсечка: с `Transfer-Encoding: chunked` заголовка нет
+// вовсе, и раньше проверка молча пропускала тело до app-wide 512МБ. Поэтому решающая
+// проверка — по фактически прочитанному телу. От memory-DoS на этапе буферизации
+// защищает app-wide BodyLimit (cmd/server/main.go), здесь — от раздувания БД и CPU.
 func requestBodyLimit(maxBytes int, h fiber.Handler) fiber.Handler {
 	return func(c fiber.Ctx) error {
+		tooLarge := func() error {
+			return c.Status(http.StatusRequestEntityTooLarge).
+				JSON(ErrorResponse{Message: "Слишком большой запрос"})
+		}
 		if cl := c.Get("Content-Length"); cl != "" {
 			if n, err := strconv.Atoi(cl); err == nil && n > maxBytes {
-				return c.Status(http.StatusRequestEntityTooLarge).
-					JSON(ErrorResponse{Message: "Слишком большой запрос"})
+				return tooLarge()
 			}
+		}
+		if len(c.Body()) > maxBytes {
+			return tooLarge()
 		}
 		return h(c)
 	}
