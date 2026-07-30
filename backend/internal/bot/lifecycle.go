@@ -75,6 +75,19 @@ func (s *Service) HandleText(c tele.Context) error {
 		return err
 	}
 
+	// Гейт на ВСЕ админ-состояния: сохранённый флоу живёт в БД без TTL, поэтому у
+	// разжалованного модератора оставалась рабочая клавиатура и доступ к карточке цели.
+	// Одна проверка на все ветки, включая будущие.
+	switch flow {
+	case repo.FlowAdminMenu, repo.FlowAdminSearch, repo.FlowAdminAwaitPick,
+		repo.FlowAdminManaging, repo.FlowAdminAskNewEmail:
+		if adm == nil {
+			_ = s.notifyWarn(chatID, "Панель администратора вам недоступна (роль или список модераторов). Нажмите /start для обычного меню.")
+			ep := repo.EmptyPayload()
+			return repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowIdle, &ep)
+		}
+	}
+
 	switch flow {
 	case repo.FlowIdle:
 		return s.idleActions(chatID, sender, telegramUserID(sender), text, adm)
@@ -111,11 +124,6 @@ func (s *Service) HandleText(c tele.Context) error {
 	case repo.FlowTotpDisableOTP:
 		return s.handleTotpDisableOTP(chatID, msgID, telegramUserID(sender), text)
 	case repo.FlowAdminMenu:
-		if adm == nil {
-			_ = s.notifyWarn(chatID, "Панель администратора вам недоступна (роль или список модераторов). Нажмите /start для обычного меню.")
-			ep := repo.EmptyPayload()
-			return repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowIdle, &ep)
-		}
 		return s.adminMenuActions(chatID, telegramUserID(sender), text, adm)
 	case repo.FlowAdminSearch:
 		return s.adminSearch(chatID, text, adm)
