@@ -43,3 +43,7 @@ docker-compose.override.yml
 # NeoForge-мод: сборочные артефакты
 anticheat-neoforge/build/
 anticheat-neoforge/.gradle/
+
+# Сборочные артефакты Java-агента: собираются anticheat-agent/build.sh, на прод едут
+# из backend/data (тоже вне git). В индексе они только устаревали после правок Agent.java.
+anticheat-agent/build/

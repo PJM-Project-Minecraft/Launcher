@@ -1,2 +1,0 @@
-/w/anticheat-agent/src/main/java/xyz/projectminecraft/anticheat/O.java
-/w/anticheat-agent/src/main/java/xyz/projectminecraft/anticheat/Agent.java
