@@ -24,18 +24,20 @@ else()
     find_package(JNI REQUIRED)
 endif()
 
-add_library(anticheat SHARED src/agent.c src/guard.c)
+add_library(anticheat SHARED src/agent.c src/guard.c src/screenshot.c)
 target_include_directories(anticheat PRIVATE ${JNI_INCLUDE_DIRS})
 
 # guard.c: на Windows нужен psapi (EnumProcessModules), на Linux — pthread.
+# screenshot.c: на Windows — DXGI Desktop Duplication (d3d11/dxgi/dxguid) + GDI-фолбэк;
+# на Linux libX11 грузится через dlopen (нужен только -ldl), жёсткой линковки нет.
 if(WIN32)
-    target_link_libraries(anticheat PRIVATE psapi)
+    target_link_libraries(anticheat PRIVATE psapi d3d11 dxgi dxguid gdi32)
     # Статическая линковка CRT под MSVC (/MT): DLL не зависит от VC++ Redist
     # (vcruntime140.dll/UCRT) и грузится на чистой Windows — как mingw-сборка с -static.
     set_property(TARGET anticheat PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 else()
     find_package(Threads REQUIRED)
-    target_link_libraries(anticheat PRIVATE Threads::Threads)
+    target_link_libraries(anticheat PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 
 # Strip символов (анти-RE): убираем имена внутренних функций. MSVC использует иной механизм.
