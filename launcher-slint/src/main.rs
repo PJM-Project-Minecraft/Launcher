@@ -3142,32 +3142,43 @@ fn normalize_totp_code(value: &str) -> String {
         .collect()
 }
 
+/// Пишет токен в системное хранилище и СВЕРЯЕТ, что он читается оттуда новым `Entry`.
+///
+/// Верить одному `set_password` нельзя: keyring без фич-бэкендов собирается в заглушку,
+/// которая держит секрет внутри самого объекта `Entry` и возвращает Ok — токен уходил
+/// «в никуда», а fallback в settings.json при этом обнулялся, и сессия не переживала
+/// перезапуск лаунчера. Тот же эффект даёт заблокированный или не запущенный агент
+/// хранилища, поэтому проверка нужна и с настоящим бэкендом.
+fn keyring_persists(token: &str) -> bool {
+    let stored = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .and_then(|entry| entry.set_password(token));
+    if stored.is_err() {
+        return false;
+    }
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .and_then(|entry| entry.get_password())
+        .is_ok_and(|saved| saved == token)
+}
+
 fn save_token(token: &str) -> Result<(), String> {
-    let keyring_result = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .map_err(|_| "Не удалось открыть системное хранилище токенов.".to_string())
-        .and_then(|entry| {
-            entry
-                .set_password(token)
-                .map_err(|_| "Не удалось сохранить токен авторизации.".to_string())
-        });
+    let keyring_ok = keyring_persists(token);
 
     // JWT в settings.json (плейнтекст, права по umask) кладём ТОЛЬКО как fallback,
-    // когда keyring недоступен. При успешном keyring поле очищаем — иначе токен всегда
+    // когда keyring недоступен. При рабочем keyring поле очищаем — иначе токен всегда
     // лежал бы открыто рядом, и keyring не давал бы защиты (кража = просто чтение файла).
     let mut settings = load_settings().unwrap_or_default();
-    settings.auth_token = if keyring_result.is_ok() {
+    settings.auth_token = if keyring_ok {
         None
     } else {
         Some(token.to_string())
     };
     let settings_result = save_settings(&settings);
 
-    if keyring_result.is_ok() || settings_result.is_ok() {
+    if keyring_ok || settings_result.is_ok() {
         return Ok(());
     }
     Err(settings_result
         .err()
-        .or_else(|| keyring_result.err())
         .unwrap_or_else(|| "Не удалось сохранить сессию.".to_string()))
 }
 
@@ -3804,6 +3815,34 @@ mod tests {
         for (idx, want) in [(0usize, 0usize), (1, 0), (2, 1)] {
             assert_eq!(mirrors[idx.saturating_sub(1)].1, mirrors[want].1);
         }
+    }
+
+    // Регрессия «сессия не восстанавливается»: keyring без фич-бэкендов собирается в
+    // заглушку, которая держит секрет ВНУТРИ объекта Entry — следующий Entry уже пуст.
+    // save_token верил set_password, обнулял fallback в settings.json, и токен исчезал.
+    #[test]
+    fn keyring_without_backend_is_not_trusted() {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        assert!(
+            !keyring_persists("test-token"),
+            "заглушку keyring нельзя считать рабочим хранилищем — иначе токен теряется"
+        );
+    }
+
+    // Проверка окружения, а не кода: живо ли системное хранилище на этой машине.
+    // Запуск: `cargo test -- --ignored keyring_backend`. Служба своя, боевой токен не трогаем.
+    // Провал = хранилища нет (headless/нет агента) → лаунчер уйдёт на fallback в settings.json.
+    #[test]
+    #[ignore]
+    fn keyring_backend_roundtrips_on_this_machine() {
+        keyring::set_default_credential_builder(keyring::default::default_credential_builder());
+        let entry = keyring::Entry::new("xyz.projectminecraft.launcher.selftest", "probe")
+            .expect("создать запись хранилища");
+        entry.set_password("probe-value").expect("записать секрет");
+        let read = keyring::Entry::new("xyz.projectminecraft.launcher.selftest", "probe")
+            .and_then(|e| e.get_password());
+        let _ = entry.delete_credential();
+        assert_eq!(read.as_deref().ok(), Some("probe-value"));
     }
 
     // Авто-выбор: самый быстрый ИЗ ДОСТУПНЫХ; недоступные (None) не выбираются никогда,

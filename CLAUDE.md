@@ -10,7 +10,7 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `launcher-slint/` — десктоп-лаунчер на Rust + Slint. Текущая версия: `0.4.4` (в `Cargo.toml`).
+- `launcher-slint/` — десктоп-лаунчер на Rust + Slint. Текущая версия: `0.4.5` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
 - `src/` + Vite — **легаси** React-прототип UI, для лаунчера не нужен (`npm run dev:web`).
@@ -378,6 +378,15 @@ NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Jav
 ## Релизы лаунчера
 
 Текущие версии:
+- **0.4.5** (восстановление сессии между запусками + авто-выбор сервера).
+  ⚠️ **keyring подключается ФИЧАМИ.** `keyring = "3"` без features собирается в in-memory
+  заглушку: `set_password` возвращает Ok, но следующий `Entry` уже пуст. Из-за этого
+  `save_token` считал системное хранилище рабочим, обнулял fallback в `settings.json`,
+  и сессия не переживала перезапуск (регрессия с 0.4.2, где ввели «JWT только в keyring»).
+  Теперь включены `async-secret-service` (Linux, zbus — чистый Rust, без линковки libdbus)
+  и `windows-native`, а `save_token` СВЕРЯЕТ запись чтением через новый `Entry` — любое
+  «молчаливо-пустое» хранилище (заглушка, залоченный агент, headless) деградирует в
+  fallback `settings.json`, а не теряет сессию.
 - **0.4.4** (нативная съёмка скриншотов + фиксы аудита безопасности 30.07.2026, см. ниже).
   ⚠️ **Маркер версии в бинарнике.** `updater.rs` требует, чтобы скачанное обновление
   содержало строку `PMLVER=<заявленная версия>;` и имело нативный формат исполняемого
