@@ -18,6 +18,16 @@ use sha2::{Digest, Sha256};
 /// Версия лаунчера, зашитая при сборке (Cargo.toml).
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Самодекларация версии в теле бинарника. Подпись Ed25519 покрывает только байты
+/// файла и НЕ говорит, какой это релиз, — поэтому подписанный старый бинарник можно
+/// было выдать за новую версию (реплей: канал обновлений полу-доверенный — зеркало
+/// терминирует TLS само). Маркер связывает подпись с версией: скачанный файл обязан
+/// содержать маркер ЗАЯВЛЕННОЙ версии, а его туда пишет только сборка этой версии.
+///
+/// Строка реально уходит в заголовок запроса (см. check_update) — так она гарантированно
+/// попадает в .rodata и не выпиливается оптимизатором.
+pub const VERSION_MARKER: &str = concat!("PMLVER=", env!("CARGO_PKG_VERSION"), ";");
+
 /// Публичный ключ Ed25519 для проверки подписи обновления, вшивается при сборке
 /// (`LAUNCHER_UPDATE_PUBKEY` = 64 hex-символа). Задан → подпись ОБЯЗАТЕЛЬНА и
 /// проверяется (fail-closed); не задан (dev-сборка) → как раньше, только SHA-256.
@@ -97,6 +107,7 @@ pub fn check_update(api_url: &str) -> Result<UpdateInfo, String> {
     );
     let response = client
         .get(url)
+        .header("X-Launcher-Build", VERSION_MARKER)
         .send()
         .map_err(|_| "Сервер обновлений недоступен.".to_string())?;
     if !response.status().is_success() {
@@ -187,7 +198,28 @@ fn verify_staged_file(path: &Path, info: &UpdateInfo) -> Result<(), String> {
     if !actual.eq_ignore_ascii_case(info.sha256.trim()) {
         return Err("Контрольная сумма обновления не совпала.".to_string());
     }
-    verify_signature(&data, &info.signature)
+    verify_signature(&data, &info.signature)?;
+    verify_declares_version(&data, &info.latest_version)
+}
+
+/// Требует, чтобы скачанный бинарник сам объявлял ЗАЯВЛЕННУЮ версию и был собран под
+/// нашу платформу. Закрывает реплей: подпись старого релиза (или релиза для другой ОС)
+/// валидна по байтам, но маркер версии в нём другой, а формат исполняемого файла чужой.
+fn verify_declares_version(data: &[u8], version: &str) -> Result<(), String> {
+    let want = format!("{}{};", "PMLVER=", version.trim());
+    let bytes = want.as_bytes();
+    if data.len() < bytes.len() || !data.windows(bytes.len()).any(|w| w == bytes) {
+        return Err("Обновление не объявляет заявленную версию — отклонено.".to_string());
+    }
+    let native_format = if cfg!(target_os = "windows") {
+        data.starts_with(b"MZ")
+    } else {
+        data.starts_with(b"\x7fELF")
+    };
+    if !native_format {
+        return Err("Обновление собрано для другой платформы — отклонено.".to_string());
+    }
+    Ok(())
 }
 
 /// Проверяет Ed25519-подпись данных вшитым публичным ключом. Ключ вшит → подпись
@@ -265,6 +297,47 @@ mod tests {
         assert_eq!(compare_versions("0.10.0", "0.9.0"), Ordering::Greater);
         assert_eq!(compare_versions("1.2", "1.2.0"), Ordering::Equal);
         assert_eq!(compare_versions("abc", "0.0.1"), Ordering::Less);
+    }
+
+    // Реплей подписанного старого бинарника под видом новой версии должен отваливаться:
+    // маркер версии внутри файла не совпадёт с заявленным.
+    #[test]
+    fn version_marker_binds_binary_to_declared_version() {
+        let elf_magic: &[u8] = if cfg!(target_os = "windows") {
+            b"MZ"
+        } else {
+            b"\x7fELF"
+        };
+        let mut old_build = elf_magic.to_vec();
+        old_build.extend_from_slice(b"....PMLVER=0.4.0;....");
+
+        assert!(verify_declares_version(&old_build, "0.4.0").is_ok());
+        assert!(
+            verify_declares_version(&old_build, "9.9.9").is_err(),
+            "бинарник версии 0.4.0 нельзя выдавать за 9.9.9"
+        );
+        assert!(
+            verify_declares_version(&old_build, "").is_err(),
+            "пустая версия — не повод пропускать файл"
+        );
+        // Сборка под другую ОС: маркер тот же, формат исполняемого файла чужой.
+        let mut foreign = b"\xCA\xFE\xBA\xBE".to_vec();
+        foreign.extend_from_slice(b"PMLVER=0.4.0;");
+        assert!(verify_declares_version(&foreign, "0.4.0").is_err());
+    }
+
+    // Свой же бинарник обязан содержать маркер собственной версии — иначе проверка
+    // была бы бесполезной (в файлах релиза маркера не окажется).
+    #[test]
+    fn current_binary_declares_its_version() {
+        assert_eq!(VERSION_MARKER, format!("PMLVER={};", CURRENT_VERSION));
+        let exe = std::env::current_exe().expect("current_exe");
+        let data = std::fs::read(exe).expect("read self");
+        let marker = format!("PMLVER={};", CURRENT_VERSION);
+        assert!(
+            data.windows(marker.len()).any(|w| w == marker.as_bytes()),
+            "маркер версии должен попадать в бинарник"
+        );
     }
 
     #[test]
