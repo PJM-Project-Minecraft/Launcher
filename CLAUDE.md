@@ -406,7 +406,11 @@ NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Jav
 - Версия бампится в `launcher-slint/Cargo.toml` → после правки `cargo update -p launcher-slint`.
 
 Workflow заливки:
-1. Сбилдить: `scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz`
+1. Собрать оба бинарника В CI: `gh workflow run build-launcher.yml -f api_url=https://launcher.likonchik.xyz`
+   (матрица windows-x64 + linux-x64, подпись Ed25519 одним ключом из секрета
+   `LAUNCHER_SIGNING_KEY`, проверка «pubkey вшит» и «маркер версии на месте» внутри рана).
+   Скачать артефакты: `gh run download <id>`. Локальный `scripts/prod/build-player-launcher.sh`
+   остался для дев-сборок — подписать им нечего, приватный ключ живёт в секретах GitHub.
 2. Залить через UI дашборда (раздел «Релизы»), multipart.
 3. Перед первой заливкой убедиться, что nginx имеет `client_max_body_size 512m;`.
 
