@@ -54,7 +54,10 @@ func (s *Service) CheckFiles(ctx context.Context, claims LaunchClaims, files []R
 		return false, nil
 	}
 
-	kick := false
+	// Сначала собираем все посторонние файлы, и только потом пишем ОДИН детект на отчёт.
+	// Иначе один запрос превращался в до maxReportedFiles записей БД и столько же
+	// Telegram-алертов (дедуп по сигнатуре не спасает — сигнатуры разные).
+	var bad []ReportedFile
 	for _, f := range files {
 		hash := strings.ToLower(strings.TrimSpace(f.Sha256))
 		if !f.Missing {
@@ -65,23 +68,38 @@ func (s *Service) CheckFiles(ctx context.Context, claims LaunchClaims, files []R
 				continue
 			}
 		}
-		name := baseName(f.Path)
-		severity, confidence, err := s.RecordDetection(ctx, claims, DetectionInput{
-			Source:    "java",
-			Type:      unknownModType,
-			Signature: name,
-			Details:   map[string]any{"name": name, "path": truncate(f.Path, 512), "hash": hash, "missing": f.Missing},
-		})
-		if err != nil {
-			return kick, err
-		}
-		if !s.enforceUnknownMods {
-			continue
-		}
-		if k, _ := s.EvaluateKick(claims, severity, confidence, unknownModType); k {
-			kick = true
-		}
+		f.Sha256 = hash
+		bad = append(bad, f)
 	}
+	if len(bad) == 0 {
+		return false, nil
+	}
+
+	names := make([]string, 0, len(bad))
+	for _, f := range bad[:min(len(bad), 20)] {
+		names = append(names, baseName(f.Path))
+	}
+	first := bad[0]
+	severity, confidence, err := s.RecordDetection(ctx, claims, DetectionInput{
+		Source:    "java",
+		Type:      unknownModType,
+		Signature: baseName(first.Path),
+		Details: map[string]any{
+			"name":    baseName(first.Path),
+			"path":    truncate(first.Path, 512),
+			"hash":    first.Sha256,
+			"missing": first.Missing,
+			"names":   names,
+			"count":   len(bad),
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	if !s.enforceUnknownMods {
+		return false, nil
+	}
+	kick, _ := s.EvaluateKick(claims, severity, confidence, unknownModType)
 	return kick, nil
 }
 
