@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
@@ -13,16 +14,46 @@ import (
 
 const supportMaxLen = 2000
 
+// supportDenyText — почему игроку сейчас нельзя писать в поддержку ("" = можно):
+// админская блокировка или неистёкший КД между сообщениями.
+func (s *Service) supportDenyText(userID string) (string, error) {
+	until, wait, err := repo.SupportDenied(s.ctx(), s.DB, userID)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case until != nil:
+		return fmt.Sprintf(
+			"🚫 Обращения в поддержку для вас <b>заблокированы</b> до %s.\n\n"+
+				"<i>Если считаете это ошибкой — напишите администрации в чате проекта.</i>",
+			escHTML(until.Local().Format("02.01.2006 15:04"))), nil
+	case wait > 0:
+		return fmt.Sprintf(
+			"⏳ Слишком часто. Следующее сообщение в поддержку можно отправить через <b>%d мин</b>.",
+			int(wait.Minutes())+1), nil
+	}
+	return "", nil
+}
+
 // beginSupportFlow — игрок нажал «🆘 Поддержка»: просим описать вопрос одним
 // сообщением. Требует привязанный аккаунт (кому отвечать) и принятую политику.
 func (s *Service) beginSupportFlow(chatID, telegramUID int64) error {
-	if uidPtr, err := s.linkedUID(telegramUID); err != nil {
+	uidPtr, err := s.linkedUID(telegramUID)
+	if err != nil {
 		return err
-	} else if uidPtr == nil {
+	}
+	if uidPtr == nil {
 		return s.forbidNotLinked(chatID, telegramUID)
 	}
 	if blocked, err := s.policyGateText(chatID, telegramUID); err != nil || blocked {
 		return err
+	}
+	deny, err := s.supportDenyText(*uidPtr)
+	if err != nil {
+		return err
+	}
+	if deny != "" {
+		return s.notifyHTML(chatID, deny, keyboardDismiss())
 	}
 	ep := repo.EmptyPayload()
 	_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowSupportMsg, &ep)
@@ -51,6 +82,16 @@ func (s *Service) handleSupportMessage(chatID, telegramUID int64, text string) e
 	}
 	if len(msg) > supportMaxLen {
 		return s.notifyWarn(chatID, fmt.Sprintf("Слишком длинно (макс. %d символов). Сократите и отправьте снова.", supportMaxLen))
+	}
+	// Гейт и здесь, а не только на входе в сценарий: состояние диалога живёт в БД
+	// и переживает и блокировку, и КД, выданные после нажатия кнопки.
+	deny, err := s.supportDenyText(u.ID)
+	if err != nil {
+		return err
+	}
+	if deny != "" {
+		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+		return s.sendHomeMenu(chatID, telegramUID, deny)
 	}
 	id, created, err := repo.CreateOrAppendSupport(s.ctx(), s.DB, u.ID, chatID, msg)
 	if err != nil {
@@ -82,10 +123,99 @@ func supportAdminCard(id uint, login, tgUsername, msg string, created bool) stri
 
 func supportAdminMarkup(id uint) map[string]any {
 	sid := strconv.FormatUint(uint64(id), 10)
-	return telegram.InlineMarkup([]telegram.InlineBtn{
-		{Text: "✍ Ответить", Data: "sup:reply:" + sid},
-		{Text: "✅ Закрыть", Data: "sup:close:" + sid},
-	})
+	return telegram.InlineMarkup(
+		[]telegram.InlineBtn{
+			{Text: "✍ Ответить", Data: "sup:reply:" + sid},
+			{Text: "✅ Закрыть", Data: "sup:close:" + sid},
+		},
+		[]telegram.InlineBtn{{Text: "🚫 Блокировка обращений", Data: "sup:ban:" + sid}},
+	)
+}
+
+// supportBanDurations — предустановленные сроки блокировки обращений (минуты).
+var supportBanDurations = []struct {
+	Label string
+	Mins  int
+}{
+	{"1 час", 60}, {"1 день", 1440}, {"7 дней", 10080}, {"30 дней", 43200},
+}
+
+func supportBanMarkup(id uint) map[string]any {
+	sid := strconv.FormatUint(uint64(id), 10)
+	var rows [][]telegram.InlineBtn
+	var row []telegram.InlineBtn
+	for _, d := range supportBanDurations {
+		row = append(row, telegram.InlineBtn{Text: d.Label, Data: fmt.Sprintf("sup:ban:%s:%d", sid, d.Mins)})
+		if len(row) == 2 {
+			rows, row = append(rows, row), nil
+		}
+	}
+	rows = append(rows, []telegram.InlineBtn{{Text: "♻ Снять блокировку", Data: "sup:ban:" + sid + ":0"}})
+	return telegram.InlineMarkup(rows...)
+}
+
+// handleSupportBan — админ жмёт «🚫 Блокировка обращений»: sup:ban:<id> показывает
+// сроки, sup:ban:<id>:<минуты> применяет (0 — снять).
+func (s *Service) handleSupportBan(cb *tele.Callback, chatID, telegramUID int64, msgID int, data string) error {
+	parts := strings.Split(data, ":") // sup:ban:<id>[:<mins>]
+	if len(parts) < 3 {
+		s.answerCb(cb.ID, "Некорректная кнопка.", true)
+		return nil
+	}
+	id64, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil {
+		s.answerCb(cb.ID, "Некорректный тикет.", true)
+		return nil
+	}
+	t, err := repo.GetSupportTicket(s.ctx(), s.DB, uint(id64))
+	if err != nil {
+		return err
+	}
+	if t == nil {
+		s.answerCb(cb.ID, "Тикет не найден.", true)
+		return nil
+	}
+
+	if len(parts) < 4 {
+		s.answerCb(cb.ID, "", false)
+		return s.notifyHTML(chatID, fmt.Sprintf(
+			"🚫 Блокировка обращений по тикету <b>#%d</b> — на какой срок?", t.ID), supportBanMarkup(t.ID))
+	}
+
+	mins, err := strconv.Atoi(parts[3])
+	if err != nil || mins < 0 {
+		s.answerCb(cb.ID, "Некорректный срок.", true)
+		return nil
+	}
+	var until *time.Time
+	if mins > 0 {
+		u := time.Now().UTC().Add(time.Duration(mins) * time.Minute)
+		until = &u
+	}
+	if err := repo.SetSupportBlock(s.ctx(), s.DB, t.UserID, until); err != nil {
+		return err
+	}
+
+	action := "support_unblock"
+	verdict := fmt.Sprintf("♻ Тикет #%d: блокировка обращений снята.", t.ID)
+	forPlayer := "♻ Вы снова можете обращаться в поддержку."
+	if until != nil {
+		human := escHTML(until.Local().Format("02.01.2006 15:04"))
+		action = "support_block"
+		verdict = fmt.Sprintf("🚫 Тикет #%d: обращения заблокированы до %s.", t.ID, human)
+		forPlayer = fmt.Sprintf("🚫 Доступ к обращениям в поддержку закрыт до <b>%s</b>.", human)
+	}
+	details := strconv.Itoa(mins) + "m"
+	_ = repo.InsertAudit(s.ctx(), s.DB, &telegramUID, nil, &t.UserID, action, &details)
+
+	s.answerCb(cb.ID, "", false)
+	if err := s.notifyHTML(t.ChatID, forPlayer, keyboardDismiss()); err != nil && s.Log != nil {
+		s.Log.Warn("support: уведомление о блокировке", "chat", t.ChatID, "err", err)
+	}
+	if err := telegram.EditMessageTextHTML(s.HTTP, s.Cfg.TelegramBotToken, chatID, msgID, verdict, nil, nil); err != nil && s.Log != nil {
+		s.Log.Warn("support: правка карточки блокировки", "err", err)
+	}
+	return nil
 }
 
 // notifyAdminsSupport рассылает тикет всем допущенным админам/модераторам.
@@ -119,6 +249,10 @@ func (s *Service) handleSupportAction(cb *tele.Callback, chatID, telegramUID int
 	if adm == nil {
 		s.answerCb(cb.ID, "Тикеты обрабатывают только администраторы.", true)
 		return nil
+	}
+
+	if strings.HasPrefix(data, "sup:ban:") {
+		return s.handleSupportBan(cb, chatID, telegramUID, msgID, data)
 	}
 
 	rest, isClose := "", false

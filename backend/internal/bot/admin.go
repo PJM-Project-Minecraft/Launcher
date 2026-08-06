@@ -58,7 +58,7 @@ func (s *Service) adminOpsKeyboardMarkup() map[string]any {
 	k := &telegram.ReplyKeyboardStyled{
 		Rows: [][]telegram.KeyboardBtn{
 			{{Text: "🔍 Поиск", Style: "primary"}, {Text: "📊 Статистика", Style: "success"}},
-			{{Text: "🆘 Заявки", Style: "primary"}, {Text: "📡 OPS", Style: "success"}},
+			{{Text: "📡 OPS", Style: "success"}},
 			{{Text: "⬅ Выйти из админки", Style: "danger"}},
 		},
 		Resize:           true,
@@ -87,7 +87,6 @@ func (s *Service) adminPanelIntro(chatID int64) error {
 		"🛠 <b>Панель администратора</b>\n"+
 			"• «🔍 Поиск» — найти игрока (ник, логин, почта, id) и управлять аккаунтом.\n"+
 			"• «📊 Статистика» — сводка по базе игроков.\n"+
-			"• «🆘 Заявки» — очередь запросов на сброс пароля.\n"+
 			"• «📡 OPS» — дайджест сервисов.\n"+
 			"• «⬅ Выйти из админки» — вернуться в обычное меню.",
 		s.adminOpsKeyboardMarkup())
@@ -116,9 +115,6 @@ func (s *Service) adminMenuActions(chatID int64, telegramUID int64, text string,
 	case "📊 Статистика":
 		return s.adminStats(chatID)
 
-	case "🆘 Заявки":
-		return s.adminPendingPwdResets(chatID)
-
 	case "⬅ Выйти из админки":
 		if err := repo.ClearDialogue(s.ctx(), s.DB, chatID); err != nil {
 			return err
@@ -129,7 +125,7 @@ func (s *Service) adminMenuActions(chatID int64, telegramUID int64, text string,
 		return s.sendHomeMenu(chatID, telegramUID, "")
 
 	default:
-		return s.notifyWarn(chatID, "Выберите кнопку на админ-клавиатуре («Поиск», «Статистика», «Заявки», «OPS», «Выйти») или /cancel.")
+		return s.notifyWarn(chatID, "Выберите кнопку на админ-клавиатуре («Поиск», «Статистика», «OPS», «Выйти») или /cancel.")
 	}
 }
 
@@ -145,31 +141,9 @@ func (s *Service) adminStats(chatID int64) error {
 			"🔗 Привязано к Telegram: <b>%d</b>\n"+
 			"🛡 Со включённой 2FA: <b>%d</b>\n"+
 			"🚫 В бане (акк или HWID): <b>%d</b>\n"+
-			"🆕 Новых за 7 дней: <b>%d</b>\n"+
-			"🆘 Заявок на пароль в очереди: <b>%d</b>",
-		st.Total, st.Linked, st.TotpOn, st.Banned, st.NewWeek, st.PwdReqs)
+			"🆕 Новых за 7 дней: <b>%d</b>",
+		st.Total, st.Linked, st.TotpOn, st.Banned, st.NewWeek)
 	return s.notifyHTML(chatID, body, s.adminOpsKeyboardMarkup())
-}
-
-// adminPendingPwdResets — очередь заявок «забыл пароль»: карточка с кнопками на каждую.
-func (s *Service) adminPendingPwdResets(chatID int64) error {
-	reqs, err := repo.ListPendingPwdResets(s.ctx(), s.DB)
-	if err != nil {
-		return err
-	}
-	if len(reqs) == 0 {
-		return s.notifyHTML(chatID, "🆘 Ожидающих заявок на сброс пароля нет.", s.adminOpsKeyboardMarkup())
-	}
-	for _, r := range reqs {
-		u, err := repo.FindUserByID(s.ctx(), s.DB, r.UserID)
-		if err != nil || u == nil {
-			continue
-		}
-		if err := s.notifyHTML(chatID, pwdResetAdminCard(r.ID, u), pwdResetAdminMarkup(r.ID)); err != nil && s.Log != nil {
-			s.Log.Warn("очередь заявок: карточка", "id", r.ID, "err", err)
-		}
-	}
-	return nil
 }
 
 func (s *Service) adminSearch(chatID int64, query string, adminOpt *adminContext) error {

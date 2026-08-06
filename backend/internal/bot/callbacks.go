@@ -53,11 +53,7 @@ func (s *Service) HandleCallback(c tele.Context) error {
 	msgID := cb.Message.ID
 	data := normalizeCallbackData(cb.Data)
 
-	// Решения по заявкам на сброс пароля — отдельная админ-ветка (pr:ok:<id> / pr:no:<id>).
-	if strings.HasPrefix(data, "pr:") {
-		return s.handlePwdResetDecision(cb, chatID, telegramUID, msgID, data)
-	}
-	// Действия админа по тикетам поддержки (sup:reply:<id> / sup:close:<id>).
+	// Действия админа по тикетам поддержки (sup:reply:<id> / sup:close:<id> / sup:ban:<id>).
 	if strings.HasPrefix(data, "sup:") {
 		return s.handleSupportAction(cb, chatID, telegramUID, msgID, data)
 	}

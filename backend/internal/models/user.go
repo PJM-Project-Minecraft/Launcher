@@ -38,6 +38,9 @@ type User struct {
 	// Блокировки и последний вход.
 	IsBanned     bool   `gorm:"not null;default:false" json:"isBanned"`
 	IsHwidBanned bool   `gorm:"not null;default:false" json:"isHwidBanned"`
+	// SupportBlockedUntil — до какого момента игроку закрыто обращение в поддержку
+	// (nil или прошедшее время = можно писать). Ставится админом из карточки тикета.
+	SupportBlockedUntil *time.Time `json:"supportBlockedUntil,omitempty"`
 	HardwareID   string `gorm:"size:512" json:"-"`
 	IPAddress    string `gorm:"size:64" json:"-"`
 

@@ -412,6 +412,20 @@ func DecidePwdReset(ctx context.Context, db *gorm.DB, id uint, status, decidedBy
 	return res.RowsAffected > 0, res.Error
 }
 
+// LastPwdResetAt — когда игрок последний раз сбрасывал пароль (nil — никогда).
+func LastPwdResetAt(ctx context.Context, db *gorm.DB, userID string) (*time.Time, error) {
+	var r models.BotPasswordReset
+	err := db.WithContext(ctx).Where("user_id = ?", userID).
+		Order("created_at DESC").First(&r).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r.CreatedAt, nil
+}
+
 func ListPendingPwdResets(ctx context.Context, db *gorm.DB) ([]models.BotPasswordReset, error) {
 	var out []models.BotPasswordReset
 	err := db.WithContext(ctx).
@@ -469,6 +483,44 @@ func GetSupportTicket(ctx context.Context, db *gorm.DB, id uint) (*models.BotSup
 		return nil, err
 	}
 	return &t, nil
+}
+
+// SupportCooldown — минимальная пауза между сообщениями игрока в поддержку.
+const SupportCooldown = 5 * time.Minute
+
+// SupportDenied — почему игроку сейчас нельзя писать в поддержку: until != nil —
+// админская блокировка, wait > 0 — не выдержан КД с прошлого сообщения.
+// Оба нуля = можно писать. КД считается по открытому тикету: после закрытия
+// игрок пишет сразу (закрыть может только админ, спам через это не пройдёт).
+func SupportDenied(ctx context.Context, db *gorm.DB, userID string) (until *time.Time, wait time.Duration, err error) {
+	var u models.User
+	if err := db.WithContext(ctx).Where("id = ?", userID).First(&u).Error; err != nil {
+		return nil, 0, err
+	}
+	now := time.Now().UTC()
+	if u.SupportBlockedUntil != nil && u.SupportBlockedUntil.After(now) {
+		return u.SupportBlockedUntil, 0, nil
+	}
+	var t models.BotSupportTicket
+	e := db.WithContext(ctx).
+		Where("user_id = ? AND status = ?", userID, models.SupportOpen).
+		First(&t).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		return nil, 0, nil
+	}
+	if e != nil {
+		return nil, 0, e
+	}
+	if left := SupportCooldown - now.Sub(t.UpdatedAt.UTC()); left > 0 {
+		return nil, left, nil
+	}
+	return nil, 0, nil
+}
+
+// SetSupportBlock ставит блокировку обращений до until (nil — снять).
+func SetSupportBlock(ctx context.Context, db *gorm.DB, userID string, until *time.Time) error {
+	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).
+		Updates(map[string]any{"support_blocked_until": until, "updated_at": time.Now().UTC()}).Error
 }
 
 // CloseSupportTicket закрывает открытый тикет; false, если он уже закрыт.
