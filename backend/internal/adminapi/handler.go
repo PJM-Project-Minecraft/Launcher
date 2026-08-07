@@ -5,8 +5,10 @@ package adminapi
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"launcher-backend/internal/auth"
+	"launcher-backend/internal/models"
 	"launcher-backend/internal/repo"
 
 	"github.com/gofiber/fiber/v3"
@@ -37,6 +39,8 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	g.Delete("/users/:id", h.deleteUser)
 	g.Get("/auth-logs", h.authLogs)
 	g.Get("/audit-logs", h.auditLogs)
+	g.Get("/game/players", h.listGamePlayers)
+	g.Post("/game/players/:uuid/adjust", h.adjustGamePlayerXP)
 }
 
 func atoiQuery(c fiber.Ctx, key string, def int) int {
@@ -159,4 +163,61 @@ func (h Handler) audit(c fiber.Ctx, targetID, action, details string) {
 		detailsPtr = &details
 	}
 	_ = repo.InsertAudit(c.Context(), h.db, nil, &adminID, &target, action, detailsPtr)
+}
+
+const gamePlayersPageSize = 50
+
+// listGamePlayers — зеркало игрового прогресса. Только чтение: XP правится
+// исключительно через очередь (adjustGamePlayerXP), которую разбирает мод.
+func (h Handler) listGamePlayers(c fiber.Ctx) error {
+	page := atoiQuery(c, "page", 1)
+	query := h.db.Model(&models.PlayerProfile{})
+	if q := strings.TrimSpace(c.Query("q", "")); q != "" {
+		query = query.Where("name LIKE ?", "%"+q+"%")
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(errorResponse{Message: "Не удалось получить список"})
+	}
+	var items []models.PlayerProfile
+	if err := query.Order("xp DESC").
+		Offset((page - 1) * gamePlayersPageSize).Limit(gamePlayersPageSize).
+		Find(&items).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(errorResponse{Message: "Не удалось получить список"})
+	}
+	return c.JSON(fiber.Map{"items": items, "total": total, "page": page, "pageSize": gamePlayersPageSize})
+}
+
+// adjustGamePlayerXP — постановка правки XP в очередь. Прямая запись в PlayerProfile
+// запрещена намеренно: авторитетен игровой сервер, он же применяет правку и присылает
+// новое состояние — иначе пришлось бы разрешать конфликт двух писателей.
+func (h Handler) adjustGamePlayerXP(c fiber.Ctx) error {
+	var req struct {
+		Delta    int64  `json:"delta"`
+		SetValue *int64 `json:"setValue"`
+		Reason   string `json:"reason"`
+	}
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(errorResponse{Message: "Некорректный запрос"})
+	}
+	if req.Delta == 0 && req.SetValue == nil {
+		return c.Status(http.StatusBadRequest).JSON(errorResponse{Message: "Нужен delta или setValue"})
+	}
+
+	createdBy := ""
+	if user, ok := auth.CurrentUser(c); ok {
+		createdBy = user.Login
+	}
+	adj := models.PlayerXpAdjustment{
+		UUID:      c.Params("uuid"),
+		Delta:     req.Delta,
+		SetValue:  req.SetValue,
+		Reason:    req.Reason,
+		CreatedBy: createdBy,
+	}
+	if err := h.db.Create(&adj).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(errorResponse{Message: "Не удалось создать правку"})
+	}
+	return c.Status(http.StatusCreated).JSON(adj)
 }
