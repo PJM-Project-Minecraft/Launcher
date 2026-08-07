@@ -73,6 +73,10 @@ services:
       JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
       # prod: обязателен и != JWT_SECRET (P6). bot тоже зовёт config.Validate() при старте.
       ANTICHEAT_SECRET: "${ANTICHEAT_SECRET:-}"
+      # Та же гоча: Validate() у бота проверяет и GAME_API_SECRET (эндпоинты /api/game/*).
+      # Без passthrough значение из .env до контейнера не доходит — прод уйдёт в crash-loop,
+      # и правкой .env на VPS это не лечится.
+      GAME_API_SECRET: "${GAME_API_SECRET:-}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       ADMIN_TELEGRAM_IDS: "${ADMIN_TELEGRAM_IDS:-}"
       TOTP_ISSUER: "${TOTP_ISSUER:-Launcher Accounts}"

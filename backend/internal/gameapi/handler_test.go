@@ -2,6 +2,7 @@ package gameapi_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -137,5 +138,58 @@ func TestPollReturnsPendingAndAcksApplied(t *testing.T) {
 	}
 	if len(second.Adjustments) != 0 {
 		t.Fatalf("после ACK правок быть не должно, получено %+v", second.Adjustments)
+	}
+}
+
+// TestSyncKeepsNameWhenIncomingEmpty — пустой ник не затирает уже известный.
+// Мод шлёт "" при промахе кеша профилей у офлайн-игрока (а не «ника нет»), и
+// массовый сброс рангов помечает грязными всех исторических игроков разом —
+// безусловный upsert колонки name обнулил бы ники всей таблицы.
+func TestSyncKeepsNameWhenIncomingEmpty(t *testing.T) {
+	app, db := newApp(t)
+	first := `{"players":[{"uuid":"33333333-3333-3333-3333-333333333333","name":"Liko","xp":500,"rankId":"sergeant"}]}`
+	post(t, app, "/api/game/players/sync", first, secret)
+
+	second := `{"players":[{"uuid":"33333333-3333-3333-3333-333333333333","name":"","xp":0,"rankId":"recruit"}]}`
+	if code, out := post(t, app, "/api/game/players/sync", second, secret); code != http.StatusOK {
+		t.Fatalf("ожидался 200, получен %d: %s", code, out)
+	}
+
+	var profile models.PlayerProfile
+	if err := db.First(&profile, "uuid = ?", "33333333-3333-3333-3333-333333333333").Error; err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if profile.Name != "Liko" {
+		t.Fatalf("пустой ник затёр хороший: %+v", profile)
+	}
+	if profile.XP != 0 || profile.RankID != "recruit" {
+		t.Fatalf("остальные колонки обязаны обновиться: %+v", profile)
+	}
+}
+
+// TestSyncLargeBatchIsChunked — вайв на много профилей уходит нарезкой, а не одним
+// statement: на Postgres неограниченный многострочный INSERT пробивает потолок в
+// 65535 параметров (~13k профилей × 5 колонок), запрос падает, мод ретраит вечно.
+func TestSyncLargeBatchIsChunked(t *testing.T) {
+	app, db := newApp(t)
+	var sb strings.Builder
+	sb.WriteString(`{"players":[`)
+	const count = 1200 // заведомо больше размера чанка (500)
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`{"uuid":"` + fmt.Sprintf("00000000-0000-0000-0000-%012d", i) +
+			`","name":"p` + strconv.Itoa(i) + `","xp":` + strconv.Itoa(i) + `,"rankId":"private"}`)
+	}
+	sb.WriteString(`]}`)
+
+	if code, out := post(t, app, "/api/game/players/sync", sb.String(), secret); code != http.StatusOK {
+		t.Fatalf("ожидался 200, получен %d: %s", code, out)
+	}
+	var total int64
+	db.Model(&models.PlayerProfile{}).Count(&total)
+	if total != count {
+		t.Fatalf("сохранено %d из %d", total, count)
 	}
 }

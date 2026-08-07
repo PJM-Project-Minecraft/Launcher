@@ -90,9 +90,19 @@ func (h Handler) syncPlayers(c fiber.Ctx) error {
 	}
 
 	err := h.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "uuid"}},
-		DoUpdates: clause.AssignmentColumns([]string{"name", "xp", "rank_id", "updated_at"}),
-	}).Create(&rows).Error
+		Columns: []clause.Column{{Name: "uuid"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"xp":         gorm.Expr("excluded.xp"),
+			"rank_id":    gorm.Expr("excluded.rank_id"),
+			"updated_at": gorm.Expr("excluded.updated_at"),
+			// Пустой ник — промах кеша профилей у офлайн-игрока, а не «ника нет».
+			// Затирать им уже известный нельзя: заметнее всего после массового сброса
+			// рангов, который помечает грязными всех исторических игроков разом.
+			"name": gorm.Expr("COALESCE(NULLIF(excluded.name, ''), player_profiles.name)"),
+		}),
+		// Нарезка батча: 500 строк × 5 значений заведомо ниже потолка Postgres в 65535
+		// параметров на statement, в который упирался массовый вайп (~13k профилей).
+	}).CreateInBatches(&rows, 500).Error
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"message": "save failed"})
 	}

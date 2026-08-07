@@ -114,7 +114,7 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 - `.dockerignore` в `backend/` исключает `storage/` и `data/` — монтируются томами, не копируются в образ.
 - `docker compose build server` **НЕ пересобирает образ бота** — у них отдельные образы.
 - `JWT_SECRET` в base compose только у `server`; боту добавлен через override.
-- **ANTICHEAT_SECRET:** мало добавить в `.env` — до контейнера доходит только если есть строка `ANTICHEAT_SECRET: "${ANTICHEAT_SECRET:-}"` в секции `environment:` сервиса. Без неё server+bot уходят в crash-loop на `Validate()`.
+- **ANTICHEAT_SECRET и GAME_API_SECRET:** мало добавить в `.env` — до контейнера доходит только если есть строка `ANTICHEAT_SECRET: "${ANTICHEAT_SECRET:-}"` (соответственно `GAME_API_SECRET`) в секции `environment:` сервиса. Без неё server+bot уходят в crash-loop на `Validate()` — обе переменные нужны **обоим** сервисам, `bot` тоже зовёт `Validate()` при старте.
 - **Диск VPS — только 40G.** При 100% postgres падает (`could not write postmaster.pid`), server/bot — следом (502). После сборок чистить кэш: `docker builder prune -af`.
 - **Nginx лимит на аплоад:** для заливки релизов лаунчера через дашборд нужен `client_max_body_size 512m;` в nginx для location бэкенда (:8082). Иначе nginx обрежет multipart-аплоад (BodyLimit 512МБ уже в Fiber, но nginx отрежет первым).
 - Git-деплой: VPS тянет deploy-ключом (`~/.ssh/launcher_deploy`, alias `github-launcher` в `~/.ssh/config`). Нужен `git config --global --add safe.directory /root/Launcher` (файлы uid 1000, git под root).
@@ -212,7 +212,15 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
   Дрифт детектится `GET /api/admin/profiles/:id/drift` (сравнение путей/размеров/mtime без хэширования),
   дашборд показывает предупреждение в секции «Сборка».
 - `news` — новости из Telegram-канала.
-- `adminapi` — управление пользователями для дашборда.
+- `adminapi` — управление пользователями для дашборда, плюс игровые профили PJM BaseMod:
+  `GET /api/admin/game/players` (витрина XP/рангов) и `POST /api/admin/game/players/:uuid/adjust`
+  — правка XP **только через очередь** `player_xp_adjustments`, прямая запись в `player_profiles`
+  запрещена (авторитетен игровой сервер). UUID пути валидируется, мусор → 400.
+- `gameapi` — эндпоинты игрового сервера Minecraft (мод PJM BaseMod), общий секрет
+  `GAME_API_SECRET` в заголовке `X-Game-Secret`: `POST /api/game/players/sync` (батч-upsert
+  прогресса, дедуп по uuid + нарезка по 500 строк) и `POST /api/game/adjustments/poll`
+  (ACK применённых + выдача неприменённых одним round-trip). Замысел и инварианты —
+  `docs/BACKEND_SYNC.md` в репозитории мода.
 - `launcherrelease` — релизы лаунчера (автообновление). Бинарники в `backend/storage/releases/<version>/<platform>/`,
   заливка через дашборд (multipart, лимит 200 МБ/файл на уровне Fiber). Публичные `/api/launcher/update|download`;
   событие `launcher-release` идёт через общий SSE-брокер профилей. Обязательные релизы: anticheat handshake/init
@@ -227,7 +235,8 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 читает `.env` и `backend/.env`. В `APP_ENV=production` `Validate()` **отказывается
 стартовать с дев-секретами** (`dev-only-change-me` и т.п.). Ключевые переменные:
 `DATABASE_URL` (нет → SQLite), `JWT_SECRET`, `ANTICHEAT_SECRET` (нет → деривируется
-из JWT; в продакшне обязан быть явным и отличаться от JWT), `AUTH_MODE`,
+из JWT; в продакшне обязан быть явным и отличаться от JWT), `GAME_API_SECRET`
+(ровно те же требования — деривация из JWT в проде отклоняется `Validate()`), `AUTH_MODE`,
 `TOKEN_TTL_HOURS` (дефолт 168 = 7 дней), `ADMIN_LOGINS`.
 
 **Гоча SSE:** `net/http` буферизует chunked-ответ — в тестах создаётся ложная задержка

@@ -12,6 +12,7 @@ import (
 	"launcher-backend/internal/repo"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -204,13 +205,21 @@ func (h Handler) adjustGamePlayerXP(c fiber.Ctx) error {
 	if req.Delta == 0 && req.SetValue == nil {
 		return c.Status(http.StatusBadRequest).JSON(errorResponse{Message: "Нужен delta или setValue"})
 	}
+	// UUID приходит из пути и никем не проверен. Мод на битый uuid отвечает единственным
+	// разумным способом — ACK без начисления, — так что без этой проверки опечатавшийся
+	// админ получал бы 201 и запись, утверждающую, что правка применена. Пишем
+	// канонический вид: player_profiles.uuid хранится именно так.
+	playerID, err := uuid.Parse(c.Params("uuid"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(errorResponse{Message: "Некорректный UUID игрока"})
+	}
 
 	createdBy := ""
 	if user, ok := auth.CurrentUser(c); ok {
 		createdBy = user.Login
 	}
 	adj := models.PlayerXpAdjustment{
-		UUID:      c.Params("uuid"),
+		UUID:      playerID.String(),
 		Delta:     req.Delta,
 		SetValue:  req.SetValue,
 		Reason:    req.Reason,

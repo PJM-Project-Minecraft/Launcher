@@ -101,3 +101,26 @@ func TestCreateAdjustmentRejectsEmpty(t *testing.T) {
 		t.Fatalf("правка без delta и без setValue должна отклоняться, получен %d", resp.StatusCode)
 	}
 }
+
+// TestCreateAdjustmentRejectsBadUUID — опечатка в UUID не должна давать 201.
+// Мод на нераспознанный uuid отвечает единственным возможным способом — ACK без
+// начисления, — поэтому строка получила бы applied_at, хотя XP никуда не двигался.
+func TestCreateAdjustmentRejectsBadUUID(t *testing.T) {
+	app, db := newAdminApp(t)
+	req, _ := http.NewRequest(http.MethodPost,
+		"/api/admin/game/players/не-uuid/adjust",
+		strings.NewReader(`{"delta":250,"reason":"опечатка"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("test: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("ожидался 400, получен %d", resp.StatusCode)
+	}
+	var count int64
+	db.Model(&models.PlayerXpAdjustment{}).Count(&count)
+	if count != 0 {
+		t.Fatalf("битый uuid не должен порождать запись в очереди, создано %d", count)
+	}
+}
