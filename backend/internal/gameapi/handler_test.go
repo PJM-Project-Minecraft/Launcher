@@ -78,6 +78,33 @@ func TestSyncUpsertsProfile(t *testing.T) {
 	}
 }
 
+// TestSyncDedupesDuplicateUuidWithinBatch — один батч с двумя записями одного uuid.
+// На Postgres многострочный INSERT ... ON CONFLICT DO UPDATE падает с
+// "cannot affect row a second time", если задеть один conflict-key дважды в одном
+// statement — вернулся бы 500 и потерялись бы ВСЕ игроки батча, не только дубль.
+// SQLite (тестовая БД) этого ограничения не соблюдает, поэтому RED здесь получить
+// нельзя честно — тест проверяет результат по содержимому таблицы (последняя запись
+// в батче побеждает) как регрессионную защиту дедупликации, а не по коду ответа.
+func TestSyncDedupesDuplicateUuidWithinBatch(t *testing.T) {
+	app, db := newApp(t)
+	body := `{"players":[` +
+		`{"uuid":"22222222-2222-2222-2222-222222222222","name":"Liko","xp":100,"rankId":"private"},` +
+		`{"uuid":"22222222-2222-2222-2222-222222222222","name":"Liko","xp":700,"rankId":"captain"}` +
+		`]}`
+	if code, out := post(t, app, "/api/game/players/sync", body, secret); code != http.StatusOK {
+		t.Fatalf("ожидался 200, получен %d: %s", code, out)
+	}
+
+	var profiles []models.PlayerProfile
+	db.Find(&profiles)
+	if len(profiles) != 1 {
+		t.Fatalf("ожидалась одна запись после дедупликации, получено %d: %+v", len(profiles), profiles)
+	}
+	if profiles[0].XP != 700 || profiles[0].RankID != "captain" {
+		t.Fatalf("должна победить последняя запись батча: %+v", profiles[0])
+	}
+}
+
 func TestPollReturnsPendingAndAcksApplied(t *testing.T) {
 	app, db := newApp(t)
 	adj := models.PlayerXpAdjustment{UUID: "11111111-1111-1111-1111-111111111111", Delta: 250, Reason: "награда", CreatedBy: "admin"}

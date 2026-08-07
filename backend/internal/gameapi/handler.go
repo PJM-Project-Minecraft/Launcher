@@ -63,17 +63,30 @@ func (h Handler) syncPlayers(c fiber.Ctx) error {
 	}
 
 	now := time.Now()
-	rows := make([]models.PlayerProfile, 0, len(req.Players))
+	// Дедуп по UUID, последняя запись в батче побеждает: Postgres роняет ВЕСЬ
+	// многострочный INSERT ... ON CONFLICT DO UPDATE, если один conflict-key
+	// (uuid) задет дважды в одном statement ("cannot affect row a second time"),
+	// а не только строку-дубль. Дедупим до Create, чтобы одинаковый uuid
+	// встречался в батче не больше раза.
+	byUUID := make(map[string]models.PlayerProfile, len(req.Players))
+	order := make([]string, 0, len(req.Players))
 	for _, p := range req.Players {
 		if p.UUID == "" {
 			continue
 		}
-		rows = append(rows, models.PlayerProfile{
+		if _, seen := byUUID[p.UUID]; !seen {
+			order = append(order, p.UUID)
+		}
+		byUUID[p.UUID] = models.PlayerProfile{
 			UUID: p.UUID, Name: p.Name, XP: p.XP, RankID: p.RankID, UpdatedAt: now,
-		})
+		}
 	}
-	if len(rows) == 0 {
+	if len(order) == 0 {
 		return c.JSON(fiber.Map{"ok": true, "saved": 0})
+	}
+	rows := make([]models.PlayerProfile, 0, len(order))
+	for _, uuid := range order {
+		rows = append(rows, byUUID[uuid])
 	}
 
 	err := h.db.Clauses(clause.OnConflict{
