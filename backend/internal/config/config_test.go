@@ -51,6 +51,24 @@ func TestValidateAllowsEmptyDatabaseURLInDevelopment(t *testing.T) {
 	}
 }
 
+func TestGameAPISecretDerivedFromJWT(t *testing.T) {
+	t.Setenv("JWT_SECRET", "some-long-jwt-secret-value")
+	t.Setenv("GAME_API_SECRET", "")
+	cfg := Load()
+	if cfg.GameAPISecret != "game:some-long-jwt-secret-value" {
+		t.Fatalf("пустой GAME_API_SECRET должен деривироваться из JWT, получено %q", cfg.GameAPISecret)
+	}
+}
+
+func TestGameAPISecretFromEnv(t *testing.T) {
+	t.Setenv("JWT_SECRET", "some-long-jwt-secret-value")
+	t.Setenv("GAME_API_SECRET", "explicit-game-secret")
+	cfg := Load()
+	if cfg.GameAPISecret != "explicit-game-secret" {
+		t.Fatalf("GAME_API_SECRET из env должен использоваться как есть, получено %q", cfg.GameAPISecret)
+	}
+}
+
 func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
 	jwt := "a-real-32-char-random-secret-value"
 	base := Config{AppEnv: "production", JWTSecret: jwt}

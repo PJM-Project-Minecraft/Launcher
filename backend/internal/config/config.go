@@ -64,6 +64,9 @@ type Config struct {
 	// (подкинут в окно между cleanup лаунчера и загрузкой модов). false (дефолт) —
 	// репорт-онли: детект пишется и алертит, игрока не выкидывает.
 	AnticheatUnknownModEnforce bool
+	// GameAPISecret — общий секрет эндпоинтов /api/game/* (мод PJM BaseMod).
+	// Отдельный от античит-секрета: разные потребители, разный радиус утечки.
+	GameAPISecret string
 }
 
 func Load() Config {
@@ -118,6 +121,7 @@ func Load() Config {
 		AnticheatP5Secret:      env("ANTICHEAT_P5_SECRET", ""),
 		AnticheatP5Enforce:     env("ANTICHEAT_P5_ENFORCE", "false") == "true",
 		AnticheatUnknownModEnforce: env("ANTICHEAT_UNKNOWN_MOD_ENFORCE", "false") == "true",
+		GameAPISecret:              env("GAME_API_SECRET", ""),
 	}
 
 	if cfg.JWTSecret == "dev-only-change-me" {
@@ -129,6 +133,11 @@ func Load() Config {
 	if cfg.AnticheatSecret == "" {
 		cfg.AnticheatSecret = "anticheat:" + cfg.JWTSecret
 		slog.Warn("ANTICHEAT_SECRET not set, deriving from JWT secret")
+	}
+
+	if cfg.GameAPISecret == "" {
+		cfg.GameAPISecret = "game:" + cfg.JWTSecret
+		slog.Warn("GAME_API_SECRET not set, deriving from JWT secret")
 	}
 
 	return cfg
