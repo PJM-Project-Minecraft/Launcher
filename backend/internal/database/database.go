@@ -63,5 +63,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.LauncherReleaseFile{},
 		// Скриншоты экранов игроков (античит-запросы от админа).
 		&models.Screenshot{},
+		// Игровой прогресс PJM BaseMod (пишет мод, читают дашборд и бот).
+		&models.PlayerProfile{},
+		&models.PlayerXpAdjustment{},
 	)
 }
