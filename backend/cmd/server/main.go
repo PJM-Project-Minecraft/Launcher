@@ -11,6 +11,7 @@ import (
 	"launcher-backend/internal/config"
 	"launcher-backend/internal/database"
 	"launcher-backend/internal/events"
+	"launcher-backend/internal/gameapi"
 	"launcher-backend/internal/launcherrelease"
 	"launcher-backend/internal/middleware"
 	"launcher-backend/internal/news"
@@ -154,6 +155,9 @@ func main() {
 	if cfg.AnticheatP5Secret != "" {
 		slog.Info("anticheat: P5 in-game handshake enabled", "enforce", cfg.AnticheatP5Enforce)
 	}
+
+	// Игровые эндпоинты мода PJM BaseMod (профиль игрока, очередь правок XP).
+	gameapi.NewHandler(db, cfg.GameAPISecret).RegisterRoutes(app)
 
 	slog.Info(
 		"backend listening",
