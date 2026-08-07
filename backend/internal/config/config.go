@@ -168,6 +168,17 @@ func (c Config) Validate() error {
 	if devSecrets[c.AnticheatSecret] {
 		return errors.New("APP_ENV=production требует настоящий ANTICHEAT_SECRET (сейчас дев-заглушка)")
 	}
+	// GameAPISecret (эндпоинты /api/game/*) в проде должен быть задан ЯВНО и отличаться
+	// от JWT: иначе компрометация одного раскрывает второй, а деривация предсказуема.
+	if c.GameAPISecret == "game:"+c.JWTSecret {
+		return errors.New("APP_ENV=production требует явный GAME_API_SECRET (сейчас деривируется из JWT_SECRET)")
+	}
+	if c.GameAPISecret == c.JWTSecret {
+		return errors.New("GAME_API_SECRET должен отличаться от JWT_SECRET")
+	}
+	if devSecrets[c.GameAPISecret] {
+		return errors.New("APP_ENV=production требует настоящий GAME_API_SECRET (сейчас дев-заглушка)")
+	}
 	// В production обязателен Postgres (DATABASE_URL). Пустой URL молча уводит на SQLite,
 	// что в проде даёт split-brain аккаунтов/банов между репликами и потерю данных.
 	if c.DatabaseURL == "" {

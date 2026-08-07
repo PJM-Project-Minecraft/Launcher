@@ -86,3 +86,26 @@ func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
+	jwt := "a-real-32-char-random-secret-value"
+	base := Config{
+		AppEnv:          "production",
+		JWTSecret:       jwt,
+		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+	}
+
+	cases := map[string]string{
+		"деривированный из JWT": "game:" + jwt,
+		"равен JWT":             jwt,
+		"дев-заглушка":          "dev-only-change-me",
+	}
+	for name, secret := range cases {
+		cfg := base
+		cfg.GameAPISecret = secret
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("GAME_API_SECRET (%s) должен отклоняться в проде", name)
+		}
+	}
+}
