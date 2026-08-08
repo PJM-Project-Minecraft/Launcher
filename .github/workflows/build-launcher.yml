@@ -151,7 +151,9 @@ jobs:
         shell: bash
         run: rm -f backend/ci-signing.key
 
-      - uses: actions/upload-artifact@v4
+      # upload-artifact от GitHub отказывается работать против не-github сервера
+      # (GHESNotSupportedError) — берём форк Forgejo по полному URL.
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: project-minecraft-launcher-${{ steps.version.outputs.version }}-${{ matrix.platform }}
           path: |

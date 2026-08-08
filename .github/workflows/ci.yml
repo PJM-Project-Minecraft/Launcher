@@ -72,7 +72,9 @@ jobs:
       # Java-агент ходит с нативкой в паре (общий файловый протокол) — проверяем и его.
       - name: Java-агент
         run: ./anticheat-agent/build.sh
-      - uses: actions/upload-artifact@v4
+      # upload-artifact от GitHub отказывается работать против не-github сервера
+      # (GHESNotSupportedError) — берём форк Forgejo по полному URL.
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: anticheat-agents-ci
           path: |
