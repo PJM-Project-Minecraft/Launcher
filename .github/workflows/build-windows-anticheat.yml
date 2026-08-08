@@ -1,8 +1,13 @@
-# Ручная сборка нативного античита под Windows (anticheat.dll) через MSVC + CMake.
+# Ручная сборка нативного античита под Windows (anticheat.dll).
 # Запуск: вкладка Actions → Build Windows Anticheat DLL → Run workflow,
 # либо: gh workflow run build-windows-anticheat.yml
 # Готовый anticheat.dll — в артефактах рана; его кладём на прод в backend/data/
 # (scp), бэкенд раздаёт его лаунчерам, SHA сверяется по манифесту.
+#
+# Собираем КРОСС-КОМПИЛЯЦИЕЙ (mingw-w64) на ubuntu-latest, а не MSVC на windows-latest:
+# зеркало репо на git.likonchik.xyz крутит Forgejo Actions, Windows-раннера там нет и
+# джоб висел в очереди вечно. Скрипт тот же, что гоняет ci.yml, — anticheat-native/build-win.sh
+# (mingw 13 из ubuntu 24.04; на 22.04 не линковался IID_IDXGIOutput1 из DXGI).
 name: Build Windows Anticheat DLL
 
 on:
@@ -10,27 +15,19 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # JDK даёт jvmti.h/jni.h и include/win32/jni_md.h — CMakeLists берёт их из JAVA_HOME.
+      # JDK даёт jvmti.h/jni.h; win32/jni_md.h вендорный, build-win.sh берёт его из репо.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - name: Configure
-        run: cmake -B anticheat-native/build -S anticheat-native
-      - name: Build (Release)
-        run: cmake --build anticheat-native/build --config Release
-      - name: Collect dll
-        shell: bash
-        run: |
-          mkdir -p dist
-          # MSVC кладёт результат в build/Release/anticheat.dll — копируем стабильным путём.
-          find anticheat-native/build -name 'anticheat.dll' -print -exec cp {} dist/ \;
-          test -f dist/anticheat.dll
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: Build (mingw-w64)
+        run: ./anticheat-native/build-win.sh
       - uses: actions/upload-artifact@v4
         with:
           name: anticheat-dll-windows-x64
-          path: dist/anticheat.dll
+          path: backend/data/anticheat.dll
           if-no-files-found: error

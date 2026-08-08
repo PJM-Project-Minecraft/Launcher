@@ -1,4 +1,4 @@
-# Ручная сборка плеер-лаунчера под Windows (MSVC) и Linux с зашитым URL бэкенда
+# Ручная сборка плеер-лаунчера под Windows (mingw-w64, кросс) и Linux с зашитым URL бэкенда
 # и подписью автообновления. Один ран — оба бинарника, подписаны ОДНИМ ключом.
 #
 # Запуск: вкладка Actions → Build Launcher Release → Run workflow,
@@ -32,24 +32,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - target: x86_64-pc-windows-gnu
             platform: windows-x64
             binary: launcher-slint.exe
             artifact_name: ProjectMinecraftLauncher.exe
-          - os: ubuntu-latest
+          - target: x86_64-unknown-linux-gnu
             platform: linux-x64
             binary: launcher-slint
             artifact_name: project-minecraft-launcher
-    runs-on: ${{ matrix.os }}
+    # Оба таргета собираются на Linux: зеркало репо на git.likonchik.xyz крутит Forgejo
+    # Actions, Windows-раннера там нет и windows-джоб висел в очереди вечно.
+    # Windows-бинарник — кросс-компиляция mingw-w64 (x86_64-pc-windows-gnu), как и anticheat.dll.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Linux build deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - name: Build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+          # mingw нужен и как линкер, и как windres для winresource (иконка/манифест .exe).
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
+            sudo apt-get install -y gcc-mingw-w64-x86-64
+          fi
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: launcher-slint
+          key: ${{ matrix.target }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
@@ -85,7 +96,8 @@ jobs:
         env:
           LAUNCHER_DEFAULT_API_URL: ${{ inputs.api_url }}
           LAUNCHER_UPDATE_PUBKEY: ${{ steps.resolve.outputs.pubkey }}
-        run: cargo build --release --locked
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Read version
         id: version
@@ -96,7 +108,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "launcher-slint/target/release/${{ matrix.binary }}" "dist/${{ matrix.artifact_name }}"
+          cp "launcher-slint/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact_name }}"
           chmod +x "dist/${{ matrix.artifact_name }}" || true
 
       # Страховка: публичный ключ реально попал в бинарник (иначе лаунчер не проверял бы подпись).
