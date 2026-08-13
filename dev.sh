@@ -5,7 +5,6 @@
 # Components:
 #   • Docker   — PostgreSQL, Redis, MinIO (if Docker is available)
 #   • Backend  — Go + Fiber (backend/cmd/server)
-#   • Dashboard — Next.js  (dashboard/)
 #
 # If Docker is not installed, the backend will use SQLite instead of PostgreSQL.
 # Press Ctrl+C to gracefully stop everything.
@@ -28,7 +27,6 @@ COLOR_REDIS="\033[38;5;196m"    # red
 COLOR_MINIO="\033[38;5;208m"    # orange
 COLOR_BACKEND="\033[38;5;76m"   # green
 COLOR_BOT="\033[38;5;45m"       # cyan
-COLOR_DASHBOARD="\033[38;5;213m" # pink
 COLOR_SYSTEM="\033[38;5;245m"   # gray
 COLOR_ERROR="\033[38;5;196m"    # red
 COLOR_SUCCESS="\033[38;5;82m"   # bright green
@@ -66,7 +64,6 @@ banner() {
   fi
   echo -e "${BOLD}${COLOR_SYSTEM}║${RESET}  ${COLOR_BACKEND}■${RESET} Backend    ${DIM}Go + Fiber  → :8080${RESET}                           ${BOLD}${COLOR_SYSTEM}║${RESET}"
   echo -e "${BOLD}${COLOR_SYSTEM}║${RESET}  ${COLOR_BOT}■${RESET} Telegram   ${DIM}Bot (cmd/bot, optional)${RESET}                       ${BOLD}${COLOR_SYSTEM}║${RESET}"
-  echo -e "${BOLD}${COLOR_SYSTEM}║${RESET}  ${COLOR_DASHBOARD}■${RESET} Dashboard  ${DIM}Next.js     → :3000${RESET}                           ${BOLD}${COLOR_SYSTEM}║${RESET}"
   echo -e "${BOLD}${COLOR_SYSTEM}╠══════════════════════════════════════════════════════════════╣${RESET}"
   echo -e "${BOLD}${COLOR_SYSTEM}║${RESET}  ${DIM}Press Ctrl+C to stop all services${RESET}                          ${BOLD}${COLOR_SYSTEM}║${RESET}"
   echo -e "${BOLD}${COLOR_SYSTEM}╚══════════════════════════════════════════════════════════════╝${RESET}"
@@ -115,9 +112,6 @@ check_deps() {
     HAS_DOCKER=false
     log "$COLOR_WARN" "SYSTEM" "Docker not available — using SQLite fallback"
   fi
-
-  command -v node    &>/dev/null || missing+=("node")
-  command -v npm     &>/dev/null || missing+=("npm")
 
   # Source Go toolchain if needed
   if ! command -v go &>/dev/null; then
@@ -232,22 +226,6 @@ else
   log "$COLOR_WARN" "BOT" "TELEGRAM_BOT_TOKEN не задан — Telegram-бот пропущен (см. backend/.env)"
 fi
 
-# ─── 3. Dashboard ─────────────────────────────────────────────────────────────
-log "$COLOR_DASHBOARD" "DASHBOARD" "Starting Next.js dashboard..."
-
-# Install deps if needed
-if [[ ! -d "$SCRIPT_DIR/dashboard/node_modules" ]]; then
-  log "$COLOR_DASHBOARD" "DASHBOARD" "Installing dependencies..."
-  npm --prefix "$SCRIPT_DIR/dashboard" install 2>&1 | log_prefixed "$COLOR_DASHBOARD" "DASHBOARD"
-fi
-
-(
-  cd "$SCRIPT_DIR/dashboard"
-  export NEXT_PUBLIC_API_URL="http://127.0.0.1:8080"
-  npx next dev 2>&1 | log_prefixed "$COLOR_DASHBOARD" "DASHBOARD"
-) &
-PIDS+=($!)
-
 # ─── Status summary ───────────────────────────────────────────────────────────
 sleep 3
 echo ""
@@ -265,7 +243,6 @@ if $BOT_TOKEN_PRESENT; then
 else
   echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_WARN}Telegram bot${RESET} →  ${DIM}пропущен (нет TELEGRAM_BOT_TOKEN)${RESET}          ${BOLD}${COLOR_SYSTEM}│${RESET}"
 fi
-echo -e "${BOLD}${COLOR_SYSTEM}│${RESET}  ${COLOR_DASHBOARD}Dashboard${RESET}    →  127.0.0.1:${BOLD}3000${RESET}                          ${BOLD}${COLOR_SYSTEM}│${RESET}"
 echo -e "${BOLD}${COLOR_SYSTEM}└──────────────────────────────────────────────────────────────┘${RESET}"
 echo ""
 

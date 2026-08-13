@@ -24,7 +24,6 @@ MC_PORT="${MC_PORT:-25565}"
 START_BACKEND=1
 START_MC_SERVER=1
 START_LAUNCHER=1
-START_DASHBOARD="${START_DASHBOARD:-0}"
 BUILD_LAUNCHER="${BUILD_LAUNCHER:-1}"
 
 PIDS=()
@@ -36,7 +35,6 @@ DIM="$(printf '\033[2m')"
 GREEN="$(printf '\033[38;5;76m')"
 YELLOW="$(printf '\033[38;5;220m')"
 BLUE="$(printf '\033[38;5;39m')"
-PINK="$(printf '\033[38;5;213m')"
 GRAY="$(printf '\033[38;5;245m')"
 RED="$(printf '\033[38;5;196m')"
 
@@ -49,13 +47,12 @@ Options:
   --no-server            Do not start the Minecraft test server
   --no-launcher          Do not start the Slint launcher
   --no-build-launcher    Do not rebuild launcher-slint release binary
-  --dashboard            Also start the Next.js dashboard on :3000
   --server-dir PATH      Minecraft test server directory
   -h, --help             Show this help
 
 Environment overrides:
   TEST_SERVER_DIR, SERVER_ADDR, PUBLIC_BASE_URL, AUTHLIB_INJECTOR_PATH,
-  MC_HOST, MC_PORT, START_DASHBOARD, BUILD_LAUNCHER
+  MC_HOST, MC_PORT, BUILD_LAUNCHER
 EOF
 }
 
@@ -72,9 +69,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-build-launcher)
       BUILD_LAUNCHER=0
-      ;;
-    --dashboard)
-      START_DASHBOARD=1
       ;;
     --server-dir)
       if [[ $# -lt 2 ]]; then
@@ -263,27 +257,6 @@ start_mc_server() {
   wait_for_port "MC" "$MC_HOST" "$MC_PORT" 60 "$BLUE"
 }
 
-start_dashboard() {
-  if [[ "$START_DASHBOARD" != "1" ]]; then
-    return
-  fi
-
-  if port_open "127.0.0.1" "3000"; then
-    log "$YELLOW" "DASHBOARD" "127.0.0.1:3000 is already listening; reusing it"
-    return
-  fi
-
-  need_cmd npm
-
-  log "$PINK" "DASHBOARD" "Starting dashboard at 127.0.0.1:3000"
-  (
-    cd "$ROOT_DIR/dashboard"
-    export NEXT_PUBLIC_API_URL="$PUBLIC_BASE_URL"
-    exec npm run dev
-  ) > >(prefix_output "$PINK" "DASHBOARD") 2>&1 &
-  track_pid "$!" "dashboard"
-}
-
 start_launcher() {
   if (( START_LAUNCHER == 0 )); then
     log "$YELLOW" "LAUNCHER" "Skipped by --no-launcher"
@@ -325,7 +298,6 @@ echo ""
 
 start_backend
 start_mc_server
-start_dashboard
 start_launcher
 
 echo ""
