@@ -10,8 +10,6 @@
     "build": "npm run build:launcher",
     "build:web": "tsc && vite build",
     "build:launcher": "sh -c '. \"$HOME/.cargo/env\" 2>/dev/null || true; cargo build --release --manifest-path launcher-slint/Cargo.toml'",
-    "dev:dashboard": "npm --prefix dashboard run dev",
-    "build:dashboard": "npm --prefix dashboard run build",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev"

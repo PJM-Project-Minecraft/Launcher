@@ -52,19 +52,9 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com
 
 ## Admin Dashboard
 
-The web app is reserved for administration and lives in `dashboard/`.
-
-```bash
-npm --prefix dashboard install
-NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 npm --prefix dashboard run dev
-```
-
-Root shortcuts are also available:
-
-```bash
-npm run dev:dashboard
-npm run build:dashboard
-```
+Админка переехала в проект сайта: `/home/liko/Разработка/WEB`, маршрут
+`https://pjm.likonchik.xyz/admin` (код в `app/admin/`). Бэкенд-API админки
+(`/api/admin/*`) остаётся здесь, в `backend/internal/adminapi`.
 
 ## Auth Contract
 
