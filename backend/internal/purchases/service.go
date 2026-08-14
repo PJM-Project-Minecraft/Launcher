@@ -48,10 +48,10 @@ type ListOptions struct {
 }
 
 type OrderPage struct {
-	Items    []models.Order
-	Total    int64
-	Page     int
-	PageSize int
+	Items    []models.Order `json:"items"`
+	Total    int64          `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"pageSize"`
 }
 
 type TopItem struct {
@@ -403,7 +403,12 @@ func (s Service) Stats(ctx context.Context, from, to string) (Stats, error) {
 	).Scan(&totals).Error; err != nil {
 		return Stats{}, err
 	}
-	stats := Stats{Revenue: totals.Revenue, Orders: totals.Orders, Pending: totals.Pending}
+	stats := Stats{
+		Revenue: totals.Revenue,
+		Orders:  totals.Orders,
+		Pending: totals.Pending,
+		Top:     make([]TopItem, 0),
+	}
 
 	topQuery := s.topItemsQuery(ctx)
 	if topQuery == nil {

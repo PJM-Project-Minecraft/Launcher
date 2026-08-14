@@ -191,6 +191,41 @@ func TestEmptyConfiguredSecretKeepsSiteEndpointClosed(t *testing.T) {
 	}
 }
 
+func TestEmptyAdminResponsesUseStableJSONContract(t *testing.T) {
+	app, _ := newApp(t)
+
+	code, out := request(t, app, http.MethodGet, "/api/admin/orders", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("list: %d %s", code, out)
+	}
+	var list map[string]any
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatal(err)
+	}
+	items, ok := list["items"].([]any)
+	if !ok || len(items) != 0 || list["total"] != float64(0) || list["page"] != float64(1) || list["pageSize"] != float64(50) {
+		t.Fatalf("нестабильный контракт пустого списка: %s", out)
+	}
+	for _, legacyKey := range []string{"Items", "Total", "Page", "PageSize"} {
+		if _, exists := list[legacyKey]; exists {
+			t.Fatalf("ответ содержит Go-имя поля %q: %s", legacyKey, out)
+		}
+	}
+
+	code, out = request(t, app, http.MethodGet, "/api/admin/orders/stats", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("stats: %d %s", code, out)
+	}
+	var stats map[string]any
+	if err := json.Unmarshal([]byte(out), &stats); err != nil {
+		t.Fatal(err)
+	}
+	topItems, ok := stats["topItems"].([]any)
+	if !ok || len(topItems) != 0 {
+		t.Fatalf("topItems пустой статистики должен быть массивом: %s", out)
+	}
+}
+
 func TestCreateOrderValidatesServerPayload(t *testing.T) {
 	app, _ := newApp(t)
 	cases := []string{
