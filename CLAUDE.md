@@ -114,7 +114,7 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 - `.dockerignore` в `backend/` исключает `storage/` и `data/` — монтируются томами, не копируются в образ.
 - `docker compose build server` **НЕ пересобирает образ бота** — у них отдельные образы.
 - `JWT_SECRET` в base compose только у `server`; боту добавлен через override.
-- **ANTICHEAT_SECRET и GAME_API_SECRET:** мало добавить в `.env` — до контейнера доходит только если есть строка `ANTICHEAT_SECRET: "${ANTICHEAT_SECRET:-}"` (соответственно `GAME_API_SECRET`) в секции `environment:` сервиса. Без неё server+bot уходят в crash-loop на `Validate()` — обе переменные нужны **обоим** сервисам, `bot` тоже зовёт `Validate()` при старте.
+- **ANTICHEAT_SECRET, GAME_API_SECRET и SITE_ORDER_SECRET:** мало добавить в `.env` — до контейнера значение доходит только при явном passthrough в `environment:` сервиса. Без него server+bot уходят в crash-loop на `Validate()` — все три переменные нужны **обоим** сервисам, `bot` тоже зовёт `Validate()` при старте. `SITE_ORDER_SECRET` совпадает с `SITE_BACKEND_SECRET` проекта WEB.
 - **Диск VPS — только 40G.** При 100% postgres падает (`could not write postmaster.pid`), server/bot — следом (502). После сборок чистить кэш: `docker builder prune -af`.
 - **Nginx лимит на аплоад:** для заливки релизов лаунчера через дашборд нужен `client_max_body_size 512m;` в nginx для location бэкенда (:8082). Иначе nginx обрежет multipart-аплоад (BodyLimit 512МБ уже в Fiber, но nginx отрежет первым).
 - Git-деплой: VPS тянет deploy-ключом (`~/.ssh/launcher_deploy`, alias `github-launcher` в `~/.ssh/config`). Нужен `git config --global --add safe.directory /root/Launcher` (файлы uid 1000, git под root).
@@ -221,6 +221,9 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
   прогресса, дедуп по uuid + нарезка по 500 строк) и `POST /api/game/adjustments/poll`
   (ACK применённых + выдача неприменённых одним round-trip). Замысел и инварианты —
   `docs/BACKEND_SYNC.md` в репозитории мода.
+- `purchases` — приём подтверждённых YooKassa-заказов сайта (`POST /api/site/orders`,
+  `X-Site-Secret`), идемпотентное хранение и админские список/статистика/ручная выдача
+  на `/api/admin/orders/*`. Денежные значения хранятся в копейках, `order_id` — UUID.
 - `launcherrelease` — релизы лаунчера (автообновление). Бинарники в `backend/storage/releases/<version>/<platform>/`,
   заливка через дашборд (multipart, лимит 200 МБ/файл на уровне Fiber). Публичные `/api/launcher/update|download`;
   событие `launcher-release` идёт через общий SSE-брокер профилей. Обязательные релизы: anticheat handshake/init
@@ -236,8 +239,9 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 стартовать с дев-секретами** (`dev-only-change-me` и т.п.). Ключевые переменные:
 `DATABASE_URL` (нет → SQLite), `JWT_SECRET`, `ANTICHEAT_SECRET` (нет → деривируется
 из JWT; в продакшне обязан быть явным и отличаться от JWT), `GAME_API_SECRET`
-(ровно те же требования — деривация из JWT в проде отклоняется `Validate()`), `AUTH_MODE`,
-`TOKEN_TTL_HOURS` (дефолт 168 = 7 дней), `ADMIN_LOGINS`.
+(ровно те же требования — деривация из JWT в проде отклоняется `Validate()`),
+`SITE_ORDER_SECRET` (WEB→backend, в production обязателен и отличается от остальных
+секретов), `AUTH_MODE`, `TOKEN_TTL_HOURS` (дефолт 168 = 7 дней), `ADMIN_LOGINS`.
 
 **Гоча SSE:** `net/http` буферизует chunked-ответ — в тестах создаётся ложная задержка
 ~15с (кратно heartbeat). Тестировать SSE-доставку нужно **сырым TCP-сокетом**

@@ -56,6 +56,19 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com
 `https://pjm.likonchik.xyz/admin` (код в `app/admin/`). Бэкенд-API админки
 (`/api/admin/*`) остаётся здесь, в `backend/internal/adminapi`.
 
+### Покупки сайта
+
+Подтверждённые YooKassa-заказы принимает `POST /api/site/orders` с заголовком
+`X-Site-Secret` (`SITE_ORDER_SECRET`). Повтор по `orderId` идемпотентен.
+Админ-JWT открывает список/статистику и ручную отметку выдачи:
+
+- `GET /api/admin/orders?status=&q=&from=&to=&page=`;
+- `GET /api/admin/orders/stats?from=&to=`;
+- `POST /api/admin/orders/:orderId/issue`.
+
+В production `SITE_ORDER_SECRET` обязателен и должен совпадать с
+`SITE_BACKEND_SECRET` проекта WEB, но отличаться от остальных секретов.
+
 ## Auth Contract
 
 The backend sends this payload to the GML custom auth endpoint:

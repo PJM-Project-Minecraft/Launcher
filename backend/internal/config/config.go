@@ -10,32 +10,32 @@ import (
 )
 
 type Config struct {
-	AppEnv              string
-	LogLevel            string
-	ServerAddr          string
-	AuthMode            string
-	AuthProviderURL     string
-	DatabaseURL         string
-	JWTSecret           string
-	SQLitePath          string
-	AllowedOrigins      []string
-	AdminLogins         []string
-	ProfileStorageRoot  string
+	AppEnv             string
+	LogLevel           string
+	ServerAddr         string
+	AuthMode           string
+	AuthProviderURL    string
+	DatabaseURL        string
+	JWTSecret          string
+	SQLitePath         string
+	AllowedOrigins     []string
+	AdminLogins        []string
+	ProfileStorageRoot string
 	// ProfileCDNBase — база публичного зеркала файлов профилей (бакет S3).
 	// Задан → манифест отдаёт absolute download_url на бакет, трафик сборок идёт мимо VPS.
 	// Пусто → файлы качаются с бэкенда по относительному /api/profiles/... (дефолт).
 	// Раскладка ключей в бакете = раскладка storage: <slug>/files/<path>.
-	ProfileCDNBase      string
-	LauncherReleaseRoot string
+	ProfileCDNBase        string
+	LauncherReleaseRoot   string
 	ScreenshotStorageRoot string
-	TelegramChannel     string
-	PublicBaseURL       string
-	YggdrasilKeyPath    string
-	YggdrasilServerName string
-	AuthlibInjectorPath string
-	AnticheatSecret      string
-	AnticheatAutoBan     bool
-	AnticheatAgentPath   string
+	TelegramChannel       string
+	PublicBaseURL         string
+	YggdrasilKeyPath      string
+	YggdrasilServerName   string
+	AuthlibInjectorPath   string
+	AnticheatSecret       string
+	AnticheatAutoBan      bool
+	AnticheatAgentPath    string
 	AnticheatNativeLinux  string
 	AnticheatNativeWin    string
 	AnticheatKickSeverity int
@@ -67,6 +67,8 @@ type Config struct {
 	// GameAPISecret — общий секрет эндпоинтов /api/game/* (мод PJM BaseMod).
 	// Отдельный от античит-секрета: разные потребители, разный радиус утечки.
 	GameAPISecret string
+	// SiteOrderSecret — server-to-server секрет приёма подтверждённых оплат от WEB.
+	SiteOrderSecret string
 }
 
 func Load() Config {
@@ -74,9 +76,9 @@ func Load() Config {
 	loadDotEnv(filepath.Join("backend", ".env"))
 
 	cfg := Config{
-		AppEnv:          env("APP_ENV", "development"),
-		LogLevel:        strings.ToLower(env("LOG_LEVEL", "info")),
-		ServerAddr:      env("SERVER_ADDR", "127.0.0.1:8080"),
+		AppEnv:     env("APP_ENV", "development"),
+		LogLevel:   strings.ToLower(env("LOG_LEVEL", "info")),
+		ServerAddr: env("SERVER_ADDR", "127.0.0.1:8080"),
 		// AUTH_MODE: local — логин валидируется в общей БД (bcrypt+TOTP); http — внешний GML-провайдер.
 		AuthMode:        strings.ToLower(env("AUTH_MODE", "local")),
 		AuthProviderURL: env("AUTH_PROVIDER_URL", "https://pjm.likonchik.xyz/api/gml/auth"),
@@ -101,27 +103,28 @@ func Load() Config {
 			"ALLOWED_ORIGINS",
 			"http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000",
 		)),
-		TelegramChannel:     env("TELEGRAM_NEWS_CHANNEL", "project_minecraft"),
-		PublicBaseURL:       strings.TrimRight(env("PUBLIC_BASE_URL", "http://127.0.0.1:8080"), "/"),
-		YggdrasilKeyPath:    env("YGGDRASIL_KEY_PATH", filepath.Join("data", "yggdrasil_key.pem")),
-		YggdrasilServerName: env("YGGDRASIL_SERVER_NAME", "Project Minecraft"),
-		AuthlibInjectorPath: env("AUTHLIB_INJECTOR_PATH", filepath.Join("data", "authlib-injector.jar")),
-		AnticheatSecret:     env("ANTICHEAT_SECRET", ""),
-		AnticheatAutoBan:    env("ANTICHEAT_AUTO_BAN", "false") == "true",
-		AnticheatAgentPath:   env("ANTICHEAT_AGENT_PATH", filepath.Join("data", "anticheat-agent.jar")),
-		AnticheatNativeLinux:  env("ANTICHEAT_NATIVE_LINUX", filepath.Join("data", "libanticheat.so")),
-		AnticheatNativeWin:    env("ANTICHEAT_NATIVE_WIN", filepath.Join("data", "anticheat.dll")),
-		AnticheatKickSeverity: atoiDefault(env("ANTICHEAT_KICK_SEVERITY", "7"), 7),
-		AnticheatHeartbeatSeconds: atoiDefault(env("ANTICHEAT_HEARTBEAT_TIMEOUT", "90"), 90),
+		TelegramChannel:             env("TELEGRAM_NEWS_CHANNEL", "project_minecraft"),
+		PublicBaseURL:               strings.TrimRight(env("PUBLIC_BASE_URL", "http://127.0.0.1:8080"), "/"),
+		YggdrasilKeyPath:            env("YGGDRASIL_KEY_PATH", filepath.Join("data", "yggdrasil_key.pem")),
+		YggdrasilServerName:         env("YGGDRASIL_SERVER_NAME", "Project Minecraft"),
+		AuthlibInjectorPath:         env("AUTHLIB_INJECTOR_PATH", filepath.Join("data", "authlib-injector.jar")),
+		AnticheatSecret:             env("ANTICHEAT_SECRET", ""),
+		AnticheatAutoBan:            env("ANTICHEAT_AUTO_BAN", "false") == "true",
+		AnticheatAgentPath:          env("ANTICHEAT_AGENT_PATH", filepath.Join("data", "anticheat-agent.jar")),
+		AnticheatNativeLinux:        env("ANTICHEAT_NATIVE_LINUX", filepath.Join("data", "libanticheat.so")),
+		AnticheatNativeWin:          env("ANTICHEAT_NATIVE_WIN", filepath.Join("data", "anticheat.dll")),
+		AnticheatKickSeverity:       atoiDefault(env("ANTICHEAT_KICK_SEVERITY", "7"), 7),
+		AnticheatHeartbeatSeconds:   atoiDefault(env("ANTICHEAT_HEARTBEAT_TIMEOUT", "90"), 90),
 		AnticheatRequireAttestation: env("ANTICHEAT_REQUIRE_ATTESTATION", "false") == "true",
-		TokenTTL:              time.Duration(atoiDefault(env("TOKEN_TTL_HOURS", "168"), 168)) * time.Hour,
-		TrustedProxies:        splitCSV(env("TRUSTED_PROXIES", "")),
-		AnticheatAlertBotToken: env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
-		AnticheatAlertChatID:   env("ANTICHEAT_ALERT_CHAT_ID", ""),
-		AnticheatP5Secret:      env("ANTICHEAT_P5_SECRET", ""),
-		AnticheatP5Enforce:     env("ANTICHEAT_P5_ENFORCE", "false") == "true",
-		AnticheatUnknownModEnforce: env("ANTICHEAT_UNKNOWN_MOD_ENFORCE", "false") == "true",
-		GameAPISecret:              env("GAME_API_SECRET", ""),
+		TokenTTL:                    time.Duration(atoiDefault(env("TOKEN_TTL_HOURS", "168"), 168)) * time.Hour,
+		TrustedProxies:              splitCSV(env("TRUSTED_PROXIES", "")),
+		AnticheatAlertBotToken:      env("ANTICHEAT_ALERT_BOT_TOKEN", ""),
+		AnticheatAlertChatID:        env("ANTICHEAT_ALERT_CHAT_ID", ""),
+		AnticheatP5Secret:           env("ANTICHEAT_P5_SECRET", ""),
+		AnticheatP5Enforce:          env("ANTICHEAT_P5_ENFORCE", "false") == "true",
+		AnticheatUnknownModEnforce:  env("ANTICHEAT_UNKNOWN_MOD_ENFORCE", "false") == "true",
+		GameAPISecret:               env("GAME_API_SECRET", ""),
+		SiteOrderSecret:             env("SITE_ORDER_SECRET", ""),
 	}
 
 	if cfg.JWTSecret == "dev-only-change-me" {
@@ -175,6 +178,15 @@ func (c Config) Validate() error {
 	}
 	if c.GameAPISecret == c.JWTSecret {
 		return errors.New("GAME_API_SECRET должен отличаться от JWT_SECRET")
+	}
+	if c.SiteOrderSecret == "" {
+		return errors.New("APP_ENV=production требует SITE_ORDER_SECRET")
+	}
+	if c.SiteOrderSecret == c.JWTSecret || c.SiteOrderSecret == c.GameAPISecret || c.SiteOrderSecret == c.AnticheatSecret {
+		return errors.New("SITE_ORDER_SECRET должен отличаться от JWT_SECRET, GAME_API_SECRET и ANTICHEAT_SECRET")
+	}
+	if devSecrets[c.SiteOrderSecret] {
+		return errors.New("APP_ENV=production требует настоящий SITE_ORDER_SECRET (сейчас дев-заглушка)")
 	}
 	if devSecrets[c.GameAPISecret] {
 		return errors.New("APP_ENV=production требует настоящий GAME_API_SECRET (сейчас дев-заглушка)")

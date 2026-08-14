@@ -25,6 +25,8 @@ func TestValidateAllowsRealSecretInProduction(t *testing.T) {
 		AppEnv:          "production",
 		JWTSecret:       "a-real-32-char-random-secret-value",
 		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		GameAPISecret:   "a-distinct-game-api-secret-value",
+		SiteOrderSecret: "a-distinct-site-order-secret-value",
 		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
 	}
 	if err := cfg.Validate(); err != nil {
@@ -37,6 +39,8 @@ func TestValidateRejectsEmptyDatabaseURLInProduction(t *testing.T) {
 		AppEnv:          "production",
 		JWTSecret:       "a-real-32-char-random-secret-value",
 		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		GameAPISecret:   "a-distinct-game-api-secret-value",
+		SiteOrderSecret: "a-distinct-site-order-secret-value",
 		// DatabaseURL пуст → тихий SQLite-fallback, запрещён в проде.
 	}
 	if err := cfg.Validate(); err == nil {
@@ -93,6 +97,7 @@ func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
 		AppEnv:          "production",
 		JWTSecret:       jwt,
 		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		SiteOrderSecret: "a-distinct-site-order-secret-value",
 		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
 	}
 
@@ -106,6 +111,31 @@ func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
 		cfg.GameAPISecret = secret
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("GAME_API_SECRET (%s) должен отклоняться в проде", name)
+		}
+	}
+}
+
+func TestValidateRejectsWeakSiteOrderSecret(t *testing.T) {
+	jwt := "a-real-32-char-random-secret-value"
+	base := Config{
+		AppEnv:          "production",
+		JWTSecret:       jwt,
+		AnticheatSecret: "a-distinct-anticheat-secret-value",
+		GameAPISecret:   "a-distinct-game-api-secret-value",
+		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+	}
+
+	for name, secret := range map[string]string{
+		"пуст":            "",
+		"равен JWT":       jwt,
+		"равен game":      base.GameAPISecret,
+		"равен anticheat": base.AnticheatSecret,
+		"дев-заглушка":    "dev-only-change-me",
+	} {
+		cfg := base
+		cfg.SiteOrderSecret = secret
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("SITE_ORDER_SECRET (%s) должен отклоняться в проде", name)
 		}
 	}
 }

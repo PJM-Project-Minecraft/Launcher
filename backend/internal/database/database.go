@@ -66,5 +66,7 @@ func AutoMigrate(db *gorm.DB) error {
 		// Игровой прогресс PJM BaseMod (пишет мод, читают дашборд и бот).
 		&models.PlayerProfile{},
 		&models.PlayerXpAdjustment{},
+		// Оплаченные заказы сайта (YooKassa → ручная/автоматическая выдача).
+		&models.Order{},
 	)
 }

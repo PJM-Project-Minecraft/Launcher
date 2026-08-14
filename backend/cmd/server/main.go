@@ -17,6 +17,7 @@ import (
 	"launcher-backend/internal/news"
 	"launcher-backend/internal/policy"
 	"launcher-backend/internal/profiles"
+	"launcher-backend/internal/purchases"
 	"launcher-backend/internal/yggdrasil"
 
 	"github.com/gofiber/fiber/v3"
@@ -113,6 +114,7 @@ func main() {
 	auth.NewHandler(authService).RegisterRoutes(app)
 	policy.NewHandler(db).RegisterRoutes(app, authService.RequireAuth(), auth.CurrentUser)
 	adminapi.NewHandler(db).RegisterRoutes(app, authService.RequireAuth())
+	purchases.NewHandler(db, cfg.SiteOrderSecret).RegisterRoutes(app, authService.RequireAuth())
 	profilesBroker := events.NewBroker()
 	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot, cfg.ProfileCDNBase), profilesBroker).
 		RegisterRoutes(app, authService.RequireAuth())
