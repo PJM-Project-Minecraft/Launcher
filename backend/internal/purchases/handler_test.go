@@ -32,7 +32,7 @@ func newApp(t *testing.T) (*fiber.App, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Order{}, &models.BotAuditLog{}); err != nil {
+	if err := db.AutoMigrate(&models.Order{}, &models.Delivery{}, &models.ShopItem{}, &models.BotAuditLog{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	app := fiber.New()
@@ -42,6 +42,47 @@ func newApp(t *testing.T) (*fiber.App, *gorm.DB) {
 	}
 	purchases.NewHandler(db, siteSecret).RegisterRoutes(app, admin)
 	return app, db
+}
+
+func TestCreateOrderBuildsDeliveriesFromPaidSnapshot(t *testing.T) {
+	app, db := newApp(t)
+
+	code, out := request(t, app, http.MethodPost, "/api/site/orders", orderBody(orderOne, "Liko", 85000), siteSecret)
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, out)
+	}
+	var deliveries []models.Delivery
+	if err := db.Find(&deliveries).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 1 || deliveries[0].OrderID != orderOne || deliveries[0].Delivery.RoleID != "special_forces" {
+		t.Fatalf("не создана выдача из правила: %+v", deliveries)
+	}
+
+	// Повтор webhook не создаёт вторую выдачу.
+	request(t, app, http.MethodPost, "/api/site/orders", orderBody(orderOne, "Liko", 85000), siteSecret)
+	var count int64
+	db.Model(&models.Delivery{}).Count(&count)
+	if count != 1 {
+		t.Fatalf("повтор создал %d выдач", count)
+	}
+}
+
+func TestLargeItemDeliveryIsSplitWithoutLosingPaidOrder(t *testing.T) {
+	app, db := newApp(t)
+	body := `{"orderId":"` + orderOne + `","nick":"Liko","items":[{"id":3965,"name":"Предмет","qty":101,"price":100,"delivery":{"type":"item","itemId":"minecraft:diamond","count":100}}],"total":10100,"yookassaId":"pay-scale","paidAt":"2026-08-14T12:00:00Z"}`
+
+	code, out := request(t, app, http.MethodPost, "/api/site/orders", body, siteSecret)
+	if code != http.StatusCreated {
+		t.Fatalf("оплаченный заказ потерян из-за правила выдачи: %d %s", code, out)
+	}
+	var orders int64
+	var deliveries []models.Delivery
+	db.Model(&models.Order{}).Count(&orders)
+	db.Order("part_index ASC").Find(&deliveries)
+	if orders != 1 || len(deliveries) != 2 || deliveries[0].Delivery.Count != 10_000 || deliveries[1].Delivery.Count != 100 {
+		t.Fatalf("ожидался сохранённый заказ с выдачей 10000+100: orders=%d deliveries=%+v", orders, deliveries)
+	}
 }
 
 func TestStatsPostgresSQL(t *testing.T) {
@@ -94,7 +135,7 @@ func request(t *testing.T, app *fiber.App, method, path, body, secret string) (i
 
 func orderBody(id, nick string, total int64) string {
 	return `{"orderId":"` + id + `","nick":"` + nick + `","items":[{"id":3965,"name":"Элитное снаряжение","qty":1,"price":` +
-		jsonNumber(total) + `}],"total":` + jsonNumber(total) + `,"yookassaId":"pay-1","paidAt":"2026-08-14T12:00:00Z"}`
+		jsonNumber(total) + `,"delivery":{"type":"role","roleId":"special_forces"}}],"total":` + jsonNumber(total) + `,"yookassaId":"pay-1","paidAt":"2026-08-14T12:00:00Z"}`
 }
 
 func jsonNumber(n int64) string {
@@ -119,6 +160,18 @@ func TestCreateOrderRequiresSecretAndIsIdempotent(t *testing.T) {
 	db.Model(&models.Order{}).Count(&count)
 	if count != 1 {
 		t.Fatalf("expected one order, got %d", count)
+	}
+}
+
+func TestIdempotencyKeyRejectsDifferentPaidPayload(t *testing.T) {
+	app, _ := newApp(t)
+	body := orderBody(orderOne, "Liko", 85000)
+	if code, out := request(t, app, http.MethodPost, "/api/site/orders", body, siteSecret); code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, out)
+	}
+	changed := strings.Replace(body, `"nick":"Liko"`, `"nick":"Other"`, 1)
+	if code, out := request(t, app, http.MethodPost, "/api/site/orders", changed, siteSecret); code != http.StatusConflict {
+		t.Fatalf("конфликт idempotency потерян: %d %s", code, out)
 	}
 }
 
@@ -162,6 +215,9 @@ func TestListFiltersAndIssueAreIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := db.Create(&models.Delivery{OrderID: orderOne, ItemIndex: 0, ShopItemID: 1, ItemName: "A", Nick: "Liko", Delivery: models.DeliverySpec{Type: models.DeliveryTypeRole, RoleID: "special_forces"}, Status: models.DeliveryStatusPending}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	code, out := request(t, app, http.MethodGet, "/api/admin/orders?status=paid&q=lik", "", "")
 	if code != http.StatusOK {
@@ -174,7 +230,7 @@ func TestListFiltersAndIssueAreIdempotent(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &list); err != nil {
 		t.Fatal(err)
 	}
-	if list.Total != 1 || len(list.Items) != 1 || list.Items[0].OrderID != orderOne {
+	if list.Total != 1 || len(list.Items) != 1 || list.Items[0].OrderID != orderOne || len(list.Items[0].Deliveries) != 1 {
 		t.Fatalf("unexpected filtered list: %+v", list)
 	}
 	code, out = request(t, app, http.MethodGet, "/api/admin/orders?from=2026-08-11&to=2026-08-11", "", "")
@@ -199,10 +255,34 @@ func TestListFiltersAndIssueAreIdempotent(t *testing.T) {
 	if issued.Status != models.OrderStatusIssued || issued.IssuedAt == nil {
 		t.Fatalf("order not issued: %+v", issued)
 	}
+	var manual models.Delivery
+	db.First(&manual, "order_id = ?", orderOne)
+	if manual.Status != models.DeliveryStatusDone || manual.DoneAt == nil {
+		t.Fatalf("ручная выдача не закрыла игровые выдачи: %+v", manual)
+	}
 	var audits int64
 	db.Model(&models.BotAuditLog{}).Where("action = ?", "admin_order_issue").Count(&audits)
 	if audits != 1 {
 		t.Fatalf("expected one audit record for idempotent issue, got %d", audits)
+	}
+}
+
+func TestManualIssueDoesNotRaceClaimedAutoDelivery(t *testing.T) {
+	app, db := newApp(t)
+	order := models.Order{OrderID: orderOne, Nick: "Liko", Items: []models.OrderItem{{ID: 1, Name: "A", Qty: 1, Price: 10000}}, Total: 10000, YooKassaID: "claimed-pay", Status: models.OrderStatusPaid, PaidAt: time.Now()}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	delivery := models.Delivery{OrderID: orderOne, ItemIndex: 0, Nick: "Liko", Delivery: models.DeliverySpec{Type: models.DeliveryTypeItem, ItemID: "minecraft:diamond", Count: 1}, Status: models.DeliveryStatusPending, ClaimedAt: &now}
+	if err := db.Create(&delivery).Error; err != nil {
+		t.Fatal(err)
+	}
+	if code, out := request(t, app, http.MethodPost, "/api/admin/orders/"+orderOne+"/issue", `{}`, ""); code != http.StatusConflict {
+		t.Fatalf("ручная выдача вмешалась в auto-delivery: %d %s", code, out)
+	}
+	if err := db.First(&order, "order_id = ?", orderOne).Error; err != nil || order.Status != models.OrderStatusPaid {
+		t.Fatalf("заказ закрыт во время auto-delivery: %+v err=%v", order, err)
 	}
 }
 

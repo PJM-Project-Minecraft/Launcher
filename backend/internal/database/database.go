@@ -68,5 +68,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.PlayerXpAdjustment{},
 		// Оплаченные заказы сайта (YooKassa → ручная/автоматическая выдача).
 		&models.Order{},
+		&models.ShopItem{},
+		&models.Delivery{},
 	)
 }

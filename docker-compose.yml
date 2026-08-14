@@ -42,6 +42,7 @@ services:
       GAME_API_SECRET: "${GAME_API_SECRET:-}"
       # Секрет приёма подтверждённых оплат от WEB. В production обязателен.
       SITE_ORDER_SECRET: "${SITE_ORDER_SECRET:-}"
+      SHOP_STORAGE_ROOT: "/app/storage/shop"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}"
       # База публичного бакета с файлами сборок. Пусто (dev) → файлы качаются с бэкенда.
       # Включать только когда mandatory-версия лаунчера >= 0.4.1: до неё лаунчер слал
@@ -53,6 +54,8 @@ services:
     ports:
       # dev: 0.0.0.0:8080. prod задаёт SERVER_BIND=127.0.0.1:8082 в .env (за nginx)
       - "${SERVER_BIND:-8080}:8080"
+    volumes:
+      - shop_storage:/app/storage/shop
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,3 +102,4 @@ services:
 
 volumes:
   postgres_data:
+  shop_storage:

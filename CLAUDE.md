@@ -219,11 +219,16 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 - `gameapi` — эндпоинты игрового сервера Minecraft (мод PJM BaseMod), общий секрет
   `GAME_API_SECRET` в заголовке `X-Game-Secret`: `POST /api/game/players/sync` (батч-upsert
   прогресса, дедуп по uuid + нарезка по 500 строк) и `POST /api/game/adjustments/poll`
-  (ACK применённых + выдача неприменённых одним round-trip). Замысел и инварианты —
+  (ACK применённых + выдача неприменённых одним round-trip), а также
+  `POST /api/game/deliveries/poll|ack` для автовыдачи покупок онлайн-игрокам.
+  Замысел и инварианты —
   `docs/BACKEND_SYNC.md` в репозитории мода.
 - `purchases` — приём подтверждённых YooKassa-заказов сайта (`POST /api/site/orders`,
   `X-Site-Secret`), идемпотентное хранение и админские список/статистика/ручная выдача
-  на `/api/admin/orders/*`. Денежные значения хранятся в копейках, `order_id` — UUID.
+  на `/api/admin/orders/*`. `shop` ведёт единый каталог `/api/shop/catalog` и CRUD
+  `/api/admin/shop/items`; `ShopItem.delivery` снимком создаёт immutable `Delivery`
+  при оплате. Ручная выдача закрывает pending, ACK мода автоматически переводит
+  заказ в `issued`. Денежные значения хранятся в копейках, `order_id` — UUID.
 - `launcherrelease` — релизы лаунчера (автообновление). Бинарники в `backend/storage/releases/<version>/<platform>/`,
   заливка через дашборд (multipart, лимит 200 МБ/файл на уровне Fiber). Публичные `/api/launcher/update|download`;
   событие `launcher-release` идёт через общий SSE-брокер профилей. Обязательные релизы: anticheat handshake/init

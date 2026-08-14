@@ -18,6 +18,7 @@ import (
 	"launcher-backend/internal/policy"
 	"launcher-backend/internal/profiles"
 	"launcher-backend/internal/purchases"
+	"launcher-backend/internal/shop"
 	"launcher-backend/internal/yggdrasil"
 
 	"github.com/gofiber/fiber/v3"
@@ -43,6 +44,7 @@ func main() {
 		slog.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
+	shopService := shop.NewService(db, cfg.ShopStorageRoot)
 
 	// Доверие X-Forwarded-For: c.IP() (в т.ч. ключ брутфорс-лимитера) берёт первый
 	// ВАЛИДНЫЙ адрес из XFF ТОЛЬКО если непосредственный peer — доверенный прокси.
@@ -115,6 +117,7 @@ func main() {
 	policy.NewHandler(db).RegisterRoutes(app, authService.RequireAuth(), auth.CurrentUser)
 	adminapi.NewHandler(db).RegisterRoutes(app, authService.RequireAuth())
 	purchases.NewHandler(db, cfg.SiteOrderSecret).RegisterRoutes(app, authService.RequireAuth())
+	shop.NewHandler(shopService).RegisterRoutes(app, authService.RequireAuth())
 	profilesBroker := events.NewBroker()
 	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot, cfg.ProfileCDNBase), profilesBroker).
 		RegisterRoutes(app, authService.RequireAuth())
@@ -159,7 +162,7 @@ func main() {
 	}
 
 	// Игровые эндпоинты мода PJM BaseMod (профиль игрока, очередь правок XP).
-	gameapi.NewHandler(db, cfg.GameAPISecret).RegisterRoutes(app)
+	gameapi.NewHandler(db, cfg.GameAPISecret, purchases.NewService(db)).RegisterRoutes(app)
 
 	slog.Info(
 		"backend listening",

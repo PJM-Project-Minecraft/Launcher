@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"launcher-backend/internal/gameapi"
 	"launcher-backend/internal/models"
+	"launcher-backend/internal/purchases"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/driver/sqlite"
@@ -25,15 +27,97 @@ func newApp(t *testing.T) (*fiber.App, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.AutoMigrate(&models.PlayerProfile{}, &models.PlayerXpAdjustment{}); err != nil {
+	if err := db.AutoMigrate(&models.PlayerProfile{}, &models.PlayerXpAdjustment{}, &models.Order{}, &models.Delivery{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	db.Exec("DELETE FROM player_profiles")
 	db.Exec("DELETE FROM player_xp_adjustments")
+	db.Exec("DELETE FROM deliveries")
+	db.Exec("DELETE FROM orders")
 
 	app := fiber.New()
-	gameapi.NewHandler(db, secret).RegisterRoutes(app)
+	gameapi.NewHandler(db, secret, purchases.NewService(db)).RegisterRoutes(app)
 	return app, db
+}
+
+func TestDeliveryPollReturnsOnlyPendingForOnlinePlayers(t *testing.T) {
+	app, db := newApp(t)
+	orders := []models.Order{
+		{OrderID: "11111111-1111-4111-8111-111111111111", Nick: "Liko", Items: []models.OrderItem{{ID: 4150, Name: "БПЛА", Qty: 1, Price: 55000}}, Total: 55000, YooKassaID: "delivery-pay-1", Status: models.OrderStatusPaid, PaidAt: time.Now()},
+		{OrderID: "22222222-2222-4222-8222-222222222222", Nick: "Offline", Items: []models.OrderItem{{ID: 4159, Name: "РЭБ", Qty: 1, Price: 25000}}, Total: 25000, YooKassaID: "delivery-pay-2", Status: models.OrderStatusPaid, PaidAt: time.Now()},
+	}
+	if err := db.Create(&orders).Error; err != nil {
+		t.Fatal(err)
+	}
+	deliveries := []models.Delivery{
+		{OrderID: orders[0].OrderID, ItemIndex: 0, Nick: "Liko", Delivery: models.DeliverySpec{Type: models.DeliveryTypeRole, RoleID: "uav_operator"}, Status: models.DeliveryStatusPending},
+		{OrderID: orders[0].OrderID, ItemIndex: 1, Nick: "Liko", Delivery: models.DeliverySpec{Type: models.DeliveryTypeItem, ItemID: "minecraft:diamond", Count: 1}, Status: models.DeliveryStatusDone},
+		{OrderID: orders[1].OrderID, Nick: "Offline", Delivery: models.DeliverySpec{Type: models.DeliveryTypeRole, RoleID: "ew_specialist"}, Status: models.DeliveryStatusPending},
+	}
+	if err := db.Create(&deliveries).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := post(t, app, "/api/game/deliveries/poll", `{"players":["liko"]}`, secret)
+	if code != http.StatusOK {
+		t.Fatalf("poll: %d %s", code, out)
+	}
+	var response struct {
+		Deliveries []models.Delivery `json:"deliveries"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Deliveries) != 1 || response.Deliveries[0].ID != deliveries[0].ID {
+		t.Fatalf("ожидалась только pending-выдача онлайн-игрока: %+v", response.Deliveries)
+	}
+	code, out = post(t, app, "/api/game/deliveries/poll", `{"players":["Liko"]}`, secret)
+	if code != http.StatusOK {
+		t.Fatalf("second poll: %d %s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil || len(response.Deliveries) != 0 {
+		t.Fatalf("заклеймленная выдача повторилась: %+v err=%v", response.Deliveries, err)
+	}
+}
+
+func TestDeliveryAckIsIdempotentAndIssuesOrderAfterAllDone(t *testing.T) {
+	app, db := newApp(t)
+	order := models.Order{OrderID: "33333333-3333-4333-8333-333333333333", Nick: "Liko", Items: []models.OrderItem{{ID: 4150, Name: "БПЛА", Qty: 1, Price: 55000}}, Total: 55000, YooKassaID: "delivery-pay-3", Status: models.OrderStatusPaid, PaidAt: time.Now()}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	deliveries := []models.Delivery{
+		{OrderID: order.OrderID, ItemIndex: 0, Nick: order.Nick, Delivery: models.DeliverySpec{Type: models.DeliveryTypeRole, RoleID: "uav_operator"}, Status: models.DeliveryStatusPending},
+		{OrderID: order.OrderID, ItemIndex: 1, Nick: order.Nick, Delivery: models.DeliverySpec{Type: models.DeliveryTypeItem, ItemID: "minecraft:diamond", Count: 2}, Status: models.DeliveryStatusPending},
+	}
+	if err := db.Create(&deliveries).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	first := `{"ids":[` + strconv.FormatUint(uint64(deliveries[0].ID), 10) + `]}`
+	if code, out := post(t, app, "/api/game/deliveries/ack", first, secret); code != http.StatusOK {
+		t.Fatalf("first ack: %d %s", code, out)
+	}
+	db.First(&order, "order_id = ?", order.OrderID)
+	if order.Status != models.OrderStatusPaid {
+		t.Fatalf("заказ выдан до завершения всех выдач: %+v", order)
+	}
+
+	second := `{"ids":[` + strconv.FormatUint(uint64(deliveries[0].ID), 10) + `,` + strconv.FormatUint(uint64(deliveries[1].ID), 10) + `]}`
+	for i := 0; i < 2; i++ {
+		if code, out := post(t, app, "/api/game/deliveries/ack", second, secret); code != http.StatusOK {
+			t.Fatalf("ack %d: %d %s", i, code, out)
+		}
+	}
+	db.First(&order, "order_id = ?", order.OrderID)
+	if order.Status != models.OrderStatusIssued || order.IssuedAt == nil {
+		t.Fatalf("заказ не перешёл в issued: %+v", order)
+	}
+	var pending int64
+	db.Model(&models.Delivery{}).Where("order_id = ? AND status = ?", order.OrderID, models.DeliveryStatusPending).Count(&pending)
+	if pending != 0 {
+		t.Fatalf("осталось pending-выдач: %d", pending)
+	}
 }
 
 func post(t *testing.T, app *fiber.App, path, body, hdr string) (int, string) {

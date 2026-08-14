@@ -4,6 +4,7 @@
 package gameapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"net/http"
 	"time"
@@ -15,13 +16,19 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-type Handler struct {
-	db     *gorm.DB
-	secret string
+type DeliveryService interface {
+	PollDeliveries(context.Context, []string) ([]models.Delivery, error)
+	AckDeliveries(context.Context, []uint) error
 }
 
-func NewHandler(db *gorm.DB, secret string) Handler {
-	return Handler{db: db, secret: secret}
+type Handler struct {
+	db       *gorm.DB
+	secret   string
+	delivery DeliveryService
+}
+
+func NewHandler(db *gorm.DB, secret string, delivery DeliveryService) Handler {
+	return Handler{db: db, secret: secret, delivery: delivery}
 }
 
 func (h Handler) RegisterRoutes(app *fiber.App) {
@@ -29,6 +36,41 @@ func (h Handler) RegisterRoutes(app *fiber.App) {
 	g.Use(h.requireSecret)
 	g.Post("/players/sync", h.syncPlayers)
 	g.Post("/adjustments/poll", h.pollAdjustments)
+	g.Post("/deliveries/poll", h.pollDeliveries)
+	g.Post("/deliveries/ack", h.ackDeliveries)
+}
+
+func (h Handler) pollDeliveries(c fiber.Ctx) error {
+	var req struct {
+		Players []string `json:"players"`
+	}
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"message": "bad request"})
+	}
+	if len(req.Players) > 1000 {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"message": "too many players"})
+	}
+	deliveries, err := h.delivery.PollDeliveries(c.Context(), req.Players)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"message": "query failed"})
+	}
+	return c.JSON(fiber.Map{"deliveries": deliveries})
+}
+
+func (h Handler) ackDeliveries(c fiber.Ctx) error {
+	var req struct {
+		IDs []uint `json:"ids"`
+	}
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"message": "bad request"})
+	}
+	if len(req.IDs) > 1000 {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"message": "too many acknowledgements"})
+	}
+	if err := h.delivery.AckDeliveries(c.Context(), req.IDs); err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"message": "ack failed"})
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }
 
 // requireSecret — постоянное по времени сравнение секрета. Пустой секрет на сервере

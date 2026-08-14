@@ -108,6 +108,9 @@ func (h Handler) issue(c fiber.Ctx) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{"message": "Заказ не найден"})
 	}
+	if errors.Is(err, ErrDeliveryInFlight) {
+		return c.Status(http.StatusConflict).JSON(fiber.Map{"message": "Автовыдача уже выполняется; повторите через минуту"})
+	}
 	if err != nil {
 		return clientError(c, err, "Не удалось отметить выдачу")
 	}

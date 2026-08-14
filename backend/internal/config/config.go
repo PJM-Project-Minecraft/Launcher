@@ -28,6 +28,7 @@ type Config struct {
 	ProfileCDNBase        string
 	LauncherReleaseRoot   string
 	ScreenshotStorageRoot string
+	ShopStorageRoot       string
 	TelegramChannel       string
 	PublicBaseURL         string
 	YggdrasilKeyPath      string
@@ -99,6 +100,7 @@ func Load() Config {
 			"SCREENSHOT_STORAGE_ROOT",
 			filepath.Join("storage", "screenshots"),
 		),
+		ShopStorageRoot: env("SHOP_STORAGE_ROOT", filepath.Join("storage", "shop")),
 		AllowedOrigins: splitCSV(env(
 			"ALLOWED_ORIGINS",
 			"http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000",

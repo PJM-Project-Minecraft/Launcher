@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -17,9 +18,13 @@ import (
 )
 
 const PageSize = 50
+const deliveryLease = time.Minute
 
 var nickPattern = regexp.MustCompile(`^[A-Za-z0-9_]{3,16}$`)
+var deliveryItemPattern = regexp.MustCompile(`^[a-z0-9_.-]+:[a-z0-9_./-]+$`)
+var deliveryRoles = map[string]struct{}{"special_forces": {}, "uav_operator": {}, "ew_specialist": {}}
 var ErrPaymentConflict = errors.New("payment already belongs to another order")
+var ErrDeliveryInFlight = errors.New("delivery is being applied by the game server")
 
 type ValidationError struct{ Message string }
 
@@ -63,6 +68,20 @@ type Stats struct {
 	Top     []TopItem `json:"topItems"`
 }
 
+func validDelivery(spec models.DeliverySpec) bool {
+	switch spec.Type {
+	case models.DeliveryTypeNone:
+		return true
+	case models.DeliveryTypeRole:
+		_, ok := deliveryRoles[spec.RoleID]
+		return ok
+	case models.DeliveryTypeItem:
+		return deliveryItemPattern.MatchString(spec.ItemID) && spec.Count >= 1 && spec.Count <= 100
+	default:
+		return false
+	}
+}
+
 type Service struct{ db *gorm.DB }
 
 func NewService(db *gorm.DB) Service { return Service{db: db} }
@@ -84,7 +103,8 @@ func validateCreate(input CreateInput) error {
 	var calculated int64
 	for _, item := range input.Items {
 		if item.ID <= 0 || strings.TrimSpace(item.Name) == "" || len(item.Name) > 300 ||
-			item.Qty < 1 || item.Qty > 10_000 || item.Price < 1 || item.Price > 100_000_000 {
+			item.Qty < 1 || item.Qty > 10_000 || item.Price < 1 || item.Price > 100_000_000 ||
+			!validDelivery(item.Delivery) {
 			return ValidationError{Message: "Некорректный товар в заказе"}
 		}
 		line := item.Price * int64(item.Qty)
@@ -110,21 +130,67 @@ func (s Service) Create(ctx context.Context, input CreateInput) (models.Order, b
 		OrderID: input.OrderID, Nick: input.Nick, Items: input.Items, Total: input.Total,
 		YooKassaID: input.YooKassaID, Status: models.OrderStatusPaid, PaidAt: input.PaidAt.UTC(),
 	}
-	result := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "order_id"}}, DoNothing: true,
-	}).Create(&order)
-	if result.Error != nil {
+	created := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "order_id"}}, DoNothing: true,
+		}).Omit("Deliveries").Create(&order)
+		if result.Error != nil {
+			return result.Error
+		}
+		created = result.RowsAffected == 1
+		if !created {
+			if err := tx.Preload("Deliveries").First(&order, "order_id = ?", input.OrderID).Error; err != nil {
+				return err
+			}
+			if order.YooKassaID != input.YooKassaID || order.Nick != input.Nick || order.Total != input.Total ||
+				!order.PaidAt.Truncate(time.Microsecond).Equal(input.PaidAt.UTC().Truncate(time.Microsecond)) ||
+				!reflect.DeepEqual(order.Items, input.Items) {
+				return ErrPaymentConflict
+			}
+			return nil
+		}
+
+		deliveries := make([]models.Delivery, 0, len(input.Items))
+		for index, item := range input.Items {
+			spec := item.Delivery
+			if spec.Type == models.DeliveryTypeNone {
+				continue
+			}
+			if spec.Type == models.DeliveryTypeItem {
+				remaining := int64(spec.Count) * int64(item.Qty)
+				for part := 0; remaining > 0; part++ {
+					portion := min(remaining, int64(10_000))
+					partSpec := spec
+					partSpec.Count = int(portion)
+					deliveries = append(deliveries, models.Delivery{
+						OrderID: order.OrderID, ItemIndex: index, PartIndex: part,
+						ShopItemID: item.ID, ItemName: item.Name, Nick: order.Nick,
+						Delivery: partSpec, Status: models.DeliveryStatusPending,
+					})
+					remaining -= portion
+				}
+				continue
+			}
+			deliveries = append(deliveries, models.Delivery{
+				OrderID: order.OrderID, ItemIndex: index, ShopItemID: item.ID, ItemName: item.Name,
+				Nick: order.Nick, Delivery: spec, Status: models.DeliveryStatusPending,
+			})
+		}
+		if len(deliveries) > 0 {
+			if err := tx.Create(&deliveries).Error; err != nil {
+				return err
+			}
+			order.Deliveries = deliveries
+		}
+		return nil
+	})
+	if err != nil {
 		var existing models.Order
 		if err := s.db.WithContext(ctx).First(&existing, "yoo_kassa_id = ?", input.YooKassaID).Error; err == nil {
 			return models.Order{}, false, ErrPaymentConflict
 		}
-		return models.Order{}, false, result.Error
-	}
-	created := result.RowsAffected == 1
-	if !created {
-		if err := s.db.WithContext(ctx).First(&order, "order_id = ?", input.OrderID).Error; err != nil {
-			return models.Order{}, false, err
-		}
+		return models.Order{}, false, err
 	}
 	return order, created, nil
 }
@@ -189,7 +255,8 @@ func (s Service) List(ctx context.Context, options ListOptions) (OrderPage, erro
 		return OrderPage{}, err
 	}
 	var items []models.Order
-	if err := query.Order("orders.paid_at DESC, orders.id DESC").
+	if err := query.Preload("Deliveries", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).
+		Order("orders.paid_at DESC, orders.id DESC").
 		Offset((options.Page - 1) * PageSize).Limit(PageSize).Find(&items).Error; err != nil {
 		return OrderPage{}, err
 	}
@@ -203,13 +270,34 @@ func (s Service) Issue(ctx context.Context, orderID, adminID string) (models.Ord
 	var order models.Order
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
+		// Lock the same rows PollDeliveries claims. This makes "manual" and
+		// "handed to game server" mutually exclusive instead of a COUNT/UPDATE race.
+		var pending []models.Delivery
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("order_id = ? AND status = ?", orderID, models.DeliveryStatusPending).
+			Order("id ASC").Find(&pending).Error; err != nil {
+			return err
+		}
+		ids := make([]uint, 0, len(pending))
+		for _, delivery := range pending {
+			if delivery.ClaimedAt != nil && delivery.ClaimedAt.After(now.Add(-deliveryLease)) {
+				return ErrDeliveryInFlight
+			}
+			ids = append(ids, delivery.ID)
+		}
+		if len(ids) > 0 {
+			if err := tx.Model(&models.Delivery{}).Where("id IN ?", ids).
+				Updates(map[string]any{"status": models.DeliveryStatusDone, "done_at": now}).Error; err != nil {
+				return err
+			}
+		}
 		result := tx.Model(&models.Order{}).
 			Where("order_id = ? AND status <> ?", orderID, models.OrderStatusIssued).
 			Updates(map[string]any{"status": models.OrderStatusIssued, "issued_at": now})
 		if result.Error != nil {
 			return result.Error
 		}
-		if err := tx.First(&order, "order_id = ?", orderID).Error; err != nil {
+		if err := tx.Preload("Deliveries", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).First(&order, "order_id = ?", orderID).Error; err != nil {
 			return err
 		}
 		if result.RowsAffected == 1 && adminID != "" {
@@ -221,6 +309,81 @@ func (s Service) Issue(ctx context.Context, orderID, adminID string) (models.Ord
 		return nil
 	})
 	return order, err
+}
+
+func (s Service) PollDeliveries(ctx context.Context, players []string) ([]models.Delivery, error) {
+	if len(players) > 1000 {
+		return nil, ValidationError{Message: "Слишком много игроков"}
+	}
+	names := make([]string, 0, len(players))
+	seen := make(map[string]struct{}, len(players))
+	for _, raw := range players {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if !nickPattern.MatchString(name) {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return []models.Delivery{}, nil
+	}
+	var result []models.Delivery
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("status = ? AND LOWER(nick) IN ? AND (claimed_at IS NULL OR claimed_at <= ?)",
+				models.DeliveryStatusPending, names, now.Add(-deliveryLease)).
+			Order("id ASC").Limit(500).Find(&result).Error; err != nil {
+			return err
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		ids := make([]uint, 0, len(result))
+		for i := range result {
+			ids = append(ids, result[i].ID)
+			result[i].ClaimedAt = &now
+		}
+		return tx.Model(&models.Delivery{}).Where("id IN ?", ids).Update("claimed_at", now).Error
+	})
+	return result, err
+}
+
+func (s Service) AckDeliveries(ctx context.Context, ids []uint) error {
+	if len(ids) > 1000 {
+		return ValidationError{Message: "Слишком много подтверждений"}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var orderIDs []string
+		if err := tx.Model(&models.Delivery{}).Where("id IN ?", ids).Distinct("order_id").Pluck("order_id", &orderIDs).Error; err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		if err := tx.Model(&models.Delivery{}).Where("id IN ? AND status = ?", ids, models.DeliveryStatusPending).
+			Updates(map[string]any{"status": models.DeliveryStatusDone, "done_at": now}).Error; err != nil {
+			return err
+		}
+		for _, orderID := range orderIDs {
+			var pending int64
+			if err := tx.Model(&models.Delivery{}).Where("order_id = ? AND status = ?", orderID, models.DeliveryStatusPending).Count(&pending).Error; err != nil {
+				return err
+			}
+			if pending == 0 {
+				if err := tx.Model(&models.Order{}).Where("order_id = ? AND status <> ?", orderID, models.OrderStatusIssued).
+					Updates(map[string]any{"status": models.OrderStatusIssued, "issued_at": now}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (s Service) Stats(ctx context.Context, from, to string) (Stats, error) {
