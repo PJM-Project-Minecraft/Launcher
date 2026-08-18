@@ -2,7 +2,11 @@ package profiles
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 
 	"launcher-backend/internal/auth"
@@ -36,6 +40,8 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Get("/events", h.events)
 	group.Get("/", h.listActive)
 	group.Get("/:id/manifest", h.manifest)
+	group.Get("/:id/bundles/:version", h.bundle)
+	group.Get("/:id/objects/:hash", h.object)
 	group.Get("/:id/files/*", h.download)
 
 	admin := app.Group("/api/admin/profiles")
@@ -48,6 +54,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Delete("/:id", h.delete)
 	admin.Post("/:id/prepare-client", h.prepareClient)
 	admin.Post("/:id/scan", h.scan)
+	admin.Post("/:id/publish", h.scan)
 	admin.Get("/:id/drift", h.drift)
 }
 
@@ -185,6 +192,85 @@ func (h Handler) download(c fiber.Ctx) error {
 	c.Set(fiber.HeaderContentDisposition, "attachment; filename=\""+safeHeaderFilename(download.File.Name)+"\"")
 	c.Set(fiber.HeaderCacheControl, "private, max-age=60")
 	return c.SendFile(download.AbsolutePath)
+}
+
+func (h Handler) bundle(c fiber.Ctx) error {
+	version, err := strconv.Atoi(c.Params("version"))
+	if err != nil || version <= 0 {
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректная версия сборки"})
+	}
+	download, err := h.service.Bundle(c.Context(), c.Params("id"), version)
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	c.Set(fiber.HeaderContentDisposition, "attachment; filename=\"profile-"+c.Params("version")+".tar.zst\"")
+	c.Set(fiber.HeaderCacheControl, "private, max-age=31536000, immutable")
+	c.Set(fiber.HeaderETag, `"`+download.ETag+`"`)
+	c.Set("Accept-Ranges", "bytes")
+	if rangeHeader := c.Get(fiber.HeaderRange); rangeHeader != "" {
+		return sendFileRange(c, download.AbsolutePath, download.Size, rangeHeader)
+	}
+	return c.SendFile(download.AbsolutePath)
+}
+
+func (h Handler) object(c fiber.Ctx) error {
+	download, err := h.service.Object(c.Context(), c.Params("id"), c.Params("hash"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	c.Set(fiber.HeaderCacheControl, "private, max-age=31536000, immutable")
+	c.Set(fiber.HeaderETag, `"`+download.ETag+`"`)
+	c.Set("Accept-Ranges", "bytes")
+	if rangeHeader := c.Get(fiber.HeaderRange); rangeHeader != "" {
+		return sendFileRange(c, download.AbsolutePath, download.Size, rangeHeader)
+	}
+	return c.SendFile(download.AbsolutePath)
+}
+
+func sendFileRange(c fiber.Ctx, path string, size int64, header string) error {
+	if !strings.HasPrefix(header, "bytes=") || strings.Contains(header, ",") {
+		c.Set(fiber.HeaderContentRange, fmt.Sprintf("bytes */%d", size))
+		return c.SendStatus(http.StatusRequestedRangeNotSatisfiable)
+	}
+	parts := strings.SplitN(strings.TrimPrefix(header, "bytes="), "-", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		c.Set(fiber.HeaderContentRange, fmt.Sprintf("bytes */%d", size))
+		return c.SendStatus(http.StatusRequestedRangeNotSatisfiable)
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 || start >= size {
+		c.Set(fiber.HeaderContentRange, fmt.Sprintf("bytes */%d", size))
+		return c.SendStatus(http.StatusRequestedRangeNotSatisfiable)
+	}
+	end := size - 1
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || end < start {
+			c.Set(fiber.HeaderContentRange, fmt.Sprintf("bytes */%d", size))
+			return c.SendStatus(http.StatusRequestedRangeNotSatisfiable)
+		}
+		if end >= size {
+			end = size - 1
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		file.Close()
+		return err
+	}
+	length := end - start + 1
+	c.Status(http.StatusPartialContent)
+	c.Set(fiber.HeaderContentRange, fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+	c.Set(fiber.HeaderContentLength, strconv.FormatInt(length, 10))
+	return c.SendStream(&rangeReadCloser{Reader: io.LimitReader(file, length), Closer: file}, int(length))
+}
+
+type rangeReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func (h Handler) writeError(c fiber.Ctx, err error) error {

@@ -2,8 +2,12 @@ package profiles
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +16,35 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 )
+
+func TestBundleDownloadSupportsRangeAndETag(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{Name: "Bundle", Slug: "bundle", Loader: "fabric", GameVersion: "1.21.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "a.jar"), strings.Repeat("bundle-data", 100))
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	app := fiber.New()
+	NewHandler(service, nil).RegisterRoutes(app, func(c fiber.Ctx) error { return c.Next() })
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/profiles/%s/bundles/1", profile.ID), nil)
+	req.Header.Set("Range", "bytes=0-31")
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 206 || len(body) != 32 {
+		t.Fatalf("range response status=%d len=%d", res.StatusCode, len(body))
+	}
+	if res.Header.Get("ETag") == "" || res.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("missing bundle cache/range headers: %v", res.Header)
+	}
+}
 
 // TestEventsStreamDeliversProfileChange поднимает реальный Fiber-сервер и через
 // сырое TCP-соединение проверяет, что SSE-эндпоинт /api/profiles/events:

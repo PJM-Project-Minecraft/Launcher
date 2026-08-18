@@ -12,7 +12,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"launcher-backend/internal/models"
@@ -24,8 +26,8 @@ import (
 type Service struct {
 	db          *gorm.DB
 	storageRoot string
-	// cdnBase — см. config.ProfileCDNBase. Пусто → download_url остаётся относительным на бэкенд.
-	cdnBase string
+	cdnBase     string
+	scanMu      *sync.Mutex
 }
 
 var defaultPreservePaths = []string{
@@ -61,32 +63,34 @@ type ProfileRequest struct {
 }
 
 type ProfileSummary struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	Slug            string     `json:"slug"`
-	Description     string     `json:"description"`
-	Loader          string     `json:"loader"`
-	GameVersion     string     `json:"gameVersion"`
-	LoaderVersion   string     `json:"loaderVersion"`
-	JavaVersion     int        `json:"javaVersion"`
-	JVMArgs         string     `json:"jvmArgs"`
-	IconURL         string     `json:"iconUrl"`
-	JavaPathWindows string     `json:"javaPathWindows"`
-	JavaPathLinux   string     `json:"javaPathLinux"`
-	JavaPathMacOS   string     `json:"javaPathMacos"`
-	LaunchWindows   string     `json:"launchCommandWindows"`
-	LaunchLinux     string     `json:"launchCommandLinux"`
-	LaunchMacOS     string     `json:"launchCommandMacos"`
-	PreservePaths   []string   `json:"preservePaths"`
-	ManifestVersion int        `json:"manifestVersion"`
-	ManifestUpdated *time.Time `json:"manifestUpdatedAt"`
-	IsActive        bool       `json:"isActive"`
-	FileCount       int64      `json:"fileCount"`
-	TotalSize       int64      `json:"totalSize"`
-	ClientPrepared  bool       `json:"clientPrepared"`
-	ClientStatus    string     `json:"clientStatus"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Slug             string     `json:"slug"`
+	Description      string     `json:"description"`
+	Loader           string     `json:"loader"`
+	GameVersion      string     `json:"gameVersion"`
+	LoaderVersion    string     `json:"loaderVersion"`
+	JavaVersion      int        `json:"javaVersion"`
+	JVMArgs          string     `json:"jvmArgs"`
+	IconURL          string     `json:"iconUrl"`
+	JavaPathWindows  string     `json:"javaPathWindows"`
+	JavaPathLinux    string     `json:"javaPathLinux"`
+	JavaPathMacOS    string     `json:"javaPathMacos"`
+	LaunchWindows    string     `json:"launchCommandWindows"`
+	LaunchLinux      string     `json:"launchCommandLinux"`
+	LaunchMacOS      string     `json:"launchCommandMacos"`
+	PreservePaths    []string   `json:"preservePaths"`
+	ManifestVersion  int        `json:"manifestVersion"`
+	ManifestUpdated  *time.Time `json:"manifestUpdatedAt"`
+	BundleHashSHA256 string     `json:"bundleHashSha256"`
+	BundleSize       int64      `json:"bundleSize"`
+	IsActive         bool       `json:"isActive"`
+	FileCount        int64      `json:"fileCount"`
+	TotalSize        int64      `json:"totalSize"`
+	ClientPrepared   bool       `json:"clientPrepared"`
+	ClientStatus     string     `json:"clientStatus"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 type ManifestProfile struct {
@@ -118,6 +122,7 @@ type ManifestFile struct {
 	HashSHA256  string `json:"hashSha256"`
 	Size        int64  `json:"size"`
 	FileType    string `json:"fileType"`
+	Executable  bool   `json:"executable"`
 }
 
 type Manifest struct {
@@ -126,6 +131,15 @@ type Manifest struct {
 	PreservePaths []string        `json:"preservePaths"`
 	FileCount     int             `json:"fileCount"`
 	TotalSize     int64           `json:"totalSize"`
+	Bundle        *BundleInfo     `json:"bundle,omitempty"`
+}
+
+type BundleInfo struct {
+	BuildID     int    `json:"buildId"`
+	Format      string `json:"format"`
+	DownloadURL string `json:"downloadUrl"`
+	HashSHA256  string `json:"hashSha256"`
+	Size        int64  `json:"size"`
 }
 
 type ScanResult struct {
@@ -140,7 +154,7 @@ type FileDownload struct {
 }
 
 func NewService(db *gorm.DB, storageRoot string, cdnBase string) Service {
-	return Service{db: db, storageRoot: storageRoot, cdnBase: strings.TrimRight(cdnBase, "/")}
+	return Service{db: db, storageRoot: storageRoot, cdnBase: strings.TrimRight(cdnBase, "/"), scanMu: &sync.Mutex{}}
 }
 
 func (s Service) ListActive(ctx context.Context) ([]ProfileSummary, error) {
@@ -205,15 +219,31 @@ func (s Service) Update(ctx context.Context, id string, req ProfileRequest) (Pro
 }
 
 func (s Service) Delete(ctx context.Context, id string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	if s.scanMu != nil {
+		s.scanMu.Lock()
+		defer s.scanMu.Unlock()
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("profile_id = ?", id).Delete(&models.GameFile{}).Error; err != nil {
 			return err
 		}
 		return tx.Delete(&models.Profile{}, "id = ?", id).Error
 	})
+	if err != nil {
+		return err
+	}
+	_ = os.RemoveAll(s.publishedProfileRoot(id))
+	s.gcObjects()
+	return nil
 }
 
 func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
+	// Scan одновременно создаёт manifest и его неизменяемый архив. Сериализация
+	// исключает публикацию двух разных bundle под одним manifestVersion.
+	if s.scanMu != nil {
+		s.scanMu.Lock()
+		defer s.scanMu.Unlock()
+	}
 	var profile models.Profile
 	if err := s.db.WithContext(ctx).First(&profile, "id = ?", id).Error; err != nil {
 		return ScanResult{}, err
@@ -290,16 +320,39 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 			HashSHA256: hash,
 			Size:       info.Size(),
 			FileType:   inferFileType(rel),
+			Executable: info.Mode()&0111 != 0,
 		})
 		return nil
 	})
 	if err != nil {
 		return ScanResult{}, err
 	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	if err := validatePortablePaths(files); err != nil {
+		return ScanResult{}, err
+	}
+	for _, file := range files {
+		if err := s.ensureObject(profile, file); err != nil {
+			return ScanResult{}, err
+		}
+	}
+
+	nextVersion := profile.ManifestVersion + 1
+	bundle, err := s.createBundle(profile, nextVersion, files)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	objectRefs, err := s.writeObjectRefs(profile, nextVersion, files)
+	if err != nil {
+		_ = os.Remove(bundle.AbsolutePath)
+		return ScanResult{}, err
+	}
 
 	now := time.Now().UTC()
-	profile.ManifestVersion++
+	profile.ManifestVersion = nextVersion
 	profile.ManifestUpdatedAt = &now
+	profile.BundleHashSHA256 = bundle.HashSHA256
+	profile.BundleSize = bundle.Size
 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("profile_id = ?", profile.ID).Delete(&models.GameFile{}).Error; err != nil {
@@ -315,8 +368,13 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 		}
 		return tx.Save(&profile).Error
 	}); err != nil {
+		_ = os.Remove(bundle.AbsolutePath)
+		_ = os.Remove(objectRefs)
 		return ScanResult{}, err
 	}
+	s.cleanupOldBundles(profile, 3)
+	s.cleanupOldObjectRefs(profile, 3)
+	s.gcObjects()
 
 	summary, err := s.summary(ctx, profile)
 	if err != nil {
@@ -457,17 +515,23 @@ func (s Service) Manifest(ctx context.Context, id string) (Manifest, error) {
 
 	manifestFiles := make([]ManifestFile, 0, len(files))
 	var totalSize int64
+	immutableObjects := regularFileExists(s.objectRefsPath(profile, profile.ManifestVersion))
 	for _, file := range files {
 		totalSize += file.Size
 		manifestFiles = append(manifestFiles, ManifestFile{
 			ID:          file.ID,
 			Name:        file.Name,
 			Path:        file.Path,
-			DownloadURL: s.downloadURL(profile, file.Path),
+			DownloadURL: s.downloadURL(profile, file, immutableObjects),
 			HashSHA256:  file.HashSHA256,
 			Size:        file.Size,
 			FileType:    file.FileType,
+			Executable:  file.Executable,
 		})
+	}
+	bundle := bundleInfo(profile)
+	if bundle != nil && !regularFileHasSize(s.bundlePath(profile, profile.ManifestVersion), profile.BundleSize) {
+		bundle = nil
 	}
 
 	return Manifest{
@@ -476,6 +540,7 @@ func (s Service) Manifest(ctx context.Context, id string) (Manifest, error) {
 		PreservePaths: profilePreservePaths(profile),
 		FileCount:     len(manifestFiles),
 		TotalSize:     totalSize,
+		Bundle:        bundle,
 	}, nil
 }
 
@@ -519,6 +584,10 @@ func (s Service) summary(ctx context.Context, profile models.Profile) (ProfileSu
 		Row()
 	if err := row.Scan(&count, &totalSize); err != nil {
 		return ProfileSummary{}, err
+	}
+	if profile.BundleSize > 0 && !regularFileHasSize(s.bundlePath(profile, profile.ManifestVersion), profile.BundleSize) {
+		profile.BundleHashSHA256 = ""
+		profile.BundleSize = 0
 	}
 	clientPrepared := s.clientPrepared(profile)
 	clientStatus := "missing"
@@ -635,32 +704,34 @@ func profileFromRequest(profile models.Profile, req ProfileRequest) (models.Prof
 
 func toSummary(profile models.Profile, fileCount int64, totalSize int64, clientPrepared bool, clientStatus string) ProfileSummary {
 	return ProfileSummary{
-		ID:              profile.ID,
-		Name:            profile.Name,
-		Slug:            profile.Slug,
-		Description:     profile.Description,
-		Loader:          profile.Loader,
-		GameVersion:     profile.GameVersion,
-		LoaderVersion:   profile.LoaderVersion,
-		JavaVersion:     profile.JavaVersion,
-		JVMArgs:         profile.JVMArgs,
-		IconURL:         profile.IconURL,
-		JavaPathWindows: profile.JavaPathWindows,
-		JavaPathLinux:   profile.JavaPathLinux,
-		JavaPathMacOS:   profile.JavaPathMacOS,
-		LaunchWindows:   profile.LaunchCommandWindows,
-		LaunchLinux:     profile.LaunchCommandLinux,
-		LaunchMacOS:     profile.LaunchCommandMacOS,
-		PreservePaths:   profilePreservePaths(profile),
-		ManifestVersion: profile.ManifestVersion,
-		ManifestUpdated: profile.ManifestUpdatedAt,
-		IsActive:        profile.IsActive,
-		FileCount:       fileCount,
-		TotalSize:       totalSize,
-		ClientPrepared:  clientPrepared,
-		ClientStatus:    clientStatus,
-		CreatedAt:       profile.CreatedAt,
-		UpdatedAt:       profile.UpdatedAt,
+		ID:               profile.ID,
+		Name:             profile.Name,
+		Slug:             profile.Slug,
+		Description:      profile.Description,
+		Loader:           profile.Loader,
+		GameVersion:      profile.GameVersion,
+		LoaderVersion:    profile.LoaderVersion,
+		JavaVersion:      profile.JavaVersion,
+		JVMArgs:          profile.JVMArgs,
+		IconURL:          profile.IconURL,
+		JavaPathWindows:  profile.JavaPathWindows,
+		JavaPathLinux:    profile.JavaPathLinux,
+		JavaPathMacOS:    profile.JavaPathMacOS,
+		LaunchWindows:    profile.LaunchCommandWindows,
+		LaunchLinux:      profile.LaunchCommandLinux,
+		LaunchMacOS:      profile.LaunchCommandMacOS,
+		PreservePaths:    profilePreservePaths(profile),
+		ManifestVersion:  profile.ManifestVersion,
+		ManifestUpdated:  profile.ManifestUpdatedAt,
+		BundleHashSHA256: profile.BundleHashSHA256,
+		BundleSize:       profile.BundleSize,
+		IsActive:         profile.IsActive,
+		FileCount:        fileCount,
+		TotalSize:        totalSize,
+		ClientPrepared:   clientPrepared,
+		ClientStatus:     clientStatus,
+		CreatedAt:        profile.CreatedAt,
+		UpdatedAt:        profile.UpdatedAt,
 	}
 }
 
@@ -734,6 +805,11 @@ func installedLoaderVersionExists(root string, profile models.Profile) bool {
 func regularFileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+func regularFileHasSize(path string, expected int64) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() == expected
 }
 
 func toManifestProfile(profile models.Profile) ManifestProfile {
@@ -925,15 +1001,18 @@ func safeJoin(root, rel string) (string, error) {
 	return pathAbs, nil
 }
 
-// downloadURL — откуда лаунчер тянет файл профиля. С заданным cdnBase это прямая
-// ссылка на бакет (ключ = <slug>/files/<path>, как в storage), иначе — путь на бэкенд.
-// Целостность в обоих случаях держится на SHA-256 из этого же манифеста, который
-// лаунчер получает по JWT с бэкенда, — подмена файла в бакете ломает проверку хэша.
-func (s Service) downloadURL(profile models.Profile, path string) string {
-	if s.cdnBase == "" {
-		return "/api/profiles/" + profile.ID + "/files/" + escapePath(path)
+// downloadURL always points at the immutable content-addressed snapshot. SFTP
+// and the legacy CDN path remain staging inputs and never serve a published file.
+func (s Service) downloadURL(profile models.Profile, file models.GameFile, immutable bool) string {
+	if immutable {
+		return "/api/profiles/" + profile.ID + "/objects/" + file.HashSHA256
 	}
-	return s.cdnBase + "/" + escapePath(profile.Slug) + "/files/" + escapePath(path)
+	// Compatibility for profiles published before immutable snapshots existed.
+	// The next panel publish upgrades them without making current clients 404.
+	if s.cdnBase != "" {
+		return s.cdnBase + "/" + escapePath(profile.Slug) + "/files/" + escapePath(file.Path)
+	}
+	return "/api/profiles/" + profile.ID + "/files/" + escapePath(file.Path)
 }
 
 func escapePath(path string) string {

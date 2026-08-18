@@ -1,8 +1,10 @@
 package profiles
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"launcher-backend/internal/models"
 
+	"github.com/klauspost/compress/zstd"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -29,7 +32,11 @@ func TestScanBuildsManifest(t *testing.T) {
 
 	filesRoot := filepath.Join(service.storageRoot, profile.Slug, "files")
 	writeTestFile(t, filepath.Join(filesRoot, "mods", "example.jar"), "mod-data")
-	writeTestFile(t, filepath.Join(filesRoot, "runtime", "linux", "bin", "java"), "java")
+	javaPath := filepath.Join(filesRoot, "runtime", "linux", "bin", "java")
+	writeTestFile(t, javaPath, "java")
+	if err := os.Chmod(javaPath, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := service.Scan(context.Background(), profile.ID)
 	if err != nil {
@@ -51,6 +58,51 @@ func TestScanBuildsManifest(t *testing.T) {
 	}
 	if manifest.Files[0].Path != "mods/example.jar" {
 		t.Fatalf("first manifest path = %q", manifest.Files[0].Path)
+	}
+	if !manifest.Files[1].Executable {
+		t.Fatal("runtime executable bit is missing from manifest")
+	}
+	if manifest.Bundle == nil {
+		t.Fatal("manifest.Bundle = nil, want published tar.zst bundle")
+	}
+	if manifest.Bundle.Format != "tar.zst" || manifest.Bundle.Size <= 0 || len(manifest.Bundle.HashSHA256) != 64 {
+		t.Fatalf("manifest.Bundle = %+v", manifest.Bundle)
+	}
+	bundle, err := service.Bundle(context.Background(), profile.ID, manifest.Profile.ManifestVersion)
+	if err != nil {
+		t.Fatalf("Bundle() error = %v", err)
+	}
+	archive, err := os.Open(bundle.AbsolutePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	decoder, err := zstd.NewReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoder.Close()
+	tarReader := tar.NewReader(decoder)
+	var names []string
+	javaExecutable := false
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, header.Name)
+		if header.Name == "runtime/linux/bin/java" {
+			javaExecutable = header.Mode&0111 != 0
+		}
+	}
+	if strings.Join(names, ",") != "mods/example.jar,runtime/linux/bin/java" {
+		t.Fatalf("bundle entries = %v", names)
+	}
+	if !javaExecutable {
+		t.Fatal("bundle lost runtime executable mode")
 	}
 	if _, err := service.Download(context.Background(), profile.ID, "../escape.jar"); err == nil {
 		t.Fatal("Download() accepted path traversal")
@@ -319,15 +371,120 @@ func TestPreservePathsRejectUnsafeAndReservedPaths(t *testing.T) {
 
 func TestDownloadURLUsesCDNWhenConfigured(t *testing.T) {
 	profile := models.Profile{ID: "p1", Slug: "project-test"}
+	file := models.GameFile{Path: "mods/my mod.jar", HashSHA256: strings.Repeat("a", 64)}
 
 	backend := NewService(nil, t.TempDir(), "")
-	if got := backend.downloadURL(profile, "mods/my mod.jar"); got != "/api/profiles/p1/files/mods/my%20mod.jar" {
-		t.Fatalf("downloadURL() without CDN = %q", got)
+	if got := backend.downloadURL(profile, file, false); got != "/api/profiles/p1/files/mods/my%20mod.jar" {
+		t.Fatalf("legacy downloadURL() = %q", got)
 	}
 
 	cdn := NewService(nil, t.TempDir(), "https://pjm-files.s3.cloud.ru/")
-	if got := cdn.downloadURL(profile, "mods/my mod.jar"); got != "https://pjm-files.s3.cloud.ru/project-test/files/mods/my%20mod.jar" {
-		t.Fatalf("downloadURL() with CDN = %q", got)
+	if got := cdn.downloadURL(profile, file, false); got != "https://pjm-files.s3.cloud.ru/project-test/files/mods/my%20mod.jar" {
+		t.Fatalf("legacy CDN downloadURL() = %q", got)
+	}
+	if got := cdn.downloadURL(profile, file, true); got != "/api/profiles/p1/objects/"+strings.Repeat("a", 64) {
+		t.Fatalf("published immutable downloadURL() = %q", got)
+	}
+}
+
+func TestPublishedObjectIsImmutableAfterStagingMutation(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{Name: "Objects", Slug: "objects", Loader: "fabric", GameVersion: "1.21.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "example.jar")
+	writeTestFile(t, staging, "published")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.Manifest(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := manifest.Files[0].HashSHA256
+	writeTestFile(t, staging, "changed-through-sftp")
+	object, err := service.Object(context.Background(), profile.ID, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(object.AbsolutePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "published" {
+		t.Fatalf("published object changed with staging: %q", data)
+	}
+}
+
+func TestPublishedObjectRemainsAvailableAfterNextManifest(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{Name: "Objects", Slug: "objects", Loader: "fabric", GameVersion: "1.21.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "example.jar")
+	writeTestFile(t, staging, "version-one")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.Manifest(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := manifest.Files[0].HashSHA256
+
+	writeTestFile(t, staging, "version-two")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	object, err := service.Object(context.Background(), profile.ID, oldHash)
+	if err != nil {
+		t.Fatalf("old manifest object disappeared after publish: %v", err)
+	}
+	data, err := os.ReadFile(object.AbsolutePath)
+	if err != nil || string(data) != "version-one" {
+		t.Fatalf("old object = %q, err = %v", data, err)
+	}
+}
+
+func TestDeleteReleasesPublishedObjects(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{Name: "Delete", Slug: "delete", Loader: "fabric", GameVersion: "1.21.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "example.jar"), "only-this-profile")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.Manifest(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectPath := service.objectPath(manifest.Files[0].HashSHA256)
+	if err := service.Delete(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(objectPath); !os.IsNotExist(err) {
+		t.Fatalf("orphaned object remains after profile delete: %v", err)
+	}
+	if _, err := os.Stat(service.publishedProfileRoot(profile.ID)); !os.IsNotExist(err) {
+		t.Fatalf("published tree remains after profile delete: %v", err)
+	}
+}
+
+func TestScanRejectsWindowsIncompatiblePaths(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{Name: "Portable", Slug: "portable", Loader: "fabric", GameVersion: "1.21.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(service.storageRoot, profile.Slug, "files", "mods")
+	writeTestFile(t, filepath.Join(root, "Example.jar"), "a")
+	writeTestFile(t, filepath.Join(root, "example.jar"), "b")
+	if _, err := service.Scan(context.Background(), profile.ID); err == nil || !strings.Contains(err.Error(), "Windows") {
+		t.Fatalf("Scan() error = %v, want portable collision", err)
 	}
 }
 

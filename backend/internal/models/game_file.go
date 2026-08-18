@@ -9,4 +9,5 @@ type GameFile struct {
 	HashSHA256 string `gorm:"size:64;not null" json:"hashSha256"`
 	Size       int64  `gorm:"not null" json:"size"`
 	FileType   string `gorm:"size:16;not null;default:mod" json:"fileType"`
+	Executable bool   `gorm:"not null;default:false" json:"executable"`
 }

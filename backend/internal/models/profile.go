@@ -22,6 +22,8 @@ type Profile struct {
 	PreservePaths        []string   `gorm:"serializer:json;column:preserve_paths" json:"preservePaths"`
 	ManifestVersion      int        `gorm:"not null;default:0" json:"manifestVersion"`
 	ManifestUpdatedAt    *time.Time `json:"manifestUpdatedAt"`
+	BundleHashSHA256     string     `gorm:"size:64" json:"bundleHashSha256"`
+	BundleSize           int64      `gorm:"not null;default:0" json:"bundleSize"`
 	IsActive             bool       `gorm:"not null;default:true" json:"isActive"`
 	CreatedAt            time.Time  `json:"createdAt"`
 	UpdatedAt            time.Time  `json:"updatedAt"`

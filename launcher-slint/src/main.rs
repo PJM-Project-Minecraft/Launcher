@@ -22,6 +22,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
 mod anticheat;
 mod artifacts;
+mod bundle;
 mod discord_rpc;
 mod gpu;
 mod updater;
@@ -368,6 +369,8 @@ struct Manifest {
     preserve_paths: Vec<String>,
     file_count: usize,
     total_size: i64,
+    #[serde(default)]
+    bundle: Option<bundle::BundleInfo>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -404,6 +407,8 @@ struct ManifestFile {
     hash_sha256: String,
     size: i64,
     file_type: String,
+    #[serde(default)]
+    executable: bool,
 }
 
 type JavaRuntimeIndex = HashMap<String, HashMap<String, Vec<JavaRuntimeRelease>>>;
@@ -1696,7 +1701,47 @@ fn sync_and_launch(
         true,
     );
     let files_to_download = collect_files_to_download(app, &paths.files_root, &manifest.files)?;
-    download_files(config, token, app, &paths.files_root, &manifest, &files_to_download)?;
+    let missing_bytes = files_to_download
+        .iter()
+        .map(|file| file.size.max(0) as u64)
+        .sum();
+    if bundle::should_use(manifest.bundle.as_ref(), files_to_download.len(), missing_bytes) {
+        let bundle = manifest.bundle.as_ref().expect("checked by should_use");
+        let url = absolute_api_url(config, &bundle.download_url);
+        let specs = manifest
+            .files
+            .iter()
+            .map(|file| bundle::FileSpec {
+                path: file.path.clone(),
+                hash_sha256: file.hash_sha256.clone(),
+                size: file.size,
+                executable: file.executable,
+            })
+            .collect::<Vec<_>>();
+        let client = backend_download_client()?;
+        bundle::download_and_install(
+            &client,
+            &url,
+            token,
+            &paths.profile_root,
+            &paths.files_root,
+            bundle,
+            &specs,
+            |downloaded, total| {
+                let fraction = if total == 0 { 0.0 } else { downloaded as f32 / total as f32 };
+                post_progress(
+                    app,
+                    "Скачиваем сборку",
+                    &format!("bundle v{}", bundle.build_id),
+                    &format!("{} / {}", format_bytes(downloaded as i64), format_bytes(total as i64)),
+                    0.22 + fraction * 0.70,
+                    true,
+                );
+            },
+        )?;
+    } else {
+        download_files(config, token, app, &paths.files_root, &manifest, &files_to_download)?;
+    }
 
     post_progress(app, "Проверяем Java", "Runtime текущей ОС", "92%", 0.92, true);
     let java_managed_paths = ensure_java_runtime(app, &paths, &manifest)?;
@@ -1874,6 +1919,8 @@ fn download_one_file(
         let _ = fs::remove_file(&temp_path);
         return Err(format!("Размер файла изменился: {}", file.path));
     }
+
+    set_manifest_executable(&temp_path, file.executable)?;
 
     remove_existing_path_for_replace(&target)
         .map_err(|_| format!("Не удалось заменить {}", file.path))?;
@@ -2155,7 +2202,11 @@ fn needs_download(
 
     let expected = file.hash_sha256.to_lowercase();
     let hash = hash_file(&target)?;
-    Ok(hash != expected)
+    if hash != expected {
+        return Ok(true);
+    }
+    set_manifest_executable(&target, file.executable)?;
+    Ok(false)
 }
 
 fn file_mtime_millis(metadata: &fs::Metadata) -> i64 {
@@ -3444,6 +3495,29 @@ fn ensure_executable(#[cfg_attr(not(unix), allow(unused_variables))] path: &Path
     Ok(())
 }
 
+fn set_manifest_executable(
+    #[cfg_attr(not(unix), allow(unused_variables))] path: &Path,
+    executable: bool,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(path)
+            .map_err(|_| "Не удалось проверить права файла сборки.".to_string())?;
+        let mut permissions = metadata.permissions();
+        let mode = if executable {
+            permissions.mode() | 0o111
+        } else {
+            permissions.mode() & !0o111
+        };
+        permissions.set_mode(mode);
+        fs::set_permissions(path, permissions)
+            .map_err(|_| "Не удалось выставить права файла сборки.".to_string())?;
+    }
+    Ok(())
+}
+
 fn create_java_link(root: &Path, rel: &str, target: &str) -> Result<(), String> {
     if target.trim().is_empty() {
         return Ok(());
@@ -4158,6 +4232,7 @@ mod tests {
             total_size: files.iter().map(|file| file.size).sum(),
             files,
             preserve_paths,
+            bundle: None,
         }
     }
 
@@ -4174,6 +4249,7 @@ mod tests {
             hash_sha256: hash.to_string(),
             size,
             file_type: "test".to_string(),
+            executable: false,
         }
     }
 }
