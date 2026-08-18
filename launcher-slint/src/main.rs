@@ -2801,6 +2801,15 @@ fn selected_profile(state: &RuntimeState) -> Option<ProfileSummary> {
         .or_else(|| state.profiles.first().cloned())
 }
 
+/// Применять ли результат пинга. `forced` — игрок сам выбрал пункт «Авто» (он доступен
+/// только из настроек, т.е. уже под входом), это команда, а не фоновая инициатива.
+/// Фоновый пинг живую сессию не трогает: сессия и yggdrasil живут на том бэкенде, где
+/// начался вход. Восстановление сессии (`is_loading`) здесь НЕ учитывается: на медленном
+/// основном адресе оно висит до 30с, пинг финиширует раньше и выбор молча терялся.
+fn auto_switch_allowed(forced: bool, is_authenticated: bool) -> bool {
+    forced || !is_authenticated
+}
+
 /// Пинг серверов в фоне + авто-выбор самого быстрого. Подписи в списке обновляются
 /// по мере ответов (`set_row_data` на месте — замена модели сбросила бы выбор игрока),
 /// а в режиме «Авто» лаунчер сам переключается на самый быстрый доступный адрес.
@@ -2811,6 +2820,7 @@ fn spawn_mirror_probe(
     app_weak: Weak<AppWindow>,
     config: AppConfig,
     mirrors: Vec<(String, String)>,
+    forced: bool,
 ) {
     if mirrors.len() < 2 {
         return; // выбирать не из чего
@@ -2840,14 +2850,19 @@ fn spawn_mirror_probe(
             return;
         }
         let Some(best) = best_ping_index(&pings) else {
-            return; // не ответил никто — остаёмся на текущем адресе
+            // Не ответил никто — остаёмся на текущем адресе. При ручном «Авто» об этом
+            // надо сказать: иначе висит «Сервер выбирается автоматически…» навсегда.
+            if forced {
+                let _ = app_weak.upgrade_in_event_loop(|app| {
+                    app.set_message("Ни один сервер не ответил.".into());
+                });
+            }
+            return;
         };
         let (name, url) = mirrors[best].clone();
         let ms = pings[best].unwrap_or(0);
         let _ = app_weak.upgrade_in_event_loop(move |app| {
-            // Под живой сессией адрес не меняем: игровая сессия и yggdrasil живут на
-            // том бэкенде, где начался вход.
-            if app.get_is_authenticated() || app.get_is_loading() {
+            if !auto_switch_allowed(forced, app.get_is_authenticated()) {
                 return;
             }
             config.set_api_url(&url);
@@ -2876,7 +2891,7 @@ fn register_mirror_handler(
     app.set_server_index(current as i32);
     // Селектор показываем, только когда есть из чего выбирать (зеркал больше одного).
     app.set_server_visible(mirrors.len() > 1);
-    spawn_mirror_probe(app.as_weak(), config.clone(), mirrors.clone());
+    spawn_mirror_probe(app.as_weak(), config.clone(), mirrors.clone(), false);
 
     let app_weak = app.as_weak();
     app.on_server_selected(move |index| {
@@ -2888,7 +2903,7 @@ fn register_mirror_handler(
             if let Some(app) = app_weak.upgrade() {
                 app.set_message("Сервер выбирается автоматически…".into());
             }
-            spawn_mirror_probe(app_weak.clone(), config.clone(), mirrors.clone());
+            spawn_mirror_probe(app_weak.clone(), config.clone(), mirrors.clone(), true);
             return;
         }
         let Some((name, url)) = mirrors.get(idx - 1) else {
@@ -3915,6 +3930,15 @@ mod tests {
         assert_eq!(format_playtime(45 * 60), "45 мин");
         assert_eq!(format_playtime(3_600), "1 ч");
         assert_eq!(format_playtime(12 * 3_600 + 34 * 60), "12 ч 34 мин");
+    }
+
+    #[test]
+    fn auto_switch_applies_unless_session_is_live() {
+        assert!(auto_switch_allowed(false, false));
+        // Фон не перебивает живую сессию, но ручной выбор «Авто» (он только из настроек,
+        // т.е. всегда под входом) обязан срабатывать — иначе пункт мёртвый.
+        assert!(!auto_switch_allowed(false, true));
+        assert!(auto_switch_allowed(true, true));
     }
 
     #[test]
