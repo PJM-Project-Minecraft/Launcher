@@ -4,6 +4,13 @@ set -euo pipefail
 host="${1:-root@176.108.254.89}"
 base_url="${LAUNCHER_API_URL:-https://launcher.likonchik.xyz}"
 runs="${MANIFEST_BENCH_RUNS:-3}"
+accept_encoding="${MANIFEST_ACCEPT_ENCODING:-zstd, gzip}"
+resolve_args=()
+if [[ -n "${MANIFEST_RESOLVE_IP:-}" ]]; then
+  base_host="${base_url#*://}"
+  base_host="${base_host%%/*}"
+  resolve_args=(--resolve "${base_host}:443:${MANIFEST_RESOLVE_IP}")
+fi
 
 mapfile -t credentials < <(
   ssh "$host" 'bash -s' <<'REMOTE'
@@ -59,7 +66,9 @@ trap 'rm -f "$body_file" "$header_file"' EXIT
 
 for ((run = 1; run <= runs; run++)); do
   curl --silent --show-error --compressed \
+    "${resolve_args[@]}" \
     --header "Authorization: Bearer $token" \
+    --header "Accept-Encoding: $accept_encoding" \
     --dump-header "$header_file" \
     --output "$body_file" \
     --write-out "public run=$run code=%{http_code} wire_bytes=%{size_download} ttfb=%{time_starttransfer}s total=%{time_total}s\n" \
@@ -88,6 +97,7 @@ read -r token
 read -r profile_id
 curl --silent --show-error --compressed \
   --header "Authorization: Bearer $token" \
+  --header "Accept-Encoding: zstd, gzip" \
   --output /dev/null \
   --write-out "origin code=%{http_code} wire_bytes=%{size_download} ttfb=%{time_starttransfer}s total=%{time_total}s\\n" \
   "http://127.0.0.1:8080/api/profiles/$profile_id/manifest"
