@@ -1,6 +1,6 @@
 [package]
 name = "launcher-slint"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 build = "build.rs"
 
@@ -18,7 +18,7 @@ keyring = { version = "3", features = [
     "windows-native",
 ] }
 rayon = "1"
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots", "gzip", "zstd"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"

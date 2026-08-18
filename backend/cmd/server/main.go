@@ -74,6 +74,7 @@ func main() {
 		BodyLimit: 512 * 1024 * 1024,
 	})
 	app.Use(middleware.CORS(cfg.AllowedOrigins))
+	app.Use(middleware.ManifestCompression())
 
 	// Брутфорс-защита: лимит по IP на эндпоинты, принимающие пароль.
 	authLimiter := limiter.New(limiter.Config{

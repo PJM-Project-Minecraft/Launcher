@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -3154,14 +3154,64 @@ fn post_progress(
 /// пересборки лаунчера (роутинг сертификатов вшит в бинарник). Сторонние загрузки (Mojang/S3)
 /// намеренно остаются на системном хранилище + системном прокси — см. download_client.
 pub(crate) fn hardened_backend_builder() -> reqwest::blocking::ClientBuilder {
-    Client::builder().use_rustls_tls().no_proxy()
+    Client::builder()
+        .use_rustls_tls()
+        .no_proxy()
+        .gzip(true)
+        .zstd(true)
 }
 
-fn http_client() -> Result<Client, String> {
+static API_CLIENT: LazyLock<Result<Client, String>> = LazyLock::new(|| {
     hardened_backend_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Не удалось создать HTTP клиент.".to_string())
+});
+
+fn http_client() -> Result<Client, String> {
+    API_CLIENT
+        .as_ref()
+        .map(Client::clone)
+        .map_err(String::clone)
+}
+
+#[cfg(test)]
+#[test]
+fn hardened_client_negotiates_and_decodes_zstd() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let address = listener.local_addr().expect("test server address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+        let mut request = [0_u8; 8_192];
+        let read = stream.read(&mut request).expect("read request");
+        let headers = String::from_utf8_lossy(&request[..read]).to_lowercase();
+        assert!(headers.contains("accept-encoding:"));
+        assert!(headers.contains("zstd"));
+
+        let body = zstd::stream::encode_all(b"{\"manifest\":true}".as_slice(), 1)
+            .expect("encode zstd response");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write response headers");
+        stream.write_all(&body).expect("write response body");
+    });
+
+    let response = hardened_backend_builder()
+        .build()
+        .expect("build hardened client")
+        .get(format!("http://{address}/manifest"))
+        .send()
+        .expect("request compressed manifest")
+        .text()
+        .expect("decode compressed manifest");
+    assert_eq!(response, "{\"manifest\":true}");
+    server.join().expect("test server");
 }
 
 /// Клиент для скачивания СТОРОННИХ файлов (Mojang java-runtime, S3-зеркало профилей):

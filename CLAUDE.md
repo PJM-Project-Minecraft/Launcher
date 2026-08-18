@@ -396,6 +396,8 @@ NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Jav
 ## Релизы лаунчера
 
 Текущие версии:
+- **0.4.7** (сжатие большого JSON-manifest через zstd/gzip и переиспользование
+  HTTP connection pool; не сжимаются bundle/object Range-загрузки).
 - **0.4.6** (быстрые immutable `tar.zst` bundle с Range-resume для массовых
   установок; малые обновления идут параллельно из content-addressed objects).
 - **0.4.5** (восстановление сессии между запусками + авто-выбор сервера).
