@@ -1,4 +1,55 @@
-import { LineEdit, ComboBox } from "std-widgets.slint";
+import { ComboBox } from "std-widgets.slint";
+import "../assets/minecraft-Regular.ttf";
+import "../assets/minecraft-Bold.ttf";
+import "../assets/minecraft-ten.ttf";
+
+// Pixelarticons состоят из целочисленных 2px-блоков. Запрещаем
+// линейную фильтрацию, чтобы они не размывались при масштабировании.
+component PixelIcon inherits Image {
+    image-fit: contain;
+    image-rendering: pixelated;
+}
+
+// Своё поле ввода не наследует голубой Fluent focus-indicator.
+component PjmLineEdit inherits Rectangle {
+    in-out property <string> text;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> enabled: true;
+    in property <length> font-size: 16px;
+    callback accepted(string);
+
+    public function request-focus() { field.focus(); }
+
+    border-radius: 4px;
+    background: root.enabled ? #161a1f : #11151a;
+    border-color: field.has-focus ? #ffb020 : #9eaab82e;
+    border-width: field.has-focus ? 2px : 1px;
+    opacity: root.enabled ? 1.0 : 0.58;
+    animate background, border-color, border-width, opacity {
+        duration: 160ms;
+        easing: ease-out-quint;
+    }
+
+    field := TextInput {
+        x: 12px;
+        y: 2px;
+        width: parent.width - 24px;
+        height: parent.height - 4px;
+        text <=> root.text;
+        input-type: root.input-type;
+        enabled: root.enabled;
+        single-line: true;
+        font-family: "Minecraft Default";
+        font-size: root.font-size;
+        font-weight: 400;
+        color: #f2ece0;
+        vertical-alignment: center;
+        selection-background-color: #ffb020;
+        selection-foreground-color: #0b0f14;
+        text-cursor-width: 2px;
+        accepted => { root.accepted(self.text); }
+    }
+}
 
 component GoldButton inherits Rectangle {
     in property <string> label;
@@ -8,20 +59,20 @@ component GoldButton inherits Rectangle {
 
     height: 56px;
     border-radius: 4px;
-    background: !enabled ? #43464b : (ta.pressed ? #c4c8ce : (ta.has-hover ? #f5f7f9 : #e4e7eb));
-    border-color: ta.has-hover && enabled ? #ffffff88 : #ffffff33;
+    background: !enabled ? #43464b : (ta.pressed ? #d89418 : (ta.has-hover ? #ffc14d : #ffb020));
+    border-color: ta.has-hover && enabled ? #ffe1a0 : #ffb02078;
     border-width: 1px;
     opacity: enabled ? 1.0 : 0.62;
-    animate background { duration: 160ms; easing: ease-out-quad; }
-    animate border-color { duration: 160ms; easing: ease-out-quad; }
-    animate opacity { duration: 160ms; easing: ease-out-quad; }
+    animate background { duration: 180ms; easing: ease-out-quint; }
+    animate border-color { duration: 180ms; easing: ease-out-quint; }
+    animate opacity { duration: 180ms; easing: ease-out-quint; }
     horizontal-stretch: 0;
 
     drop-shadow-blur: enabled ? (ta.has-hover ? 24px : 16px) : 6px;
-    drop-shadow-color: enabled ? (ta.has-hover ? #9aa0a680 : #9aa0a660) : #00000000;
+    drop-shadow-color: enabled ? (ta.has-hover ? #ffb02066 : #ffb0203d) : #00000000;
     drop-shadow-offset-y: enabled ? (ta.has-hover ? 10px : 6px) : 2px;
-    animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-    animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
+    animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
+    animate drop-shadow-offset-y { duration: 320ms; easing: ease-out-quint; }
 
     HorizontalLayout {
         padding-left: 12px;
@@ -32,20 +83,18 @@ component GoldButton inherits Rectangle {
         VerticalLayout {
             alignment: center;
             Rectangle {
-                width: 27px;
-                height: 27px;
+                width: 28px;
+                height: 28px;
                 border-radius: 14px;
                 background: #26292e;
 
-            Image {
+            PixelIcon {
                 source: root.icon-source;
-                image-fit: contain;
-                width: ta.pressed ? 16px : (ta.has-hover ? 21px : 18px);
-                height: self.width;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
+                width: 20px;
+                height: 20px;
+                x: 4px;
+                y: 4px;
                 colorize: #f2f4f6;
-                animate width { duration: 340ms; easing: ease-out-back; }
             }
             }
         }
@@ -54,8 +103,9 @@ component GoldButton inherits Rectangle {
             alignment: center;
             Text {
                 text: root.label;
-                color: #1b1d20;
-                font-size: 18px;
+                font-family: "Minecraft Default";
+                color: #0b0f14;
+                font-size: 16px;
                 font-weight: 900;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -81,19 +131,19 @@ component DarkButton inherits Rectangle {
 
     height: 52px;
     border-radius: 4px;
-    background: !enabled ? #111313 : (ta.pressed ? #1d211f : (ta.has-hover ? #151a18 : #070808));
+    background: !enabled ? #11151a : (ta.pressed ? #303944 : (ta.has-hover ? #273340 : #090c10));
     opacity: enabled ? 1.0 : 0.58;
-    animate background { duration: 160ms; easing: ease-out-quad; }
-    animate opacity { duration: 160ms; easing: ease-out-quad; }
+    animate background { duration: 180ms; easing: ease-out-quint; }
+    animate opacity { duration: 180ms; easing: ease-out-quint; }
     horizontal-stretch: 0;
-    border-color: ta.has-hover && enabled ? #9aa0a650 : #ffffff20;
+    border-color: ta.has-hover && enabled ? #ffb02078 : #9eaab821;
     border-width: 1px;
-    animate border-color { duration: 160ms; easing: ease-out-quad; }
+    animate border-color { duration: 180ms; easing: ease-out-quint; }
     drop-shadow-blur: ta.has-hover && enabled ? 14px : 8px;
     drop-shadow-color: ta.has-hover && enabled ? #000000bb : #00000088;
     drop-shadow-offset-y: ta.has-hover && enabled ? 7px : 4px;
-    animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-    animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
+    animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
+    animate drop-shadow-offset-y { duration: 320ms; easing: ease-out-quint; }
 
     HorizontalLayout {
         padding-left: 14px;
@@ -107,15 +157,13 @@ component DarkButton inherits Rectangle {
             Rectangle {
                 width: 28px;
                 height: 28px;
-                Image {
+                PixelIcon {
                     source: root.icon-source;
-                    image-fit: contain;
-                    width: ta.pressed ? 21px : (ta.has-hover ? 27px : 24px);
-                    height: self.width;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
+                    width: 24px;
+                    height: 24px;
+                    x: 2px;
+                    y: 2px;
                     colorize: root.icon-color;
-                    animate width { duration: 340ms; easing: ease-out-back; }
                 }
             }
         }
@@ -124,7 +172,8 @@ component DarkButton inherits Rectangle {
             alignment: center;
             Text {
                 text: root.label;
-                color: #dde0e3;
+                color: ta.has-hover && root.enabled ? #f2ece0 : #c7cdd6;
+                animate color { duration: 180ms; easing: ease-out-quint; }
                 font-size: 14px;
                 font-weight: 900;
                 vertical-alignment: center;
@@ -145,47 +194,114 @@ component NavButton inherits Rectangle {
     in property <image> icon-source;
     callback clicked();
 
-    height: 58px;
+    width: 140px;
+    height: 72px;
     background: transparent;
 
-    width: row.preferred-width;
+    if root.icon-source.width > 0: PixelIcon {
+        source: root.icon-source;
+        x: 0px;
+        y: 20px;
+        width: 32px;
+        height: 32px;
+        colorize: root.active ? #ffb020 : (ta.has-hover ? #f2ece0 : #9aa4b0);
+        animate colorize { duration: 180ms; easing: ease-out-quint; }
+    }
 
-    row := HorizontalLayout {
-        height: parent.height;
-        spacing: 9px;
-        alignment: center;
-
-        if root.icon-source.width > 0: VerticalLayout {
-            alignment: center;
-            Image {
-                source: root.icon-source;
-                image-fit: contain;
-                width: 24px;
-                height: 24px;
-                colorize: root.active ? white : (ta.has-hover ? #f0eee7 : #c6c0b4);
-                animate colorize { duration: 160ms; easing: ease-out-quad; }
-            }
-        }
-
-        Text {
-            text: root.label;
-            color: root.active ? white : (ta.has-hover ? #f0eee7 : #c6c0b4);
-            animate color { duration: 160ms; easing: ease-out-quad; }
-            font-size: 20px;
-            font-weight: root.active ? 900 : 500;
-            vertical-alignment: center;
-        }
+    Text {
+        text: root.label;
+        x: 42px;
+        y: 0px;
+        width: parent.width - 42px;
+        height: parent.height - 3px;
+        font-family: "Minecraft Default";
+        color: root.active ? #ffb020 : (ta.has-hover ? #f2ece0 : #c7cdd6);
+        animate color { duration: 180ms; easing: ease-out-quint; }
+        font-size: 19px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
     }
 
     Rectangle {
         y: parent.height - 3px;
-        width: root.active ? parent.width : 0px;
+        width: parent.width;
         height: 3px;
-        background: #d8d6cf;
-        animate width { duration: 340ms; easing: ease-out-back; }
+        background: #ffb020;
+        opacity: root.active ? 1.0 : 0.0;
+        animate opacity { duration: 120ms; easing: ease-out-quad; }
     }
 
     ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Для соцсетей используем официальные плавные знаки, а не
+// условные пиктограммы из общего UI-набора.
+component SocialButton inherits Rectangle {
+    in property <image> icon-source;
+    in property <brush> brand-color;
+    callback clicked();
+
+    width: 52px;
+    height: 52px;
+    border-radius: 4px;
+    background: social-touch.pressed ? root.brand-color : (social-touch.has-hover ? #273340 : #090c10);
+    border-color: social-touch.has-hover ? root.brand-color : #9eaab821;
+    border-width: 1px;
+    animate background, border-color { duration: 180ms; easing: ease-out-quint; }
+
+    Image {
+        source: root.icon-source;
+        image-fit: contain;
+        image-rendering: smooth;
+        x: 11px;
+        y: 11px;
+        width: 30px;
+        height: 30px;
+        colorize: social-touch.pressed ? #ffffff : root.brand-color;
+        animate colorize { duration: 180ms; easing: ease-out-quint; }
+    }
+
+    social-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon-source;
+    in property <brush> icon-color: #c7cdd6;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 48px;
+    height: 48px;
+    border-radius: 4px;
+    background: !enabled ? #11151a : (icon-touch.pressed
+        ? (danger ? #421717 : #303944)
+        : (icon-touch.has-hover ? (danger ? #321416 : #273340) : #090c10));
+    border-color: icon-touch.has-hover && enabled
+        ? (danger ? #ff6b6b88 : #ffb02078)
+        : #9eaab821;
+    border-width: 1px;
+    opacity: enabled ? 1.0 : 0.46;
+    animate background, border-color, opacity { duration: 180ms; easing: ease-out-quint; }
+
+    PixelIcon {
+        source: root.icon-source;
+        x: 12px;
+        y: 12px;
+        width: 24px;
+        height: 24px;
+        colorize: root.danger ? #ff6b6b : root.icon-color;
+    }
+
+    icon-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
 }
 
 component PlayButton inherits Rectangle {
@@ -196,19 +312,19 @@ component PlayButton inherits Rectangle {
 
     height: 64px;
     border-radius: 4px;
-    background: !enabled ? #3a3d42 : (ta.pressed ? #c4c8ce : (ta.has-hover ? #f5f7f9 : #e4e7eb));
+    background: !enabled ? #3a3d42 : (ta.pressed ? #d89418 : (ta.has-hover ? #ffc14d : #ffb020));
     opacity: enabled ? 1.0 : 0.62;
-    animate background { duration: 160ms; easing: ease-out-quad; }
-    animate opacity { duration: 160ms; easing: ease-out-quad; }
-    border-color: ta.has-hover && enabled ? #ffffff66 : #ffffff33;
+    animate background { duration: 180ms; easing: ease-out-quint; }
+    animate opacity { duration: 180ms; easing: ease-out-quint; }
+    border-color: ta.has-hover && enabled ? #ffe1a0 : #ffb02078;
     border-width: 1px;
-    animate border-color { duration: 160ms; easing: ease-out-quad; }
+    animate border-color { duration: 180ms; easing: ease-out-quint; }
 
     drop-shadow-blur: ta.has-hover ? 22px : 14px;
-    drop-shadow-color: enabled ? (ta.has-hover ? #c0c4c975 : #c0c4c945) : #00000000;
+    drop-shadow-color: enabled ? (ta.has-hover ? #ffb02066 : #ffb0203d) : #00000000;
     drop-shadow-offset-y: ta.has-hover ? 10px : 6px;
-    animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-    animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
+    animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
+    animate drop-shadow-offset-y { duration: 320ms; easing: ease-out-quint; }
 
     HorizontalLayout {
         padding-left: 22px;
@@ -219,20 +335,18 @@ component PlayButton inherits Rectangle {
         VerticalLayout {
             alignment: center;
             Rectangle {
-                width: 40px;
-                height: 40px;
-                border-radius: 20px;
+                width: 48px;
+                height: 48px;
+                border-radius: 24px;
                 background: enabled ? #26292e : #ffffff1f;
 
-                Image {
+                PixelIcon {
                     source: root.icon-source;
-                    image-fit: contain;
-                    width: ta.pressed ? 21px : (ta.has-hover ? 28px : 24px);
-                    height: self.width;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
+                    width: 32px;
+                    height: 32px;
+                    x: 8px;
+                    y: 8px;
                     colorize: enabled ? #f2f4f6 : #ffffff;
-                    animate width { duration: 340ms; easing: ease-out-back; }
                 }
             }
         }
@@ -241,8 +355,9 @@ component PlayButton inherits Rectangle {
             alignment: center;
             Text {
                 text: root.label;
-                color: enabled ? #17181a : #ffffff;
-                font-size: 23px;
+                font-family: "Minecraft Default";
+                color: enabled ? #0b0f14 : #ffffff;
+                font-size: 22px;
                 font-weight: 900;
                 letter-spacing: 0px;
                 horizontal-alignment: center;
@@ -267,17 +382,17 @@ component MiniButton inherits Rectangle {
     width: 58px;
     height: 52px;
     border-radius: 4px;
-    background: !enabled ? #111111 : (active ? #e4e7eb : (ta.pressed ? #242424 : (ta.has-hover ? #191919 : #080808)));
-    border-color: active ? #ffffffaa : #ffffff14;
+    background: !enabled ? #11151a : (active ? #ffb020 : (ta.pressed ? #34301f : (ta.has-hover ? #222a32 : #090c10)));
+    border-color: active ? #ffc14d : (ta.has-hover ? #ffb02078 : #9eaab821);
     border-width: 1px;
     opacity: enabled ? 1.0 : 0.56;
-    animate background { duration: 160ms; easing: ease-out-quad; }
-    animate border-color { duration: 160ms; easing: ease-out-quad; }
-    animate opacity { duration: 160ms; easing: ease-out-quad; }
+    animate background { duration: 180ms; easing: ease-out-quint; }
+    animate border-color { duration: 180ms; easing: ease-out-quint; }
+    animate opacity { duration: 180ms; easing: ease-out-quint; }
 
     Text {
         text: root.label;
-        color: active ? #1b1d20 : #e0e2e5;
+        color: active ? #0b0f14 : #f2ece0;
         font-size: 18px;
         font-weight: 900;
         horizontal-alignment: center;
@@ -287,6 +402,77 @@ component MiniButton inherits Rectangle {
 
     ta := TouchArea {
         enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Компактный переключатель настроек. Текстовое состояние остаётся читаемым
+// без опоры только на цвет, а общий контракт скрывает повторяющуюся анимацию.
+component SettingsToggle inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+
+    width: 72px;
+    height: 30px;
+    border-radius: 4px;
+    background: !enabled ? #14191f : (checked ? (toggle-touch.has-hover ? #ffc14d : #ffb020) : (toggle-touch.has-hover ? #273340 : #19212b));
+    border-color: checked ? #ffc14d : (toggle-touch.has-hover ? #9eaab847 : #9eaab821);
+    border-width: 1px;
+    opacity: enabled ? 1.0 : 0.48;
+    animate background, border-color, opacity { duration: 180ms; easing: ease-out-quint; }
+
+    Text {
+        text: root.checked ? "ВКЛ" : "ВЫКЛ";
+        color: root.checked ? #0b0f14 : #9aa4b0;
+        animate color { duration: 180ms; easing: ease-out-quint; }
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 0.7px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    toggle-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+// Маленькая action-кнопка для плотных строк настроек. В отличие от DarkButton
+// она не резервирует место под иконку и визуально совпадает с WEB control rows.
+component SettingsButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 40px;
+    border-radius: 4px;
+    background: !enabled ? #11151a : (primary
+        ? (settings-button-touch.pressed ? #d89418 : (settings-button-touch.has-hover ? #ffc14d : #ffb020))
+        : (settings-button-touch.pressed ? #303944 : (settings-button-touch.has-hover ? #273340 : #19212b)));
+    border-color: primary ? #ffc14d : (settings-button-touch.has-hover ? #ffb02078 : #9eaab821);
+    border-width: 1px;
+    opacity: enabled ? 1.0 : 0.48;
+    animate background, border-color, opacity { duration: 180ms; easing: ease-out-quint; }
+
+    Text {
+        text: root.label;
+        color: root.primary ? #0b0f14 : #c7cdd6;
+        animate color { duration: 180ms; easing: ease-out-quint; }
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 0.7px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    settings-button-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
 }
@@ -309,8 +495,8 @@ component NewsCard inherits Rectangle {
 
     height: 116px;
     border-radius: 6px;
-    background: ta.has-hover ? #10130feb : #0b0e0deb;
-    border-color: ta.has-hover ? #9aa0a655 : #ffffff1c;
+    background: ta.has-hover ? #273340d9 : #0e1319eb;
+    border-color: ta.has-hover ? #ffb02078 : #9eaab821;
     border-width: 1px;
     clip: true;
     opacity: shown ? 1.0 : 0.0;
@@ -318,8 +504,8 @@ component NewsCard inherits Rectangle {
     drop-shadow-color: #00000066;
     drop-shadow-offset-y: ta.has-hover ? 6px : 0px;
     animate background, border-color { duration: 220ms; easing: ease-out-quint; }
-    animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-    animate drop-shadow-offset-y { duration: 240ms; easing: ease-out-quint; }
+    animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
+    animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-quint; }
     animate opacity { duration: 380ms; delay: index * 70ms; easing: ease-out-quint; }
 
     Rectangle {
@@ -327,8 +513,8 @@ component NewsCard inherits Rectangle {
         y: 0px;
         width: ta.has-hover ? 6px : 4px;
         height: parent.height;
-        background: #9aa0a6;
-        animate width { duration: 200ms; easing: ease-out-quad; }
+        background: #ffb020;
+        animate width { duration: 220ms; easing: ease-out-quint; }
     }
 
     VerticalLayout {
@@ -378,7 +564,9 @@ export component AppWindow inherits Window {
     // 232px сайдбар + 728px плей-карточка при синке + отступы: уже 900px даёт наложение.
     min-width: 1024px;
     min-height: 600px;
-    background: #070707;
+    background: #090c10;
+    default-font-family: "Minecraft Default";
+    default-font-weight: 400;
 
     property <float> startup-opacity: 0.0;
     in-out property <int> active-tab: 0;
@@ -483,885 +671,814 @@ export component AppWindow inherits Window {
         animate opacity { duration: 600ms; easing: ease-out-quint; }
 
         Image {
-            source: @image-url("../assets/background.jpg");
+            source: @image-url("../assets/background-13d.png");
             image-fit: cover;
             width: parent.width;
             height: parent.height;
         }
 
         Rectangle {
-            background: #000000b8;
+            background: #0000008f;
         }
 
-	    Rectangle {
-	        // Селектор зеркала есть не всегда — карточка и всё под ним съезжают
-	        // на mirror-shift, только когда зеркал больше одного.
-	        property <length> mirror-shift: root.server-visible ? 96px : 0px;
-	        width: 474px;
-	        height: 484px + self.mirror-shift;
-	        x: (parent.width - 474px) / 2;
-	        y: (parent.height - self.height) / 2 + (root.is-loading ? -8px : 0px);
-	        visible: !root.is-authenticated;
-	        border-radius: 22px;
-	        background: root.is-loading ? #050403 : #000000;
-            border-color: root.is-loading ? #9aa0a636 : #ffffff0f;
+        login-card := Rectangle {
+            property <length> mirror-shift: root.server-visible ? 86px : 0px;
+            width: 520px;
+            height: 444px + self.mirror-shift;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 + (root.is-loading ? -6px : 0px);
+            visible: !root.is-authenticated;
+            border-radius: 12px;
+            background: #090c10f5;
+            border-color: root.is-loading ? #ffb02078 : #9eaab82e;
             border-width: 1px;
-            drop-shadow-blur: root.is-loading ? 42px : 30px;
-            drop-shadow-color: root.is-loading ? #9aa0a63f : #00000088;
-            drop-shadow-offset-y: root.is-loading ? 16px : 10px;
+            drop-shadow-blur: root.is-loading ? 40px : 28px;
+            drop-shadow-color: root.is-loading ? #ffb0202f : #00000099;
+            drop-shadow-offset-y: root.is-loading ? 14px : 9px;
             opacity: !root.is-authenticated ? 1.0 : 0.0;
             animate y { duration: 420ms; easing: ease-in-out-quint; }
             animate background, border-color { duration: 300ms; easing: ease-out-quint; }
-            animate drop-shadow-blur { duration: 320ms; easing: ease-out-quint; }
-            animate drop-shadow-offset-y { duration: 320ms; easing: ease-out-quint; }
+            animate drop-shadow-blur, drop-shadow-offset-y { duration: 340ms; easing: ease-out-quint; }
             animate opacity { duration: 420ms; easing: ease-in-out-quint; }
 
-        HorizontalLayout {
-            x: 40px;
-            y: 38px;
-            width: parent.width - 80px;
-            height: 48px;
-            spacing: 18px;
+            Rectangle {
+                x: 24px;
+                y: 24px;
+                width: 40px;
+                height: 40px;
+                border-radius: 4px;
+                background: #19212b;
+                border-color: #ffb02078;
+                border-width: 1px;
 
-            VerticalLayout {
-                alignment: center;
-                Image {
-                    source: @image-url("../assets/game.svg");
-                    image-fit: contain;
-                    width: 32px;
-                    height: 32px;
+                PixelIcon {
+                    source: @image-url("../assets/px/target.svg");
+                    x: 8px;
+                    y: 8px;
+                    width: 24px;
+                    height: 24px;
+                    colorize: #ffb020;
                 }
             }
 
             Text {
                 text: "PROJECT MINECRAFT";
-                color: #e0e2e5;
-                font-size: 29px;
-                font-weight: 900;
+                font-family: "Minecraft Ten font cyrillic";
+                x: 84px;
+                y: 19px;
+                width: parent.width - 108px;
+                height: 50px;
+                color: #f2ece0;
+                font-size: 24px;
+                font-weight: 400;
+                letter-spacing: 0.5px;
                 vertical-alignment: center;
-            }
-        }
-
-        Rectangle {
-            x: 38px;
-            y: 124px;
-            width: parent.width - 76px;
-            height: 1px;
-            background: #242424;
-        }
-
-        if root.server-visible: Text {
-            text: "Сервер";
-            x: 40px;
-            y: 158px;
-            color: #b4b7bc;
-            font-size: 18px;
-            font-weight: 900;
-        }
-
-        if root.server-visible: ComboBox {
-            x: 40px;
-            y: 188px;
-            width: parent.width - 80px;
-            height: 56px;
-            enabled: !root.is-loading && !root.is-authenticated;
-            model: root.server-names;
-            current-index <=> root.server-index;
-            selected(value) => {
-                root.server-selected(self.current-index);
-            }
-        }
-
-        Image {
-            source: @image-url("../assets/account_circle.svg");
-            colorize: #b4b7bc;
-            width: 22px;
-            height: 22px;
-            x: 40px;
-            y: 157px + parent.mirror-shift;
-        }
-
-        Text {
-            text: "Логин";
-            x: 70px;
-            y: 158px + parent.mirror-shift;
-            color: #b4b7bc;
-            font-size: 18px;
-            font-weight: 900;
-        }
-
-        login-input := LineEdit {
-            x: 40px;
-            y: 188px + parent.mirror-shift;
-            width: parent.width - 80px;
-            height: 66px;
-	            font-size: 20px;
-	            enabled: !root.is-loading && !root.is-authenticated;
-            text <=> root.login-value;
-            placeholder-text: "";
-            accepted(_) => { password-input.focus(); }
-        }
-
-        Image {
-            source: @image-url("../assets/password.svg");
-            colorize: #b4b7bc;
-            width: 22px;
-            height: 22px;
-            x: 40px;
-            y: 277px + parent.mirror-shift;
-        }
-
-        Text {
-            text: "Пароль";
-            x: 70px;
-            y: 278px + parent.mirror-shift;
-            color: #b4b7bc;
-            font-size: 18px;
-            font-weight: 900;
-        }
-
-        password-input := LineEdit {
-            x: 40px;
-            y: 308px + parent.mirror-shift;
-            width: parent.width - 80px;
-            height: 66px;
-	            font-size: 20px;
-	            enabled: !root.is-loading && !root.is-authenticated;
-            text <=> root.password-value;
-            input-type: password;
-            placeholder-text: "";
-            accepted(_) => {
-                root.login-requested(root.login-value, root.password-value, root.totp-value);
-            }
-        }
-
-        if root.message != "" && !root.requires-totp: Text {
-            text: root.message;
-            x: 40px;
-            y: 454px + parent.mirror-shift;
-            width: parent.width - 80px;
-            color: #ff6b6b;
-            font-size: 13px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            overflow: elide;
-        }
-
-        GoldButton {
-            x: 112px;
-            y: 392px + parent.mirror-shift;
-            width: 254px;
-            height: 56px;
-	            label: root.is-loading ? "ПРОВЕРКА..." : "АВТОРИЗОВАТЬСЯ";
-	            icon-source: @image-url("../assets/login.svg");
-	            enabled: !root.is-loading && !root.is-authenticated;
-            clicked => {
-                root.login-requested(root.login-value, root.password-value, root.totp-value);
-            }
-        }
-    }
-
-	    Rectangle {
-	        width: parent.width;
-	        height: parent.height;
-	        y: root.is-authenticated ? 0px : 18px;
-	        visible: root.is-authenticated;
-	        background: transparent;
-	        opacity: root.is-authenticated ? 1.0 : 0.0;
-            animate y { duration: 480ms; delay: 80ms; easing: ease-out-quint; }
-            animate opacity { duration: 480ms; delay: 80ms; easing: ease-in-out-quint; }
-
-        Rectangle {
-            x: 232px;
-            y: 104px;
-            width: parent.width - 232px;
-            height: parent.height - 104px;
-            background: #00000040;
-            opacity: root.is-authenticated ? 1.0 : 0.0;
-            animate opacity { duration: 480ms; delay: 80ms; easing: ease-in-out-quint; }
-        }
-
-        // Лента новостей проекта в центре главного экрана
-        Rectangle {
-            x: 264px;
-            y: root.is-authenticated ? 130px : 146px;
-            width: parent.width - 296px;
-            height: parent.height - 180px;
-            background: transparent;
-            opacity: root.is-authenticated && root.active-tab == 1 ? 1.0 : 0.0;
-            visible: self.opacity > 0.01;
-            animate opacity { duration: 300ms; easing: ease-in-out; }
-
-            Image {
-                source: @image-url("../assets/news.svg");
-                image-fit: contain;
-                x: 2px;
-                y: -2px;
-                width: 20px;
-                height: 20px;
-                colorize: #989ca2;
-            }
-
-            Text {
-                text: "НОВОСТИ ПРОЕКТА";
-                x: 29px;
-                y: 0px;
-                color: #989ca2;
-                font-size: 15px;
-                font-weight: 900;
-                letter-spacing: 1px;
+                overflow: elide;
             }
 
             Rectangle {
-                x: 0px;
-                y: 32px;
-                width: parent.width;
-                height: parent.height - 32px;
+                x: 24px;
+                y: 88px;
+                width: parent.width - 48px;
+                height: 1px;
+                background: #9eaab821;
+            }
 
-                if root.news-items.length == 0: Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Новостей пока нет";
-                    color: #6f675c;
-                    font-size: 14px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            if root.server-visible: PixelIcon {
+                source: @image-url("../assets/px/server.svg");
+                colorize: #ffb020;
+                x: 40px;
+                y: 116px;
+                width: 20px;
+                height: 20px;
+            }
+
+            if root.server-visible: Text {
+                text: "Сервер";
+                x: 66px;
+                y: 112px;
+                width: parent.width - 106px;
+                height: 24px;
+                color: #c7cdd6;
+                font-size: 15px;
+                font-weight: 800;
+                vertical-alignment: center;
+            }
+
+            if root.server-visible: ComboBox {
+                x: 40px;
+                y: 142px;
+                width: parent.width - 80px;
+                height: 52px;
+                enabled: !root.is-loading && !root.is-authenticated;
+                model: root.server-names;
+                current-index <=> root.server-index;
+                selected(value) => { root.server-selected(self.current-index); }
+            }
+
+            PixelIcon {
+                source: @image-url("../assets/px/user.svg");
+                colorize: #ffb020;
+                width: 20px;
+                height: 20px;
+                x: 40px;
+                y: 116px + parent.mirror-shift;
+            }
+
+            Text {
+                text: "Логин";
+                x: 66px;
+                y: 112px + parent.mirror-shift;
+                width: parent.width - 106px;
+                height: 24px;
+                color: #c7cdd6;
+                font-size: 15px;
+                font-weight: 800;
+                vertical-alignment: center;
+            }
+
+            login-input := PjmLineEdit {
+                x: 40px;
+                y: 142px + parent.mirror-shift;
+                width: parent.width - 80px;
+                height: 58px;
+                font-size: 17px;
+                enabled: !root.is-loading && !root.is-authenticated;
+                text <=> root.login-value;
+                accepted(_) => { password-input.request-focus(); }
+            }
+
+            PixelIcon {
+                source: @image-url("../assets/px/lock.svg");
+                colorize: #ffb020;
+                width: 20px;
+                height: 20px;
+                x: 40px;
+                y: 224px + parent.mirror-shift;
+            }
+
+            Text {
+                text: "Пароль";
+                x: 66px;
+                y: 220px + parent.mirror-shift;
+                width: parent.width - 106px;
+                height: 24px;
+                color: #c7cdd6;
+                font-size: 15px;
+                font-weight: 800;
+                vertical-alignment: center;
+            }
+
+            password-input := PjmLineEdit {
+                x: 40px;
+                y: 250px + parent.mirror-shift;
+                width: parent.width - 80px;
+                height: 58px;
+                font-size: 17px;
+                enabled: !root.is-loading && !root.is-authenticated;
+                text <=> root.password-value;
+                input-type: password;
+                accepted(_) => {
+                    root.login-requested(root.login-value, root.password-value, root.totp-value);
+                }
+            }
+
+            GoldButton {
+                x: 40px;
+                y: 330px + parent.mirror-shift;
+                width: parent.width - 80px;
+                height: 58px;
+                label: root.is-loading ? "ПРОВЕРКА..." : "АВТОРИЗОВАТЬСЯ";
+                icon-source: @image-url("../assets/px/corner-down-left.svg");
+                enabled: !root.is-loading && !root.is-authenticated;
+                clicked => {
+                    root.login-requested(root.login-value, root.password-value, root.totp-value);
+                }
+            }
+
+            if root.message != "" && !root.requires-totp: Text {
+                text: root.message;
+                x: 40px;
+                y: 400px + parent.mirror-shift;
+                width: parent.width - 80px;
+                height: 24px;
+                color: #9aa4b0;
+                font-size: 12px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        main-shell := Rectangle {
+            width: parent.width;
+            height: parent.height;
+            y: root.is-authenticated ? 0px : 14px;
+            visible: root.is-authenticated;
+            background: transparent;
+            opacity: root.is-authenticated ? 1.0 : 0.0;
+            animate y { duration: 460ms; delay: 70ms; easing: ease-out-quint; }
+            animate opacity { duration: 460ms; delay: 70ms; easing: ease-in-out-quint; }
+
+            // Полноэкранная игровая сцена без боковой панели.
+            Rectangle {
+                x: 0px;
+                y: 104px;
+                width: parent.width;
+                height: parent.height - 104px;
+                background: @linear-gradient(180deg, #05080b42 0%, #05080b18 45%, #05080bd9 100%);
+            }
+
+            // Новости.
+            Rectangle {
+                x: 32px;
+                y: 132px;
+                width: parent.width - 64px;
+                height: parent.height - 188px;
+                background: transparent;
+                opacity: root.is-authenticated && root.active-tab == 1 && !root.settings-visible ? 1.0 : 0.0;
+                visible: self.opacity > 0.01;
+                animate opacity { duration: 360ms; easing: ease-in-out-quint; }
+
+                PixelIcon {
+                    source: @image-url("../assets/px/article.svg");
+                    x: 0px;
+                    y: 0px;
+                    width: 24px;
+                    height: 24px;
+                    colorize: #ffb020;
                 }
 
-                Flickable {
+                Text {
+                    text: "НОВОСТИ ПРОЕКТА";
+                    font-family: "Minecraft Ten font cyrillic";
+                    x: 34px;
+                    y: 0px;
+                    width: parent.width - 34px;
+                    height: 24px;
+                    color: #f2ece0;
+                    font-size: 15px;
+                    font-weight: 400;
+                    letter-spacing: 0.8px;
+                }
+
+                Rectangle {
+                    x: 0px;
+                    y: 36px;
                     width: parent.width;
-                    height: parent.height;
-                    viewport-width: self.width;
+                    height: parent.height - 36px;
+                    background: transparent;
 
-                    VerticalLayout {
+                    if root.news-items.length == 0: Text {
                         width: parent.width;
-                        spacing: 12px;
-                        padding-bottom: 8px;
+                        height: parent.height;
+                        text: "Новостей пока нет";
+                        color: #9aa4b0;
+                        font-size: 14px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
 
-                        for item[idx] in root.news-items: NewsCard {
-                            title: item.title;
-                            date: item.date;
-                            body: item.body;
-                            index: idx;
+                    Flickable {
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-width: self.width;
+
+                        VerticalLayout {
+                            width: parent.width;
+                            spacing: 12px;
+                            padding-bottom: 8px;
+
+                            for item[idx] in root.news-items: NewsCard {
+                                title: item.title;
+                                date: item.date;
+                                body: item.body;
+                                index: idx;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Поддержка
-        Rectangle {
-            x: 264px;
-            y: root.is-authenticated ? 130px : 146px;
-            width: parent.width - 296px;
-            height: parent.height - 180px;
-            background: transparent;
-            opacity: root.is-authenticated && root.active-tab == 2 ? 1.0 : 0.0;
-            visible: self.opacity > 0.01;
-            animate opacity { duration: 300ms; easing: ease-in-out; }
+            // Поддержка.
+            Rectangle {
+                x: 32px;
+                y: 132px;
+                width: parent.width - 64px;
+                height: parent.height - 188px;
+                background: transparent;
+                opacity: root.is-authenticated && root.active-tab == 2 && !root.settings-visible ? 1.0 : 0.0;
+                visible: self.opacity > 0.01;
+                animate opacity { duration: 360ms; easing: ease-in-out-quint; }
 
-            VerticalLayout {
-                spacing: 24px;
-                alignment: start;
-                
-                HorizontalLayout {
-                    spacing: 12px;
-                    Image {
-                        source: @image-url("../assets/support.svg");
-                        width: 20px;
-                        height: 20px;
-                        colorize: #989ca2;
-                    }
-                    Text {
-                        text: "ПОДДЕРЖКА И СООБЩЕСТВО";
-                        color: #989ca2;
-                        font-size: 15px;
-                        font-weight: 900;
-                        letter-spacing: 1px;
-                        vertical-alignment: center;
-                    }
+                PixelIcon {
+                    source: @image-url("../assets/px/message-text.svg");
+                    x: 0px;
+                    y: 0px;
+                    width: 24px;
+                    height: 24px;
+                    colorize: #ffb020;
                 }
 
                 Text {
-                    text: "Возникли проблемы или есть вопросы?\nПрисоединяйтесь к нашим сообществам!\nМы всегда готовы помочь.";
-                    color: #eceef1;
-                    font-size: 20px;
-                    font-weight: 800;
+                    text: "ПОДДЕРЖКА И СООБЩЕСТВО";
+                    font-family: "Minecraft Ten font cyrillic";
+                    x: 34px;
+                    y: 0px;
+                    width: parent.width - 34px;
+                    height: 24px;
+                    color: #f2ece0;
+                    font-size: 15px;
+                    font-weight: 400;
+                    letter-spacing: 0.8px;
                 }
 
-                HorizontalLayout {
-                    spacing: 14px;
-                    alignment: start;
+                Text {
+                    text: "Нужна помощь? Выберите удобный канал связи.";
+                    x: 0px;
+                    y: 48px;
+                    width: parent.width;
+                    height: 28px;
+                    color: #c7cdd6;
+                    font-size: 17px;
+                    font-weight: 700;
+                }
 
-                    DarkButton {
-                        width: 232px;
-                        label: "Discord-сервер";
-                        icon-source: @image-url("../assets/discord.svg");
-                        icon-color: white;
-                        clicked => { root.open-url("https://discord.gg/zmeJMqH7j8"); }
-                    }
-                    DarkButton {
-                        width: 232px;
-                        label: "Telegram-канал";
-                        icon-source: @image-url("../assets/telegram.svg");
-                        icon-color: white;
-                        clicked => { root.open-url("https://t.me/project_minecraft"); }
-                    }
+                DarkButton {
+                    x: 0px;
+                    y: 94px;
+                    width: 232px;
+                    label: "Discord-сервер";
+                    icon-source: @image-url("../assets/px/message-text.svg");
+                    icon-color: #f2ece0;
+                    clicked => { root.open-url("https://discord.gg/zmeJMqH7j8"); }
+                }
+
+                DarkButton {
+                    x: 246px;
+                    y: 94px;
+                    width: 232px;
+                    label: "Telegram-канал";
+                    icon-source: @image-url("../assets/px/external-link.svg");
+                    icon-color: #f2ece0;
+                    clicked => { root.open-url("https://t.me/project_minecraft"); }
                 }
             }
-        }
 
-        Rectangle {
-            x: 232px;
-            y: 0px;
-            width: parent.width - 232px;
-            height: 104px;
-            background: #090b0bee;
-        }
-
-        Rectangle {
-            x: 232px;
-            y: 103px;
-            width: parent.width - 232px;
-            height: 1px;
-            background: #ffffff22;
-        }
-
-        Rectangle {
-            x: root.is-authenticated ? 0px : -24px;
-            y: 0px;
-            width: 232px;
-            height: parent.height;
-            background: #101514f2;
-            border-color: #ffffff14;
-            border-width: 1px;
-            clip: true;
-            animate x { duration: 480ms; easing: ease-out-quint; }
-
+            // Верхняя command-панель.
             Rectangle {
                 x: 0px;
                 y: 0px;
                 width: parent.width;
-                height: 106px;
-                background: #090c0cee;
+                height: 104px;
+                background: #0b0f14f5;
+                border-color: #9eaab821;
+                border-width: 1px;
+
+                Image {
+                    source: @image-url("../assets/logo.svg");
+                    image-fit: contain;
+                    x: 30px;
+                    y: 27px;
+                    width: 132px;
+                    height: 50px;
+                }
+
+                Rectangle {
+                    x: 180px;
+                    y: 22px;
+                    width: 1px;
+                    height: 60px;
+                    background: #9eaab821;
+                }
+
+                HorizontalLayout {
+                    x: 200px;
+                    y: 16px;
+                    height: 72px;
+                    spacing: root.width >= 1180px ? 20px : 8px;
+                    opacity: root.is-authenticated ? 1.0 : 0.0;
+                    animate opacity { duration: 380ms; delay: 80ms; easing: ease-in-out-quint; }
+
+                    NavButton {
+                        width: root.width >= 1180px ? 112px : 92px;
+                        label: "ИГРА";
+                        active: root.active-tab == 0 && !root.settings-visible;
+                        icon-source: @image-url("../assets/px/gamepad.svg");
+                        clicked => {
+                            root.settings-close-requested();
+                            root.active-tab = 0;
+                        }
+                    }
+                    NavButton {
+                        width: root.width >= 1180px ? 148px : 120px;
+                        label: "НОВОСТИ";
+                        active: root.active-tab == 1 && !root.settings-visible;
+                        icon-source: @image-url("../assets/px/article.svg");
+                        clicked => {
+                            root.settings-close-requested();
+                            root.active-tab = 1;
+                        }
+                    }
+                    NavButton {
+                        width: root.width >= 1180px ? 176px : 144px;
+                        label: "НАСТРОЙКИ";
+                        active: root.settings-visible;
+                        icon-source: @image-url("../assets/px/cpu.svg");
+                        clicked => { root.settings-requested(); }
+                    }
+                    NavButton {
+                        width: root.width >= 1180px ? 168px : 156px;
+                        label: "ПОДДЕРЖКА";
+                        active: root.active-tab == 2 && !root.settings-visible;
+                        icon-source: @image-url("../assets/px/message-text.svg");
+                        clicked => {
+                            root.settings-close-requested();
+                            root.active-tab = 2;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    x: parent.width - 252px;
+                    y: 20px;
+                    width: 218px;
+                    height: 64px;
+                    background: transparent;
+
+                    Rectangle {
+                        x: 0px;
+                        y: 8px;
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 4px;
+                        background: account-touch.has-hover ? #273340 : #19212b;
+                        border-color: account-touch.has-hover ? #ffb02078 : #9eaab821;
+                        border-width: 1px;
+                        animate background, border-color { duration: 180ms; easing: ease-out-quint; }
+
+                        PixelIcon {
+                            source: @image-url("../assets/px/user.svg");
+                            x: 12px;
+                            y: 12px;
+                            width: 24px;
+                            height: 24px;
+                            colorize: account-touch.has-hover ? #ffb020 : #c7cdd6;
+                            animate colorize { duration: 180ms; easing: ease-out-quint; }
+                        }
+
+                        account-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { account-popup.show(); }
+                        }
+
+                        account-popup := PopupWindow {
+                            x: 48px - 320px;
+                            y: 54px;
+                            width: 320px;
+                            height: 118px;
+
+                            Rectangle {
+                                background: #0e1319fa;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: #9eaab847;
+
+                                VerticalLayout {
+                                    padding: 18px;
+                                    spacing: 7px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: root.user-login;
+                                        color: #f2ece0;
+                                        font-size: 16px;
+                                        font-weight: 900;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: "UUID: " + root.user-uuid;
+                                        color: #9aa4b0;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+                                    if root.token-expires-at != "": Text {
+                                        text: "Сессия до: " + root.token-expires-at;
+                                        color: #9aa4b0;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.user-login;
+                        x: 60px;
+                        y: 9px;
+                        width: 102px;
+                        height: 24px;
+                        color: #f2ece0;
+                        font-size: 14px;
+                        font-weight: 800;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: "● В сети";
+                        x: 60px;
+                        y: 33px;
+                        width: 102px;
+                        height: 20px;
+                        color: #7ecb82;
+                        font-size: 12px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    IconButton {
+                        x: 172px;
+                        y: 8px;
+                        icon-source: @image-url("../assets/px/logout.svg");
+                        danger: true;
+                        clicked => { root.logout-requested(); }
+                    }
+                }
+
+                // Линия готовности: активная навигация сверху, прогресс загрузки снизу.
+                Rectangle {
+                    x: 0px;
+                    y: parent.height - 2px;
+                    width: parent.width;
+                    height: 2px;
+                    background: #ffb020;
+                    opacity: root.is-syncing ? 0.28 : 0.65;
+                    animate opacity { duration: 260ms; easing: ease-out-quint; }
+                }
             }
 
-            Image {
-                source: @image-url("../assets/logo.svg");
-                image-fit: contain;
-                x: 34px;
-                y: 32px;
-                width: 132px;
-                height: 48px;
-            }
-
+            // Быстрые действия вместо sidebar.
             Rectangle {
-                x: 30px;
-                y: 106px;
-                width: parent.width - 60px;
-                height: 1px;
-                background: #ffffff22;
+                x: 32px;
+                y: parent.height - 84px;
+                width: 288px;
+                height: 52px;
+                visible: root.active-tab == 0 && !root.settings-visible && !root.is-syncing;
+
+                DarkButton {
+                    x: 0px;
+                    y: 0px;
+                    width: 168px;
+                    height: 52px;
+                    label: "ПАПКА МОДОВ";
+                    icon-source: @image-url("../assets/px/folder.svg");
+                    icon-color: #c7cdd6;
+                    enabled: root.has-profile;
+                    clicked => { root.open-mods-folder-requested(); }
+                }
+
+                SocialButton {
+                    x: 180px;
+                    y: 0px;
+                    icon-source: @image-url("../assets/discord.svg");
+                    brand-color: #5865f2;
+                    clicked => { root.open-url("https://discord.gg/zmeJMqH7j8"); }
+                }
+
+                SocialButton {
+                    x: 236px;
+                    y: 0px;
+                    icon-source: @image-url("../assets/telegram.svg");
+                    brand-color: #229ed9;
+                    clicked => { root.open-url("https://t.me/project_minecraft"); }
+                }
             }
 
-            Rectangle {
-                x: 0px;
-                y: 122px;
-                width: parent.width;
-                height: 78px;
-                background: #18201ee8;
+            launch-dock := Rectangle {
+                property <bool> dl-done: root.download-progress >= 1.0;
+                property <bool> dl-pulse: false;
+                property <bool> dl-error: root.download-panel-visible && !root.is-syncing;
+                property <length> content-width: min(660px, root.width - 344px);
+
+                Timer {
+                    interval: 850ms;
+                    running: root.is-syncing && !launch-dock.dl-done;
+                    triggered => { launch-dock.dl-pulse = !launch-dock.dl-pulse; }
+                }
+
+                x: parent.width - self.width - 32px;
+                y: parent.height - self.height - 32px;
+                width: self.content-width + (root.is-syncing ? 80px : 0px);
+                height: 172px;
+                opacity: root.is-authenticated && root.active-tab == 0 && !root.settings-visible ? 1.0 : 0.0;
+                visible: self.opacity > 0.01;
+                border-radius: 6px;
+                background: #0e1319f2;
+                border-color: root.is-syncing ? #ffb02078 : #9eaab847;
+                border-width: 1px;
+                drop-shadow-blur: root.is-syncing ? 32px : 22px;
+                drop-shadow-color: root.is-syncing ? #ffb0202f : #00000099;
+                drop-shadow-offset-y: 9px;
+                clip: true;
+                animate width { duration: 420ms; easing: ease-out-quint; }
+                animate opacity { duration: 340ms; easing: ease-in-out-quint; }
+                animate border-color, drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
 
                 Rectangle {
                     x: 0px;
                     y: 0px;
-                    width: 3px;
-                    height: parent.height;
-                    background: #c4cfc4;
-                }
-
-                Rectangle {
-                    x: 32px;
-                    y: 15px;
-                    width: 48px;
-                    height: 48px;
-                    border-radius: 4px;
-                    background: #d8d8c5;
-
-                    Image {
-                        source: @image-url("../assets/game.svg");
-                        image-fit: contain;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: 26px;
-                        height: 26px;
-                        colorize: #202826;
-                    }
-                }
-
-                Text {
-                    text: root.has-profile ? root.selected-profile-name : "Нет профиля";
-                    x: 92px;
-                    y: 0px;
-                    width: parent.width - 100px;
-                    height: parent.height;
-                    color: #eceef1;
-                    font-size: 14px;
-                    font-weight: 800;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
-
-            DarkButton {
-                x: 24px;
-                y: parent.height - self.height - 32px;
-                width: 184px;
-                height: 46px;
-                label: "Папка модов";
-                icon-source: @image-url("../assets/mods.svg");
-                enabled: root.has-profile;
-                clicked => { root.open-mods-folder-requested(); }
-            }
-        }
-
-        HorizontalLayout {
-            x: 260px;
-            y: root.is-authenticated ? 22px : 8px;
-            height: 58px;
-            spacing: 24px;
-            opacity: root.is-authenticated ? 1.0 : 0.0;
-            animate y { duration: 480ms; delay: 80ms; easing: ease-out-quint; }
-            animate opacity { duration: 480ms; delay: 80ms; easing: ease-in-out-quint; }
-
-            NavButton { 
-                label: "ИГРА"; 
-                active: root.active-tab == 0; 
-                icon-source: @image-url("../assets/game.svg"); 
-                clicked => { root.active-tab = 0; }
-            }
-            NavButton { 
-                label: "НОВОСТИ"; 
-                active: root.active-tab == 1; 
-                icon-source: @image-url("../assets/news.svg"); 
-                clicked => { root.active-tab = 1; }
-            }
-            NavButton { 
-                label: "ПОДДЕРЖКА"; 
-                active: root.active-tab == 2; 
-                icon-source: @image-url("../assets/support.svg"); 
-                clicked => { root.active-tab = 2; }
-            }
-        }
-
-        HorizontalLayout {
-            x: parent.width - 132px;
-            y: 30px;
-            width: 104px;
-            height: 46px;
-            spacing: 12px;
-
-            Rectangle {
-                width: 46px;
-                height: 46px;
-                border-radius: 4px;
-                background: ta-person.pressed ? #202423 : (ta-person.has-hover ? #171d1b : #050606);
-                animate background { duration: 160ms; easing: ease-out-quad; }
-                border-color: ta-person.has-hover ? #9aa0a650 : #ffffff20;
-                border-width: 1px;
-                drop-shadow-blur: ta-person.has-hover ? 14px : 0px;
-                drop-shadow-color: #00000088;
-                drop-shadow-offset-y: ta-person.has-hover ? 6px : 0px;
-                animate border-color { duration: 160ms; easing: ease-out-quad; }
-                animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-                animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
-                Image {
-                    source: @image-url("../assets/person.svg");
-                    image-fit: contain;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 24px;
-                    height: 24px;
-                    colorize: #e8e4dc;
-                }
-                ta-person := TouchArea { clicked => { account-popup.show(); } }
-
-                // Карточка аккаунта: логин, UUID и срок сессии. Закрывается кликом мимо.
-                account-popup := PopupWindow {
-                    x: 46px - 320px;
-                    y: 54px;
-                    width: 320px;
-                    height: 118px;
+                    width: parent.width;
+                    height: 3px;
+                    background: #19212b;
 
                     Rectangle {
-                        background: #0c0e0efa;
-                        border-radius: 10px;
-                        border-width: 1px;
-                        border-color: #ffffff22;
-
-                        VerticalLayout {
-                            padding: 18px;
-                            spacing: 7px;
-                            alignment: center;
-
-                            Text {
-                                text: root.user-login;
-                                color: #eceef1;
-                                font-size: 17px;
-                                font-weight: 900;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: "UUID: " + root.user-uuid;
-                                color: #8c8f95;
-                                font-size: 12px;
-                                font-weight: 600;
-                                overflow: elide;
-                            }
-                            if root.token-expires-at != "": Text {
-                                text: "Сессия до: " + root.token-expires-at;
-                                color: #8c8f95;
-                                font-size: 12px;
-                                font-weight: 600;
-                                overflow: elide;
-                            }
-                        }
+                        x: 0px;
+                        y: 0px;
+                        width: root.is-syncing ? parent.width * root.download-progress : parent.width;
+                        height: parent.height;
+                        background: #ffb020;
+                        animate width { duration: 320ms; easing: ease-out-quint; }
                     }
                 }
-            }
 
-            Rectangle {
-                width: 46px;
-                height: 46px;
-                border-radius: 4px;
-                background: ta-logout.pressed ? #331111 : (ta-logout.has-hover ? #220b0b : #050606);
-                animate background { duration: 160ms; easing: ease-out-quad; }
-                border-color: ta-logout.has-hover ? #ff4d4d40 : #ffffff20;
-                border-width: 1px;
-                drop-shadow-blur: ta-logout.has-hover ? 14px : 0px;
-                drop-shadow-color: #00000088;
-                drop-shadow-offset-y: ta-logout.has-hover ? 6px : 0px;
-                animate border-color { duration: 160ms; easing: ease-out-quad; }
-                animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-                animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
-                Image {
-                    source: @image-url("../assets/logout.svg");
-                    image-fit: contain;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 24px;
-                    height: 24px;
-                    colorize: #ff4d4d;
-                }
-                ta-logout := TouchArea { clicked => { root.logout-requested(); } }
-            }
-        }
-
-        HorizontalLayout {
-            x: 260px;
-            y: parent.height - self.height - 32px;
-            spacing: 12px;
-            height: 52px;
-
-            Rectangle {
-                width: 52px;
-                height: 52px;
-                border-radius: 4px;
-                background: ta-discord.pressed ? #202423 : (ta-discord.has-hover ? #171d1b : #050606);
-                animate background { duration: 160ms; easing: ease-out-quad; }
-                border-color: ta-discord.has-hover ? #9aa0a650 : #ffffff20;
-                border-width: 1px;
-                drop-shadow-blur: ta-discord.has-hover ? 14px : 0px;
-                drop-shadow-color: #00000088;
-                drop-shadow-offset-y: ta-discord.has-hover ? 6px : 0px;
-                animate border-color { duration: 160ms; easing: ease-out-quad; }
-                animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-                animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
-                Image {
-                    source: @image-url("../assets/discord.svg");
-                    image-fit: contain;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 26px;
-                    height: 26px;
-                    colorize: white;
-                }
-                ta-discord := TouchArea {
-                    clicked => { root.open-url("https://discord.gg/zmeJMqH7j8"); }
-                }
-            }
-
-            Rectangle {
-                width: 52px;
-                height: 52px;
-                border-radius: 4px;
-                background: ta-telegram.pressed ? #202423 : (ta-telegram.has-hover ? #171d1b : #050606);
-                animate background { duration: 160ms; easing: ease-out-quad; }
-                border-color: ta-telegram.has-hover ? #9aa0a650 : #ffffff20;
-                border-width: 1px;
-                drop-shadow-blur: ta-telegram.has-hover ? 14px : 0px;
-                drop-shadow-color: #00000088;
-                drop-shadow-offset-y: ta-telegram.has-hover ? 6px : 0px;
-                animate border-color { duration: 160ms; easing: ease-out-quad; }
-                animate drop-shadow-blur { duration: 240ms; easing: ease-out-quint; }
-                animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-back; }
-                Image {
-                    source: @image-url("../assets/telegram.svg");
-                    image-fit: contain;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 26px;
-                    height: 26px;
-                    colorize: white;
-                }
-                ta-telegram := TouchArea {
-                    clicked => { root.open-url("https://t.me/project_minecraft"); }
-                }
-            }
-        }
-
-        play-card := Rectangle {
-            property <bool> dl-done: root.download-progress >= 1.0;
-            // пульс активности: мигает, пока идёт загрузка (как «проверка файлов»)
-            property <bool> dl-pulse: false;
-            // Синхронизация оборвалась с ошибкой: панель осталась видимой, но
-            // syncing уже сброшен. Без этого состояния карточка возвращалась к
-            // «Доступен» и ошибка была невидима — выглядело как молчаливый
-            // откат проверки файлов по кругу.
-            property <bool> dl-error: root.download-panel-visible && !root.is-syncing;
-
-            Timer {
-                interval: 850ms;
-                running: root.is-syncing && !play-card.dl-done;
-                triggered => { play-card.dl-pulse = !play-card.dl-pulse; }
-            }
-
-            x: parent.width - self.width - 32px;
-            y: parent.height - self.height - 32px + (root.is-syncing ? -2px : 0px);
-            opacity: root.is-authenticated && root.active-tab == 0 ? 1.0 : 0.0;
-            visible: self.opacity > 0.01;
-            // при загрузке подложка расширяется влево, освобождая место под иконку
-            width: root.is-syncing ? 728px : 620px;
-            height: 178px;
-            border-radius: 6px;
-            background: #080a0aeb;
-            border-color: root.is-syncing ? #9aa0a655 : #ffffff22;
-            border-width: 1px;
-            drop-shadow-blur: root.is-syncing ? 34px : 24px;
-            drop-shadow-color: root.is-syncing ? #9aa0a62f : #00000099;
-            drop-shadow-offset-y: root.is-syncing ? 12px : 8px;
-            clip: true;
-            animate width { duration: 460ms; easing: ease-out-quint; }
-            animate opacity { duration: 300ms; easing: ease-in-out; }
-            animate border-color { duration: 300ms; easing: ease-out-quint; }
-            animate drop-shadow-blur { duration: 300ms; easing: ease-out-quint; }
-            animate drop-shadow-offset-y { duration: 300ms; easing: ease-out-quint; }
-
-            // ── левая область с иконкой скачивания (раскрывается при загрузке) ──
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                width: parent.width - 620px;
-                height: parent.height;
-                clip: true;
-
-                // вертикальный разделитель справа от иконки
                 Rectangle {
-                    x: parent.width - 1px;
-                    width: 1px;
-                    height: parent.height - 48px;
-                    y: 24px;
-                    background: #ffffff12;
+                    x: 0px;
+                    y: 3px;
+                    width: parent.width - launch-dock.content-width;
+                    height: parent.height - 3px;
                     opacity: root.is-syncing ? 1.0 : 0.0;
-                    animate opacity { duration: 360ms; easing: ease-out-quint; }
+                    animate opacity { duration: 280ms; easing: ease-out-quint; }
+
+                    PixelIcon {
+                        source: launch-dock.dl-done
+                            ? @image-url("../assets/px/check.svg")
+                            : @image-url("../assets/px/download.svg");
+                        x: (parent.width - 24px) / 2;
+                        y: (parent.height - 24px) / 2;
+                        width: 24px;
+                        height: 24px;
+                        colorize: launch-dock.dl-done ? #f2ece0 : #ffb020;
+                    }
                 }
 
-                // плитка иконки
                 Rectangle {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 68px;
-                    height: 68px;
-                    border-radius: 18px;
-                    background: play-card.dl-done ? #1f2937 : #14181c;
-                    border-width: 1px;
-                    border-color: play-card.dl-done ? #ffffff44 : #ffffff14;
-                    opacity: root.is-syncing ? 1.0 : 0.0;
-                    animate background, border-color { duration: 480ms; easing: ease-out-quint; }
-                    animate opacity { duration: 320ms; easing: ease-out-quint; }
+                    x: parent.width - launch-dock.content-width;
+                    y: 3px;
+                    width: launch-dock.content-width;
+                    height: parent.height - 3px;
+                    background: transparent;
 
-                    // волна свечения — кольцо бьёт наружу при завершении
+                    Text {
+                        text: root.has-profile ? root.selected-profile-name : "Сборка не выбрана";
+                        x: 24px;
+                        y: 16px;
+                        width: 340px;
+                        height: 28px;
+                        color: #f2ece0;
+                        font-size: 18px;
+                        font-weight: 900;
+                        overflow: elide;
+                    }
+
                     Rectangle {
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: play-card.dl-done ? 124px : 48px;
-                        height: self.width;
-                        border-radius: self.width / 2;
-                        background: transparent;
-                        border-width: 2px;
-                        border-color: #ffffff;
-                        opacity: play-card.dl-done ? 0.0 : 0.16;
-                        animate width, opacity { duration: 680ms; easing: ease-out-quint; }
+                        x: 24px;
+                        y: 50px;
+                        width: 4px;
+                        height: 104px;
+                        background: #ffb020;
                     }
 
-                    // иконка загрузки (гаснет при завершении)
-                    Image {
-                        source: @image-url("../assets/download.svg");
-                        image-fit: contain;
-                        width: 30px;
-                        height: 30px;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        colorize: #cdd1d7;
-                        opacity: play-card.dl-done ? 0.0 : 1.0;
-                        animate opacity { duration: 260ms; easing: ease-out-quad; }
+                    Text {
+                        text: "Версия";
+                        x: 44px;
+                        y: 50px;
+                        width: 84px;
+                        height: 22px;
+                        color: #7f8794;
+                        font-size: 13px;
+                        font-weight: 800;
+                    }
+                    Text {
+                        text: root.selected-profile-version;
+                        x: 132px;
+                        y: 50px;
+                        width: 190px;
+                        height: 22px;
+                        color: #c7cdd6;
+                        font-size: 15px;
+                        font-weight: 800;
+                        overflow: elide;
                     }
 
-                    // галочка готовности (упруго выскакивает)
-                    Image {
-                        source: @image-url("../assets/download_done.svg");
-                        image-fit: contain;
-                        width: play-card.dl-done ? 38px : 20px;
-                        height: self.width;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        colorize: #ffffff;
-                        opacity: play-card.dl-done ? 1.0 : 0.0;
-                        animate width { duration: 520ms; easing: ease-out-back; }
-                        animate opacity { duration: 320ms; easing: ease-out-quad; }
+                    Text {
+                        text: "Статус";
+                        x: 44px;
+                        y: 76px;
+                        width: 84px;
+                        height: 22px;
+                        color: #7f8794;
+                        font-size: 13px;
+                        font-weight: 800;
                     }
-                }
-            }
+                    Text {
+                        text: root.is-syncing || launch-dock.dl-error
+                            ? root.download-phase
+                            : root.profile-status;
+                        x: 132px;
+                        y: 76px;
+                        width: 190px;
+                        height: 22px;
+                        color: launch-dock.dl-error ? #ff6b6b
+                            : (root.is-syncing ? (launch-dock.dl-pulse ? #f2ece0 : #9aa4b0) : #c7cdd6);
+                        font-size: 15px;
+                        font-weight: 800;
+                        overflow: elide;
+                        animate color { duration: 850ms; easing: ease-in-out-sine; }
+                    }
 
-            HorizontalLayout {
-                x: parent.width - 620px;
-                width: 620px;
-                height: parent.height;
-                padding-left: 32px;
-                padding-right: 28px;
-                spacing: 24px;
-                alignment: space-between;
+                    Text {
+                        text: root.is-syncing ? "Прогресс" : (launch-dock.dl-error ? "Причина" : "Клиент");
+                        x: 44px;
+                        y: 102px;
+                        width: 84px;
+                        height: 22px;
+                        color: #7f8794;
+                        font-size: 13px;
+                        font-weight: 800;
+                    }
+                    Text {
+                        text: root.is-syncing
+                            ? "\{round(root.download-progress * 100)}% · " + root.download-counter
+                            : (launch-dock.dl-error ? root.download-file : (root.has-profile ? "Готов" : "Отключен"));
+                        x: 132px;
+                        y: 102px;
+                        width: 190px;
+                        height: 22px;
+                        color: launch-dock.dl-error ? #ff6b6b : #c7cdd6;
+                        font-size: 15px;
+                        font-weight: 800;
+                        overflow: elide;
+                    }
 
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 12px;
-                    width: 278px;
-                    horizontal-stretch: 0;
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { width: 84px; text: "Версия:"; color: #989ca2; font-size: 14px; font-weight: 800; }
-                            Text { width: 186px; text: root.selected-profile-version; color: #d7dadf; font-size: 14px; font-weight: 800; horizontal-alignment: left; overflow: elide; }
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { width: 84px; text: "Статус:"; color: #989ca2; font-size: 14px; font-weight: 800; }
-                            Text {
-                                width: 186px;
-                                horizontal-alignment: left;
-                                text: root.is-syncing || play-card.dl-error
-                                    ? root.download-phase
-                                    : root.profile-status;
-                                color: play-card.dl-error ? #ff6b6b
-                                    : (root.is-syncing
-                                        ? (play-card.dl-done ? #ffffff : (play-card.dl-pulse ? #ffffff : #8a8f96))
-                                        : #d7dadf);
-                                font-size: 14px;
-                                font-weight: 800;
-                                overflow: elide;
-                                animate color { duration: 850ms; easing: ease-in-out-sine; }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { width: 84px; text: root.is-syncing ? "Прогресс:" : (play-card.dl-error ? "Причина:" : "Клиент:"); color: #989ca2; font-size: 14px; font-weight: 800; }
-                            Text {
-                                width: 186px;
-                                horizontal-alignment: left;
-                                text: root.is-syncing
-                                    ? "\{round(root.download-progress * 100)}% • " + root.download-counter
-                                    : (play-card.dl-error
-                                        ? root.download-file
-                                        : (root.has-profile ? "Готов" : "Отключен"));
-                                color: play-card.dl-error ? #ff6b6b
-                                    : (root.is-syncing
-                                        ? (play-card.dl-done ? #ffffff : (play-card.dl-pulse ? #eceef1 : #9398a0))
-                                        : #d7dadf);
-                                font-size: 14px;
-                                font-weight: 800;
-                                overflow: elide;
-                                animate color { duration: 850ms; easing: ease-in-out-sine; }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { width: 84px; text: "Наиграно:"; color: #989ca2; font-size: 14px; font-weight: 800; }
-                            Text { width: 186px; text: root.playtime-total; color: #d7dadf; font-size: 14px; font-weight: 800; horizontal-alignment: left; overflow: elide; }
-                        }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 10px;
+                    Text {
+                        text: "Наиграно";
+                        x: 44px;
+                        y: 128px;
+                        width: 84px;
+                        height: 22px;
+                        color: #7f8794;
+                        font-size: 13px;
+                        font-weight: 800;
+                    }
+                    Text {
+                        text: root.playtime-total;
+                        x: 132px;
+                        y: 128px;
+                        width: 190px;
+                        height: 22px;
+                        color: #c7cdd6;
+                        font-size: 15px;
+                        font-weight: 800;
+                        overflow: elide;
+                    }
 
                     PlayButton {
-                        width: 258px;
-                        height: 72px;
+                        x: parent.width - 294px;
+                        y: 46px;
+                        width: 270px;
+                        height: 84px;
                         label: root.update-mandatory ? "ТРЕБУЕТСЯ ОБНОВЛЕНИЕ"
                             : (root.is-syncing ? "ЗАГРУЗКА..."
                                 : (root.profile-state-checking ? "ПРОВЕРКА..."
                                     : (root.profile-state-unknown ? "ПРОВЕРИТЬ"
                                         : (!root.profile-installed ? "УСТАНОВИТЬ"
                                             : (root.profile-update-available ? "ОБНОВИТЬ" : "ИГРАТЬ")))));
-                        icon-source: @image-url("../assets/play.svg");
+                        icon-source: @image-url("../assets/px/play.svg");
                         enabled: root.has-profile && !root.is-syncing
                             && !root.profile-state-checking && !root.update-mandatory;
                         clicked => { root.play-requested(); }
                     }
-
-                    DarkButton {
-                        width: 258px;
-                        height: 40px;
-                        label: "НАСТРОЙКИ";
-                        icon-source: @image-url("../assets/settings.svg");
-                        clicked => { root.settings-requested(); }
-                    }
-                }
-            }
-
-            Rectangle {
-                x: 1px;
-                y: parent.height - self.height - 1px;
-                width: parent.width - 2px;
-                height: 4px;
-                background: #15181800;
-                clip: true;
-                opacity: root.is-syncing ? 1.0 : 0.0;
-                animate opacity { duration: 320ms; easing: ease-in-out-quint; }
-
-                Rectangle {
-                    x: 0;
-                    width: parent.width * root.download-progress;
-                    height: parent.height;
-                    background: #9aa0a6;
-                    animate width { duration: 320ms; easing: ease-out-quint; }
                 }
             }
         }
-    }
-
     settings-layer := Rectangle {
         width: parent.width;
         height: parent.height;
-        background: #000000aa;
+        background: #030507cc;
         opacity: root.settings-visible && root.is-authenticated ? 1.0 : 0.0;
-        animate opacity { duration: 300ms; easing: ease-in-out-quint; }
+        animate opacity { duration: 320ms; easing: ease-out-quint; }
 
         settings-backdrop := TouchArea {
             enabled: root.settings-visible && root.is-authenticated;
             clicked => { root.settings-close-requested(); }
         }
 
-        // Esc закрывает настройки; фокус выставляется при открытии (см. changed ниже).
+        // Esc закрывает настройки; фокус выставляется при открытии (см. changed выше).
         settings-esc := FocusScope {
             width: 0px;
             height: 0px;
@@ -1376,196 +1493,243 @@ export component AppWindow inherits Window {
         }
 
         settings-card := Rectangle {
-            width: 560px;
-            // Секция дискретной GPU добавляет высоту только когда она доступна.
-            // +104px на секцию Discord Rich Presence (всегда видна).
-            // +140px на секцию «Сервер» — она есть только при нескольких зеркалах.
-            height: (root.discrete-gpu-available ? 678px : 574px)
-                + (root.server-visible ? 140px : 0px);
+            width: 920px;
+            height: 572px;
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2 + (root.settings-visible ? 0px : 28px);
-            border-radius: 20px;
-            background: #0c0c0cfb;
-            border-color: root.settings-visible ? #ffffff24 : #ffffff00;
+            y: (parent.height - self.height) / 2 + (root.settings-visible ? 0px : 12px);
+            border-radius: 8px;
+            background: #0e1319fa;
+            border-color: root.settings-visible ? #9eaab847 : #9eaab800;
             border-width: 1px;
             opacity: root.settings-visible && root.is-authenticated ? 1.0 : 0.0;
-            animate y { duration: 380ms; easing: ease-out-quint; }
-            animate opacity { duration: 300ms; easing: ease-in-out-quint; }
-            animate border-color { duration: 300ms; easing: ease-out-quint; }
-            drop-shadow-blur: root.settings-visible ? 38px : 10px;
+            drop-shadow-blur: root.settings-visible ? 34px : 8px;
             drop-shadow-color: root.settings-visible ? #000000aa : #00000000;
             drop-shadow-offset-y: root.settings-visible ? 14px : 4px;
-            animate drop-shadow-blur { duration: 360ms; easing: ease-out-quint; }
-            animate drop-shadow-offset-y { duration: 360ms; easing: ease-out-quint; }
+            animate y { duration: 380ms; easing: ease-out-quint; }
+            animate opacity, border-color { duration: 320ms; easing: ease-out-quint; }
+            animate drop-shadow-blur, drop-shadow-offset-y { duration: 380ms; easing: ease-out-quint; }
 
             settings-card-blocker := TouchArea {
                 enabled: root.settings-visible && root.is-authenticated;
             }
 
+            // Шапка повторяет анатомию панелей WEB: отдельная поверхность и тонкая
+            // янтарная линия, без изменения узнаваемой геометрии лаунчера.
             Rectangle {
-                x: 28px;
-                y: 28px;
-                width: 50px;
-                height: 50px;
-                border-radius: 13px;
-                background: @linear-gradient(135deg, #d4d7db 0%, #868a8f 100%);
-                drop-shadow-blur: 16px;
-                drop-shadow-color: #9aa0a644;
-                drop-shadow-offset-y: 5px;
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: 76px;
+                border-radius: 7px;
+                background: #0b0f14;
+            }
 
-                Image {
-                    source: @image-url("../assets/settings.svg");
-                    image-fit: contain;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: 26px;
-                    height: 26px;
-                    colorize: #17181a;
+            Rectangle {
+                x: 1px;
+                y: 76px;
+                width: parent.width - 2px;
+                height: 2px;
+                background: #ffb020;
+            }
+
+            Rectangle {
+                x: 24px;
+                y: 16px;
+                width: 40px;
+                height: 40px;
+                border-radius: 4px;
+                background: #19212b;
+                border-color: #ffb02078;
+                border-width: 1px;
+
+                PixelIcon {
+                    source: @image-url("../assets/px/cpu.svg");
+                    x: 8px;
+                    y: 8px;
+                    width: 24px;
+                    height: 24px;
+                    colorize: #ffb020;
                 }
             }
 
             Text {
-                text: "Настройки";
-                x: 92px;
-                y: 30px;
-                width: parent.width - 170px;
-                height: 30px;
-                color: #e9ebee;
-                font-size: 26px;
+                text: "НАСТРОЙКИ ЛАУНЧЕРА";
+                font-family: "Minecraft Ten font cyrillic";
+                x: 78px;
+                y: 8px;
+                width: 320px;
+                height: 38px;
+                color: #f2ece0;
+                font-size: 18px;
                 font-weight: 900;
+                letter-spacing: 1px;
+                vertical-alignment: center;
                 overflow: elide;
             }
 
             Text {
-                text: "Project Minecraft";
-                x: 92px;
-                y: 60px;
-                width: parent.width - 170px;
-                height: 20px;
-                color: #8c8f95;
-                font-size: 13px;
+                text: "PROJECT MINECRAFT · ПАРАМЕТРЫ ЛАУНЧЕРА";
+                x: 78px;
+                y: 42px;
+                width: 360px;
+                height: 18px;
+                color: #7f8794;
+                font-size: 11px;
                 font-weight: 800;
-                letter-spacing: 0.4px;
+                letter-spacing: 0.8px;
+                overflow: elide;
+            }
+
+            Text {
+                text: "ИЗМЕНЕНИЯ СОХРАНЯЮТСЯ АВТОМАТИЧЕСКИ";
+                x: parent.width - 424px;
+                y: 28px;
+                width: 340px;
+                height: 18px;
+                color: #9aa4b0;
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 0.7px;
+                horizontal-alignment: right;
                 overflow: elide;
             }
 
             Rectangle {
-                x: parent.width - 64px;
-                y: 30px;
+                x: parent.width - 60px;
+                y: 20px;
                 width: 36px;
                 height: 36px;
-                border-radius: 10px;
-                background: close-settings.pressed ? #3a1414 : (close-settings.has-hover ? #241010 : #111111);
-                border-color: close-settings.has-hover ? #ff5a5a55 : #ffffff18;
+                border-radius: 4px;
+                background: close-settings.pressed ? #4a1919 : (close-settings.has-hover ? #321416 : #19212b);
+                border-color: close-settings.has-hover ? #ff6b6b88 : #9eaab821;
                 border-width: 1px;
-	                animate background, border-color { duration: 160ms; easing: ease-out-quad; }
+                animate background, border-color { duration: 180ms; easing: ease-out-quint; }
 
-                Text {
-                    text: "✕";
-                    color: close-settings.has-hover ? #ff8a8a : #c5c8cd;
-                    font-size: 16px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-	                    animate color { duration: 160ms; easing: ease-out-quad; }
+                PixelIcon {
+                    source: @image-url("../assets/px/close.svg");
+                    x: 8px;
+                    y: 8px;
+                    width: 20px;
+                    height: 20px;
+                    colorize: close-settings.has-hover ? #ff8a8a : #c7cdd6;
+                    animate colorize { duration: 180ms; easing: ease-out-quint; }
                 }
 
                 close-settings := TouchArea {
                     enabled: root.settings-visible && root.is-authenticated;
+                    mouse-cursor: pointer;
                     clicked => { root.settings-close-requested(); }
                 }
             }
 
-            Rectangle {
-                x: 28px;
-                y: 96px;
-                width: parent.width - 56px;
-                height: 1px;
-                background: #ffffff14;
+            // Левая колонка: всё, что влияет на производительность игры.
+            Text {
+                text: "ПРОИЗВОДИТЕЛЬНОСТЬ";
+                font-family: "Minecraft Ten font cyrillic";
+                x: 24px;
+                y: 98px;
+                width: 420px;
+                height: 18px;
+                color: #ffb020;
+                font-size: 12px;
+                font-weight: 900;
+                letter-spacing: 1px;
             }
 
-            Rectangle {
-                x: 28px;
-                y: 112px;
-                width: parent.width - 56px;
-                height: 158px;
-                border-radius: 14px;
-                background: #131313;
-                border-color: #ffffff12;
+            memory-card := Rectangle {
+                x: 24px;
+                y: 122px;
+                width: 420px;
+                height: 198px;
+                border-radius: 5px;
+                background: #111820;
+                border-color: #9eaab821;
                 border-width: 1px;
 
                 Text {
                     text: "Оперативная память";
-                    x: 22px;
-                    y: 20px;
-                    width: parent.width - 160px;
-                    height: 24px;
-                    color: #e0e2e5;
-                    font-size: 18px;
+                    x: 18px;
+                    y: 14px;
+                    width: 250px;
+                    height: 22px;
+                    color: #f2ece0;
+                    font-size: 15px;
                     font-weight: 800;
                     overflow: elide;
                 }
 
                 Rectangle {
-                    x: parent.width - 118px;
-                    y: 18px;
-                    width: 96px;
-                    height: 26px;
-                    border-radius: 13px;
-                    background: root.memory-auto ? #9aa0a622 : #ffffff10;
-                    border-color: root.memory-auto ? #9aa0a655 : #ffffff14;
+                    x: parent.width - 112px;
+                    y: 12px;
+                    width: 94px;
+                    height: 28px;
+                    border-radius: 4px;
+                    background: root.memory-auto ? #ffb020 : #19212b;
+                    border-color: root.memory-auto ? #ffc14d : #9eaab821;
                     border-width: 1px;
-	                    animate background, border-color { duration: 220ms; easing: ease-out-quint; }
+                    animate background, border-color { duration: 180ms; easing: ease-out-quint; }
 
                     Text {
                         text: root.memory-auto ? "АВТО" : "ВРУЧНУЮ";
-                        color: root.memory-auto ? #eceef1 : #989ca2;
+                        color: root.memory-auto ? #0b0f14 : #9aa4b0;
                         font-size: 11px;
                         font-weight: 900;
-                        letter-spacing: 0.6px;
+                        letter-spacing: 0.7px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
 
-                // Слайдер памяти: расширенная хит-зона, перетаскивание и клик по треку.
+                Text {
+                    text: root.memory-auto ? "АВТО · " + root.memory-gb + " ГБ" : root.memory-gb + " ГБ";
+                    x: 18px;
+                    y: 36px;
+                    width: parent.width - 36px;
+                    height: 46px;
+                    color: #f2ece0;
+                    font-size: 24px;
+                    font-weight: 900;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
                 Rectangle {
-                    x: 22px;
-                    y: 50px;
-                    width: parent.width - 44px;
+                    x: 18px;
+                    y: 84px;
+                    width: parent.width - 36px;
                     height: 22px;
                     background: transparent;
 
                     Rectangle {
-                        y: (parent.height - 6px) / 2;
+                        y: (parent.height - 4px) / 2;
                         width: parent.width;
-                        height: 6px;
-                        border-radius: 3px;
-                        background: #050505;
-                        border-color: #ffffff0e;
+                        height: 4px;
+                        border-radius: 2px;
+                        background: #090c10;
+                        border-color: #9eaab821;
                         border-width: 1px;
 
                         memory-fill := Rectangle {
                             x: 0px;
                             width: max(8px, parent.width * (root.memory-gb - 2) / max(1, root.memory-max - 2));
                             height: parent.height;
-                            border-radius: 3px;
-                            background: @linear-gradient(90deg, #868a8f 0%, #d4d7db 100%);
-                            animate width { duration: 120ms; easing: ease-out-quad; }
+                            border-radius: 2px;
+                            background: #ffb020;
+                            animate width { duration: 220ms; easing: ease-out-quint; }
                         }
                     }
 
-                    // Ручка слайдера.
                     Rectangle {
                         x: memory-fill.width - 8px;
                         y: (parent.height - 16px) / 2;
                         width: 16px;
                         height: 16px;
                         border-radius: 8px;
-                        background: memory-slider-touch.has-hover || memory-slider-touch.pressed ? #eceef1 : #d4d7db;
-                        border-width: 1px;
-                        border-color: #00000066;
-                        animate x { duration: 120ms; easing: ease-out-quad; }
+                        background: memory-slider-touch.has-hover || memory-slider-touch.pressed ? #ffffff : #f2ece0;
+                        border-width: 2px;
+                        border-color: #ffb020;
+                        animate x { duration: 220ms; easing: ease-out-quint; }
                     }
 
                     memory-slider-touch := TouchArea {
@@ -1582,332 +1746,434 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                HorizontalLayout {
-                    x: 22px;
-                    y: 84px;
-                    width: parent.width - 44px;
-                    height: 52px;
-                    spacing: 10px;
+                Text {
+                    text: "2 ГБ";
+                    x: 18px;
+                    y: 106px;
+                    width: 90px;
+                    height: 16px;
+                    color: #7f8794;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
 
-                    MiniButton {
-                        label: "−";
-                        enabled: root.settings-visible && root.is-authenticated && root.memory-gb > 2;
-                        clicked => { root.memory-decrease-requested(); }
+                Text {
+                    text: root.memory-max + " ГБ";
+                    x: parent.width - 108px;
+                    y: 106px;
+                    width: 90px;
+                    height: 16px;
+                    color: #7f8794;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: right;
+                }
+
+                MiniButton {
+                    x: 18px;
+                    y: 140px;
+                    width: 48px;
+                    height: 40px;
+                    label: "−";
+                    enabled: root.settings-visible && root.is-authenticated && root.memory-gb > 2;
+                    clicked => { root.memory-decrease-requested(); }
+                }
+
+                Rectangle {
+                    x: 76px;
+                    y: 140px;
+                    width: 186px;
+                    height: 40px;
+                    border-radius: 4px;
+                    background: #090c10;
+                    border-color: #9eaab821;
+                    border-width: 1px;
+
+                    Text {
+                        text: root.memory-auto ? "СИСТЕМА ВЫБРАЛА ОПТИМУМ" : "РУЧНОЕ ОГРАНИЧЕНИЕ";
+                        color: #9aa4b0;
+                        font-size: 10px;
+                        font-weight: 800;
+                        letter-spacing: 0.5px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
                     }
+                }
 
-                    Rectangle {
-                        width: 132px;
-                        height: 52px;
-                        border-radius: 10px;
-                        background: #050505;
-                        border-color: #ffffff14;
-                        border-width: 1px;
+                MiniButton {
+                    x: 272px;
+                    y: 140px;
+                    width: 48px;
+                    height: 40px;
+                    label: "+";
+                    enabled: root.settings-visible && root.is-authenticated && root.memory-gb < root.memory-max;
+                    clicked => { root.memory-increase-requested(); }
+                }
 
-                        Text {
-                            text: root.memory-label;
-                            color: #eaecef;
-                            font-size: 18px;
-                            font-weight: 900;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                    }
-
-                    MiniButton {
-                        label: "+";
-                        enabled: root.settings-visible && root.is-authenticated && root.memory-gb < root.memory-max;
-                        clicked => { root.memory-increase-requested(); }
-                    }
-
-                    Rectangle { background: transparent; horizontal-stretch: 1; }
-
-                    MiniButton {
-                        width: 104px;
-                        label: "AUTO";
-                        active: root.memory-auto;
-                        enabled: root.settings-visible && root.is-authenticated;
-                        clicked => { root.memory-auto-requested(); }
-                    }
+                SettingsButton {
+                    x: 330px;
+                    y: 140px;
+                    width: 72px;
+                    height: 40px;
+                    label: "АВТО";
+                    primary: root.memory-auto;
+                    enabled: root.settings-visible && root.is-authenticated;
+                    clicked => { root.memory-auto-requested(); }
                 }
             }
 
-            // Секция дискретной видеокарты (только гибридная графика).
-            Rectangle {
-                visible: root.discrete-gpu-available;
-                x: 28px;
-                y: 288px;
-                width: parent.width - 56px;
-                height: 88px;
-                border-radius: 14px;
-                background: #131313;
-                border-color: #ffffff12;
+            Text {
+                text: "СИСТЕМА";
+                font-family: "Minecraft Ten font cyrillic";
+                x: 24px;
+                y: 340px;
+                width: 420px;
+                height: 18px;
+                color: #ffb020;
+                font-size: 12px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+
+            performance-card := Rectangle {
+                x: 24px;
+                y: 364px;
+                width: 420px;
+                height: 184px;
+                border-radius: 5px;
+                background: #111820;
+                border-color: #9eaab821;
                 border-width: 1px;
 
-                Text {
-                    text: "Дискретная видеокарта";
-                    x: 22px;
-                    y: 18px;
-                    width: parent.width - 130px;
-                    height: 24px;
-                    color: #e0e2e5;
-                    font-size: 18px;
-                    font-weight: 800;
-                    overflow: elide;
-                }
-
-                Text {
-                    text: root.discrete-gpu-label + " · рендер игры на дискретной GPU";
-                    x: 22px;
-                    y: 46px;
-                    width: parent.width - 130px;
-                    height: 20px;
-                    color: #8c8f95;
-                    font-size: 13px;
-                    font-weight: 700;
-                    overflow: elide;
-                }
-
-                // Переключатель ВКЛ/ВЫКЛ.
                 Rectangle {
-                    x: parent.width - 92px;
-                    y: (parent.height - 34px) / 2;
-                    width: 70px;
-                    height: 34px;
-                    border-radius: 17px;
-                    background: root.use-discrete-gpu ? #2f6f3a : #1a1a1a;
-                    border-color: root.use-discrete-gpu ? #4ea35e88 : #ffffff1a;
+                    x: 12px;
+                    y: 12px;
+                    width: parent.width - 24px;
+                    height: 72px;
+                    border-radius: 4px;
+                    background: gpu-row-touch.has-hover && root.discrete-gpu-available ? #273340 : #19212b;
+                    border-color: gpu-row-touch.has-hover && root.discrete-gpu-available ? #ffb02078 : #9eaab821;
                     border-width: 1px;
-                    animate background, border-color { duration: 200ms; easing: ease-out-quad; }
+                    animate background, border-color { duration: 180ms; easing: ease-out-quint; }
 
                     Text {
-                        text: root.use-discrete-gpu ? "ВКЛ" : "ВЫКЛ";
-                        color: root.use-discrete-gpu ? #eafaee : #989ca2;
+                        text: "Дискретная видеокарта";
+                        x: 14px;
+                        y: 11px;
+                        width: parent.width - 118px;
+                        height: 20px;
+                        color: #f2ece0;
+                        font-size: 14px;
+                        font-weight: 800;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: root.discrete-gpu-available
+                            ? root.discrete-gpu-label + " · рендер игры"
+                            : "Управляется системой автоматически";
+                        x: 14px;
+                        y: 36px;
+                        width: parent.width - 118px;
+                        height: 18px;
+                        color: #7f8794;
                         font-size: 12px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+
+                    if root.discrete-gpu-available: SettingsToggle {
+                        x: parent.width - 86px;
+                        y: 21px;
+                        checked: root.use-discrete-gpu;
+                        enabled: root.settings-visible && root.is-authenticated;
+                        toggled(value) => { root.discrete-gpu-requested(value); }
+                    }
+
+                    if !root.discrete-gpu-available: Text {
+                        text: "СИСТЕМНО";
+                        x: parent.width - 94px;
+                        y: 0px;
+                        width: 78px;
+                        height: parent.height;
+                        color: #7f8794;
+                        font-size: 10px;
                         font-weight: 900;
-                        letter-spacing: 0.6px;
-                        horizontal-alignment: center;
+                        letter-spacing: 0.5px;
+                        horizontal-alignment: right;
                         vertical-alignment: center;
                     }
 
-                    discrete-gpu-touch := TouchArea {
-                        enabled: root.settings-visible && root.is-authenticated;
+                    gpu-row-touch := TouchArea {
+                        enabled: root.settings-visible && root.is-authenticated && root.discrete-gpu-available;
                         mouse-cursor: pointer;
                         clicked => { root.discrete-gpu-requested(!root.use-discrete-gpu); }
                     }
                 }
-            }
 
-            // Секция Discord Rich Presence (всегда видна).
-            Rectangle {
-                x: 28px;
-                y: root.discrete-gpu-available ? 392px : 288px;
-                width: parent.width - 56px;
-                height: 88px;
-                border-radius: 14px;
-                background: #131313;
-                border-color: #ffffff12;
-                border-width: 1px;
-
-                Text {
-                    text: "Discord Rich Presence";
-                    x: 22px;
-                    y: 18px;
-                    width: parent.width - 130px;
-                    height: 24px;
-                    color: #e0e2e5;
-                    font-size: 18px;
-                    font-weight: 800;
-                    overflow: elide;
-                }
-
-                Text {
-                    text: "Показывать статус игры в профиле Discord";
-                    x: 22px;
-                    y: 46px;
-                    width: parent.width - 130px;
-                    height: 20px;
-                    color: #8c8f95;
-                    font-size: 13px;
-                    font-weight: 700;
-                    overflow: elide;
-                }
-
-                // Переключатель ВКЛ/ВЫКЛ.
                 Rectangle {
-                    x: parent.width - 92px;
-                    y: (parent.height - 34px) / 2;
-                    width: 70px;
-                    height: 34px;
-                    border-radius: 17px;
-                    background: root.discord-rpc-enabled ? #2f6f3a : #1a1a1a;
-                    border-color: root.discord-rpc-enabled ? #4ea35e88 : #ffffff1a;
+                    x: 12px;
+                    y: 96px;
+                    width: parent.width - 24px;
+                    height: 72px;
+                    border-radius: 4px;
+                    background: discord-row-touch.has-hover ? #273340 : #19212b;
+                    border-color: discord-row-touch.has-hover ? #ffb02078 : #9eaab821;
                     border-width: 1px;
-                    animate background, border-color { duration: 200ms; easing: ease-out-quad; }
+                    animate background, border-color { duration: 180ms; easing: ease-out-quint; }
 
                     Text {
-                        text: root.discord-rpc-enabled ? "ВКЛ" : "ВЫКЛ";
-                        color: root.discord-rpc-enabled ? #eafaee : #989ca2;
-                        font-size: 12px;
-                        font-weight: 900;
-                        letter-spacing: 0.6px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                        text: "Discord Rich Presence";
+                        x: 14px;
+                        y: 11px;
+                        width: parent.width - 118px;
+                        height: 20px;
+                        color: #f2ece0;
+                        font-size: 14px;
+                        font-weight: 800;
+                        overflow: elide;
                     }
 
-                    discord-rpc-touch := TouchArea {
-                        enabled: root.settings-visible;
+                    Text {
+                        text: "Показывать статус игры в профиле";
+                        x: 14px;
+                        y: 36px;
+                        width: parent.width - 118px;
+                        height: 18px;
+                        color: #7f8794;
+                        font-size: 12px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+
+                    SettingsToggle {
+                        x: parent.width - 86px;
+                        y: 21px;
+                        checked: root.discord-rpc-enabled;
+                        enabled: root.settings-visible && root.is-authenticated;
+                        toggled(value) => { root.discord-rpc-requested(value); }
+                    }
+
+                    discord-row-touch := TouchArea {
+                        enabled: root.settings-visible && root.is-authenticated;
                         mouse-cursor: pointer;
                         clicked => { root.discord-rpc-requested(!root.discord-rpc-enabled); }
                     }
                 }
             }
 
-            Rectangle {
-                x: 28px;
-                y: root.discrete-gpu-available ? 496px : 392px;
-                width: parent.width - 56px;
-                height: 150px;
-                border-radius: 14px;
-                background: #131313;
-                border-color: #ffffff12;
+            // Правая колонка: файлы, сеть и краткая подсказка по применению.
+            Text {
+                text: "ХРАНИЛИЩЕ";
+                font-family: "Minecraft Ten font cyrillic";
+                x: 460px;
+                y: 98px;
+                width: 436px;
+                height: 18px;
+                color: #ffb020;
+                font-size: 12px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+
+            storage-card := Rectangle {
+                x: 460px;
+                y: 122px;
+                width: 436px;
+                height: 164px;
+                border-radius: 5px;
+                background: #111820;
+                border-color: #9eaab821;
                 border-width: 1px;
 
                 Text {
                     text: "Папка установки";
-                    x: 22px;
-                    y: 20px;
-                    width: parent.width - 44px;
-                    height: 24px;
-                    color: #e0e2e5;
-                    font-size: 18px;
+                    x: 16px;
+                    y: 12px;
+                    width: parent.width - 32px;
+                    height: 20px;
+                    color: #f2ece0;
+                    font-size: 14px;
                     font-weight: 800;
                     overflow: elide;
                 }
 
+                Rectangle {
+                    x: 16px;
+                    y: 42px;
+                    width: parent.width - 32px;
+                    height: 44px;
+                    border-radius: 4px;
+                    background: #090c10;
+                    border-color: #9eaab821;
+                    border-width: 1px;
+
+                    PixelIcon {
+                        source: @image-url("../assets/px/folder.svg");
+                        x: 12px;
+                        y: 12px;
+                        width: 20px;
+                        height: 20px;
+                        colorize: #ffb020;
+                    }
+
+                    Text {
+                        text: root.install-folder;
+                        x: 40px;
+                        y: 0px;
+                        width: parent.width - 52px;
+                        height: parent.height;
+                        color: #c7cdd6;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                SettingsButton {
+                    x: 16px;
+                    y: 104px;
+                    width: 190px;
+                    label: "ОТКРЫТЬ ПАПКУ";
+                    enabled: root.settings-visible && root.is-authenticated;
+                    clicked => { root.open-install-folder-requested(); }
+                }
+
+                SettingsButton {
+                    x: 218px;
+                    y: 104px;
+                    width: 202px;
+                    label: root.is-syncing ? "ИДЁТ СИНХРОНИЗАЦИЯ" : "СМЕНИТЬ ДИСК";
+                    primary: !root.is-syncing;
+                    enabled: root.settings-visible && root.is-authenticated && !root.is-syncing;
+                    clicked => { root.change-install-folder-requested(); }
+                }
+            }
+
+            Text {
+                text: "ПОДКЛЮЧЕНИЕ";
+                font-family: "Minecraft Ten font cyrillic";
+                x: 460px;
+                y: 306px;
+                width: 436px;
+                height: 18px;
+                color: #ffb020;
+                font-size: 12px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+
+            connection-card := Rectangle {
+                x: 460px;
+                y: 330px;
+                width: 436px;
+                height: 112px;
+                border-radius: 5px;
+                background: #111820;
+                border-color: #9eaab821;
+                border-width: 1px;
+
                 Text {
-                    text: "Где хранятся файлы игры и сборки";
-                    x: 22px;
-                    y: 46px;
-                    width: parent.width - 44px;
+                    text: root.server-visible
+                        ? "«Авто» выбирает самый быстрый доступный сервер"
+                        : "Доступен один адрес — выбор выполняется автоматически";
+                    x: 16px;
+                    y: 12px;
+                    width: parent.width - 32px;
                     height: 18px;
-                    color: #8c7e6e;
+                    color: #7f8794;
                     font-size: 12px;
-                    font-weight: 700;
+                    font-weight: 600;
                     overflow: elide;
                 }
 
-                HorizontalLayout {
-                    x: 22px;
-                    y: 80px;
-                    width: parent.width - 44px;
+                if root.server-visible: ComboBox {
+                    x: 16px;
+                    y: 46px;
+                    width: parent.width - 32px;
                     height: 48px;
-                    spacing: 10px;
+                    enabled: root.settings-visible;
+                    model: root.server-names;
+                    current-index <=> root.server-index;
+                    selected(value) => { root.server-selected(self.current-index); }
+                }
+
+                if !root.server-visible: Rectangle {
+                    x: 16px;
+                    y: 46px;
+                    width: parent.width - 32px;
+                    height: 48px;
+                    border-radius: 4px;
+                    background: #19212b;
+                    border-color: #9eaab821;
+                    border-width: 1px;
+
+                    Text {
+                        text: "АВТО · ОСНОВНОЙ СЕРВЕР";
+                        x: 14px;
+                        width: parent.width - 28px;
+                        height: parent.height;
+                        color: #c7cdd6;
+                        font-size: 12px;
+                        font-weight: 900;
+                        letter-spacing: 0.6px;
+                        vertical-alignment: center;
+                    }
 
                     Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: 10px;
-                        background: #050505;
-                        border-color: #ffffff14;
-                        border-width: 1px;
-
-                        HorizontalLayout {
-                            x: 14px;
-                            width: parent.width - 28px;
-                            height: parent.height;
-                            spacing: 10px;
-
-                            VerticalLayout {
-                                alignment: center;
-                                Image {
-                                    source: @image-url("../assets/folder.svg");
-                                    image-fit: contain;
-                                    width: 18px;
-                                    height: 18px;
-                                    colorize: #989ca2;
-                                }
-                            }
-
-                            Text {
-                                text: root.install-folder;
-                                color: #bbbec3;
-                                font-size: 13px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                        }
-                    }
-
-                    DarkButton {
-                        width: 116px;
-                        height: 48px;
-                        label: "Открыть";
-                        icon-source: @image-url("../assets/folder.svg");
-                        enabled: root.settings-visible && root.is-authenticated;
-                        clicked => { root.open-install-folder-requested(); }
-                    }
-
-                    DarkButton {
-                        width: 142px;
-                        height: 48px;
-                        label: "Сменить диск";
-                        icon-source: @image-url("../assets/folder.svg");
-                        enabled: root.settings-visible && root.is-authenticated && !root.is-syncing;
-                        clicked => { root.change-install-folder-requested(); }
+                        x: parent.width - 24px;
+                        y: (parent.height - 8px) / 2;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #ffb020;
                     }
                 }
             }
 
-            // Секция «Сервер»: тот же список, что на окне входа (нулевой пункт — «Авто»).
-            // Нужна здесь, потому что после логина окно входа уже не показать, а сменить
-            // сервер игроку может потребоваться в любой момент (провайдер режет домен).
-            // Идёт последней — иначе пришлось бы сдвигать y всех секций выше.
-            if root.server-visible: Rectangle {
-                x: 28px;
-                y: (root.discrete-gpu-available ? 496px : 392px) + 166px;
-                width: parent.width - 56px;
-                height: 124px;
-                border-radius: 14px;
-                background: #131313;
-                border-color: #ffffff12;
+            Rectangle {
+                x: 460px;
+                y: 462px;
+                width: 436px;
+                height: 86px;
+                border-radius: 5px;
+                background: #0b0f14;
+                border-color: #9eaab821;
                 border-width: 1px;
 
+                Rectangle {
+                    x: 0px;
+                    width: 3px;
+                    height: parent.height;
+                    background: #ffb020;
+                }
+
                 Text {
-                    text: "Сервер";
-                    x: 22px;
-                    y: 18px;
-                    width: parent.width - 44px;
-                    height: 24px;
-                    color: #e0e2e5;
-                    font-size: 18px;
-                    font-weight: 800;
+                    text: "КАК ПРИМЕНЯЮТСЯ НАСТРОЙКИ";
+                    x: 18px;
+                    y: 13px;
+                    width: parent.width - 36px;
+                    height: 17px;
+                    color: #ffb020;
+                    font-size: 10px;
+                    font-weight: 900;
+                    letter-spacing: 0.8px;
                     overflow: elide;
                 }
 
                 Text {
-                    text: "Адрес бэкенда. «Авто» — самый быстрый доступный";
-                    x: 22px;
-                    y: 44px;
-                    width: parent.width - 44px;
-                    height: 18px;
-                    color: #8c8f95;
-                    font-size: 12px;
-                    font-weight: 700;
+                    text: "Память и видеокарта — при следующем запуске игры.\nDiscord, папка и сервер — сразу после выбора.";
+                    x: 18px;
+                    y: 36px;
+                    width: parent.width - 36px;
+                    height: 38px;
+                    color: #9aa4b0;
+                    font-size: 11px;
+                    font-weight: 600;
+                    wrap: word-wrap;
                     overflow: elide;
-                }
-
-                ComboBox {
-                    x: 22px;
-                    y: 68px;
-                    width: parent.width - 44px;
-                    height: 40px;
-                    enabled: root.settings-visible;
-                    model: root.server-names;
-                    current-index <=> root.server-index;
-                    selected(value) => {
-                        root.server-selected(self.current-index);
-                    }
                 }
             }
         }
@@ -1969,7 +2235,7 @@ export component AppWindow inherits Window {
                 overflow: elide;
             }
 
-            modal-totp-input := LineEdit {
+            modal-totp-input := PjmLineEdit {
                 x: 40px;
                 y: 226px;
                 width: parent.width - 80px;
@@ -1977,7 +2243,6 @@ export component AppWindow inherits Window {
                 font-size: 20px;
                 enabled: root.requires-totp && !root.is-authenticated && !root.is-loading;
                 text <=> root.totp-value;
-                placeholder-text: "";
                 accepted(_) => {
                     root.login-requested(root.login-value, root.password-value, root.totp-value);
                 }
@@ -1989,7 +2254,7 @@ export component AppWindow inherits Window {
                 width: 220px;
                 height: 56px;
                 label: root.is-loading ? "Проверка..." : "Подтвердить";
-                icon-source: @image-url("../assets/key.svg");
+                icon-source: @image-url("../assets/px/lock.svg");
                 enabled: root.requires-totp && !root.is-authenticated && !root.is-loading && root.totp-value != "";
                 clicked => {
                     root.login-requested(root.login-value, root.password-value, root.totp-value);
@@ -2027,13 +2292,13 @@ export component AppWindow inherits Window {
                     background: #6fdd8b1f;
                     border-width: 1px;
                     border-color: root.update-ready ? #6fdd8b : #6fdd8b55;
-                    Image {
-                        source: @image-url("../assets/update.svg");
+                    PixelIcon {
+                        source: @image-url("../assets/px/reload.svg");
                         colorize: #6fdd8b;
                         width: 24px;
                         height: 24px;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
+                        x: 12px;
+                        y: 12px;
                     }
                 }
             }
@@ -2066,7 +2331,7 @@ export component AppWindow inherits Window {
                     height: 40px;
                     border-radius: 11px;
                     background: restart-area.has-hover ? #7be89a : #6fdd8b;
-                    animate background { duration: 160ms; easing: ease-out-quad; }
+                    animate background { duration: 180ms; easing: ease-out-quint; }
                     restart-area := TouchArea {
                         width: parent.width;
                         height: parent.height;
@@ -2123,19 +2388,19 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     alignment: center;
                     Rectangle {
-                        width: 92px;
-                        height: 92px;
-                        border-radius: 46px;
+                        width: 96px;
+                        height: 96px;
+                        border-radius: 48px;
                         background: #6fdd8b1f;
                         border-width: 2px;
                         border-color: #6fdd8b;
-                        Image {
-                            source: @image-url("../assets/update.svg");
+                        PixelIcon {
+                            source: @image-url("../assets/px/reload.svg");
                             colorize: #6fdd8b;
-                            width: 46px;
-                            height: 46px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
+                            width: 48px;
+                            height: 48px;
+                            x: 24px;
+                            y: 24px;
                         }
                     }
                 }
@@ -2165,7 +2430,7 @@ export component AppWindow inherits Window {
                         height: 52px;
                         border-radius: 13px;
                         background: mandatory-restart-area.has-hover ? #7be89a : #6fdd8b;
-                        animate background { duration: 160ms; easing: ease-out-quad; }
+                        animate background { duration: 180ms; easing: ease-out-quint; }
                         mandatory-restart-area := TouchArea {
                             width: parent.width;
                             height: parent.height;
@@ -2264,7 +2529,7 @@ export component AppWindow inherits Window {
                         height: 52px;
                         border-radius: 13px;
                         background: dismiss-area.has-hover ? #ff6a6a : #e24c4c;
-                        animate background { duration: 160ms; easing: ease-out-quad; }
+                        animate background { duration: 180ms; easing: ease-out-quint; }
                         dismiss-area := TouchArea {
                             width: parent.width;
                             height: parent.height;

@@ -1652,8 +1652,9 @@ fn set_profile_install_state(app: &AppWindow, state: ProfileInstallState) {
 }
 
 /// После входа и каждого серверного события сверяет локальную сборку с актуальным
-/// manifest. Проверяются и версия manifest, и SHA-256 каждого управляемого файла,
-/// поэтому кнопка «Обновить» появляется также после локального изменения файла.
+/// manifest. Неизменённые с прошлого полного аудита файлы проверяются по размеру
+/// и mtime; SHA-256 пересчитывается только для изменившихся файлов. Перед запуском
+/// игры `collect_files_to_download` по-прежнему выполняет полный SHA-256-аудит.
 fn refresh_profile_install_state(
     app_weak: Weak<AppWindow>,
     runtime_state: Arc<Mutex<RuntimeState>>,
@@ -1732,7 +1733,12 @@ fn profile_install_state(
     let needs_update = manifest
         .files
         .par_iter()
-        .map(|file| needs_download(&paths.files_root, file))
+        .map(|file| {
+            let local = local_files
+                .get(file.path.as_str())
+                .expect("local manifest entries checked above");
+            startup_file_needs_download(&paths.files_root, file, local)
+        })
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()
         .any(|needs| needs);
@@ -1754,6 +1760,7 @@ fn start_profile_event_listener(
     my_generation: u64,
 ) {
     thread::spawn(move || {
+        let mut has_connected = false;
         while generation.load(Ordering::SeqCst) == my_generation {
             let token = match state.lock() {
                 Ok(state) => state.token.clone(),
@@ -1763,7 +1770,15 @@ fn start_profile_event_listener(
                 return;
             }
 
-            match stream_profile_events(&config, &token, &state, &app_weak, &generation, my_generation) {
+            match stream_profile_events(
+                &config,
+                &token,
+                &state,
+                &app_weak,
+                &generation,
+                my_generation,
+                &mut has_connected,
+            ) {
                 // Сессия недействительна — повторное подключение бессмысленно.
                 StreamOutcome::Unauthorized | StreamOutcome::Stopped => return,
                 // Соединение закрылось/оборвалось — переподключаемся с паузой.
@@ -1794,6 +1809,7 @@ fn stream_profile_events(
     app_weak: &Weak<AppWindow>,
     generation: &Arc<AtomicU64>,
     my_generation: u64,
+    has_connected: &mut bool,
 ) -> StreamOutcome {
     let client = match sse_client() {
         Ok(client) => client,
@@ -1821,9 +1837,13 @@ fn stream_profile_events(
         return StreamOutcome::Disconnected;
     }
 
-    // SSE не гарантирует replay. После каждого успешного подключения перечитываем
-    // состояние, чтобы обновление, опубликованное во время разрыва, не потерялось.
-    refresh_profiles_now(config, state, app_weak);
+    // Первый успешный SSE-коннект идёт сразу после bootstrap_session: список
+    // профилей уже свежий, а apply_session уже запустил проверку файлов. Не
+    // повторяем её. После реального разрыва делаем catch-up, поскольку SSE не
+    // гарантирует replay и обновление во время офлайна могло потеряться.
+    if profile_event_connection_needs_catch_up(has_connected) {
+        refresh_profiles_now(config, state, app_weak);
+    }
 
     let reader = BufReader::new(response);
     for line in reader.lines() {
@@ -1849,6 +1869,10 @@ fn stream_profile_events(
         }
     }
     StreamOutcome::Disconnected
+}
+
+fn profile_event_connection_needs_catch_up(has_connected: &mut bool) -> bool {
+    std::mem::replace(has_connected, true)
 }
 
 /// Перезапрашивает профили и обновляет выбранный профиль в state и UI.
@@ -2708,6 +2732,36 @@ fn needs_download(
     }
     set_manifest_executable(&target, file.executable)?;
     Ok(false)
+}
+
+/// Быстрая проверка для статуса профиля при старте. Локальный manifest записан
+/// только после полного SHA-аудита/установки, поэтому совпавшие размер и mtime
+/// означают, что файл с прошлого аудита не менялся. Если mtime отличается (или
+/// отсутствует у старого manifest), переходим к строгой SHA-256-проверке.
+fn startup_file_needs_download(
+    files_root: &Path,
+    file: &ManifestFile,
+    local: &LocalFileRecord,
+) -> Result<bool, String> {
+    let target = safe_join(files_root, &file.path)?;
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Err(format!("Не удалось проверить {}", file.path)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != file.size.max(0) as u64
+    {
+        return Ok(true);
+    }
+
+    let current_mtime = file_mtime_millis(&metadata);
+    if local.mtime_millis > 0 && current_mtime == local.mtime_millis {
+        return Ok(false);
+    }
+
+    needs_download(files_root, file)
 }
 
 fn file_mtime_millis(metadata: &fs::Metadata) -> i64 {
@@ -4777,6 +4831,39 @@ mod tests {
         assert!(needs_download(&root, &file).unwrap());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_profile_check_trusts_unchanged_file_metadata() {
+        let root = test_root("startup_profile_check_fast_path");
+        let path = root.join("mods/example.jar");
+        write_test_file(&path, "official");
+        let metadata = fs::metadata(&path).unwrap();
+        let local = LocalFileRecord {
+            path: "mods/example.jar".to_string(),
+            // Намеренно неверный hash: совпавшие сохранённые метаданные должны
+            // пропустить дорогое чтение файла на стартовом экране.
+            hash_sha256: "not-used-on-fast-path".to_string(),
+            size: metadata.len() as i64,
+            mtime_millis: file_mtime_millis(&metadata),
+        };
+        let file = test_manifest_file(
+            "mods/example.jar",
+            "not-used-on-fast-path",
+            metadata.len() as i64,
+        );
+
+        assert!(!startup_file_needs_download(&root, &file, &local).unwrap());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn first_profile_event_connection_does_not_repeat_bootstrap_check() {
+        let mut has_connected = false;
+
+        assert!(!profile_event_connection_needs_catch_up(&mut has_connected));
+        assert!(profile_event_connection_needs_catch_up(&mut has_connected));
     }
 
     #[test]

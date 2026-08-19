@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "launcher-slint"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "directories",
  "discord-rich-presence",
