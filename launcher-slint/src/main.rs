@@ -25,6 +25,7 @@ mod artifacts;
 mod bundle;
 mod discord_rpc;
 mod gpu;
+mod install;
 mod updater;
 
 slint::include_modules!();
@@ -154,6 +155,27 @@ struct RuntimeState {
     profiles: Vec<ProfileSummary>,
     selected_profile_id: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileInstallState {
+    Checking,
+    Missing,
+    UpdateAvailable,
+    Ready,
+    Unknown,
+}
+
+enum InitialInstallLocation {
+    Current,
+    Selected {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+}
+
+static SETTINGS_IO_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static PROFILE_CHECK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Состояние автообновления. Глобальное (OnceLock): проверка живёт дольше
 /// сессии логина и дёргается из SSE-слушателя, периодики и старта.
@@ -489,6 +511,10 @@ struct LauncherSettings {
     use_discrete_gpu: bool,
     #[serde(default = "default_discord_rpc_enabled")]
     discord_rpc_enabled: bool,
+    /// Корень тяжёлых файлов игры (`users/<uuid>/profiles/...`). None сохраняет
+    /// совместимость со старым системным data-dir.
+    #[serde(default)]
+    install_root: Option<String>,
     /// Выбранное на окне входа зеркало бэкенда. None → «Основной».
     #[serde(default)]
     api_url: Option<String>,
@@ -507,6 +533,7 @@ impl Default for LauncherSettings {
             memory_auto: true,
             use_discrete_gpu: true,
             discord_rpc_enabled: true,
+            install_root: None,
             api_url: None,
             played_seconds: 0,
         }
@@ -600,13 +627,19 @@ fn main() -> Result<(), slint::PlatformError> {
         discord_rpc::rpc_set_enabled(settings.discord_rpc_enabled);
         discord_rpc::rpc_set(discord_rpc::Presence::Idle);
     }
-    apply_install_folder_label(&app, &state);
+    apply_install_folder_label(&app);
 
     register_login_handler(&app, config.clone(), state.clone(), session_generation.clone());
     register_policy_accept_handler(&app, config.clone(), state.clone());
-    register_logout_handler(&app, state.clone(), session_generation.clone());
-    register_settings_handler(&app, state.clone());
-    register_play_handler(&app, config.clone(), state.clone());
+    let migration_active = Arc::new(AtomicBool::new(false));
+    register_logout_handler(
+        &app,
+        state.clone(),
+        session_generation.clone(),
+        migration_active.clone(),
+    );
+    register_settings_handler(&app, state.clone(), migration_active.clone());
+    register_play_handler(&app, config.clone(), state.clone(), migration_active);
     register_update_restart_handler(&app);
     spawn_update_check(app.as_weak(), config.clone());
     start_periodic_update_check(app.as_weak(), config.clone());
@@ -737,9 +770,16 @@ fn register_logout_handler(
     app: &AppWindow,
     state: Arc<Mutex<RuntimeState>>,
     generation: Arc<AtomicU64>,
+    migration_active: Arc<AtomicBool>,
 ) {
     let logout_app = app.as_weak();
     app.on_logout_requested(move || {
+        if migration_active.load(Ordering::SeqCst) {
+            if let Some(app) = logout_app.upgrade() {
+                app.set_message("Дождитесь завершения переноса файлов перед выходом.".into());
+            }
+            return;
+        }
         let _ = delete_token();
         discord_rpc::rpc_set(discord_rpc::Presence::Idle);
         // Останавливаем фоновый SSE-слушатель текущей сессии.
@@ -765,19 +805,22 @@ fn register_logout_handler(
             app.set_download_panel_visible(false);
             app.set_settings_visible(false);
             app.set_policy_visible(false);
-            apply_install_folder_label(&app, &state);
+            apply_install_folder_label(&app);
             app.set_message("Сессия завершена.".into());
         }
     });
 }
 
-fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
+fn register_settings_handler(
+    app: &AppWindow,
+    state: Arc<Mutex<RuntimeState>>,
+    migration_active: Arc<AtomicBool>,
+) {
     let settings_app = app.as_weak();
-    let settings_state = state.clone();
     app.on_settings_requested(move || {
         if let Some(app) = settings_app.upgrade() {
             apply_launcher_settings(&app, &load_settings().unwrap_or_default());
-            apply_install_folder_label(&app, &settings_state);
+            apply_install_folder_label(&app);
             app.set_settings_visible(true);
         }
     });
@@ -827,10 +870,8 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
     let gpu_app = app.as_weak();
     app.on_discrete_gpu_requested(move |enabled| {
         if let Some(app) = gpu_app.upgrade() {
-            let mut settings = load_settings().unwrap_or_default();
-            settings.use_discrete_gpu = enabled;
-            match save_settings(&settings) {
-                Ok(()) => {
+            match update_settings(|settings| settings.use_discrete_gpu = enabled) {
+                Ok(settings) => {
                     apply_launcher_settings(&app, &settings);
                     app.set_message(
                         if enabled {
@@ -849,10 +890,8 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
     let discord_app = app.as_weak();
     app.on_discord_rpc_requested(move |enabled| {
         if let Some(app) = discord_app.upgrade() {
-            let mut settings = load_settings().unwrap_or_default();
-            settings.discord_rpc_enabled = enabled;
-            match save_settings(&settings) {
-                Ok(()) => {
+            match update_settings(|settings| settings.discord_rpc_enabled = enabled) {
+                Ok(settings) => {
                     apply_launcher_settings(&app, &settings);
                     discord_rpc::rpc_set_enabled(enabled);
                     app.set_message(
@@ -898,10 +937,7 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
     let folder_app = app.as_weak();
     app.on_open_install_folder_requested(move || {
         if let Some(app) = folder_app.upgrade() {
-            let folder = state
-                .lock()
-                .map_err(|_| "Не удалось прочитать состояние лаунчера.".to_string())
-                .and_then(|state| install_folder_for_state(&state));
+            let folder = current_install_root();
 
             match folder {
                 Ok(path) => {
@@ -918,6 +954,81 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
                 Err(message) => app.set_message(message.into()),
             }
         }
+    });
+
+    let change_folder_app = app.as_weak();
+    let change_folder_active = migration_active.clone();
+    app.on_change_install_folder_requested(move || {
+        let Some(app) = change_folder_app.upgrade() else {
+            return;
+        };
+        if app.get_is_syncing() {
+            app.set_message("Дождитесь завершения установки или игры перед сменой диска.".into());
+            return;
+        }
+        if change_folder_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            app.set_message("Перенос файлов уже выполняется.".into());
+            return;
+        }
+
+        let source_root = match current_install_root() {
+            Ok(path) => path,
+            Err(message) => {
+                change_folder_active.store(false, Ordering::SeqCst);
+                app.set_message(message.into());
+                return;
+            }
+        };
+        let selected = rfd::FileDialog::new()
+            .set_title("Выберите пустую папку на новом диске")
+            .set_directory(&source_root)
+            .pick_folder();
+        let Some(destination) = selected else {
+            change_folder_active.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        app.set_is_syncing(true);
+        app.set_message("Переносим профили на новый диск. Не закрывайте лаунчер…".into());
+        PROFILE_SYNC_ACTIVE.store(true, Ordering::SeqCst);
+        let app_weak = change_folder_app.clone();
+        let active = change_folder_active.clone();
+        thread::spawn(move || {
+            let result = install::migrate_users(&source_root, &destination).and_then(|migration| {
+                update_settings(|settings| {
+                    settings.install_root =
+                        Some(migration.destination.to_string_lossy().to_string());
+                })?;
+                install::finalize_migration(&migration);
+                Ok(migration)
+            });
+            PROFILE_SYNC_ACTIVE.store(false, Ordering::SeqCst);
+            active.store(false, Ordering::SeqCst);
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_is_syncing(false);
+                    match result {
+                        Ok(migration) => {
+                            apply_install_folder_label(&app);
+                            let message = if migration.copied_existing_data {
+                                format!(
+                                    "Установка перенесена в {}. Старая папка оставлена как резервная копия.",
+                                    migration.destination.display()
+                                )
+                            } else {
+                                format!("Новая папка установки: {}", migration.destination.display())
+                            };
+                            app.set_message(message.into());
+                        }
+                        Err(message) => app.set_message(message.into()),
+                    }
+                }
+            });
+        });
     });
 
     app.on_open_url(|url| {
@@ -951,7 +1062,12 @@ fn register_settings_handler(app: &AppWindow, state: Arc<Mutex<RuntimeState>>) {
     });
 }
 
-fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<RuntimeState>>) {
+fn register_play_handler(
+    app: &AppWindow,
+    config: AppConfig,
+    state: Arc<Mutex<RuntimeState>>,
+    migration_active: Arc<AtomicBool>,
+) {
     let play_app = app.as_weak();
     app.on_play_requested(move || {
         let snapshot = match state.lock() {
@@ -984,11 +1100,41 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
             }
         };
 
+        let initial_location = match choose_initial_install_root(&user, &profile) {
+            Ok(Some(location)) => location,
+            Ok(None) => {
+                if let Some(app) = play_app.upgrade() {
+                    app.set_message("Установка отменена: папка не выбрана.".into());
+                }
+                return;
+            }
+            Err(message) => {
+                if let Some(app) = play_app.upgrade() {
+                    app.set_message(message.into());
+                }
+                return;
+            }
+        };
+        let is_initial_migration = matches!(initial_location, InitialInstallLocation::Selected { .. });
+        if is_initial_migration
+            && migration_active
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            if let Some(app) = play_app.upgrade() {
+                app.set_message("Перенос файлов уже выполняется.".into());
+            }
+            return;
+        }
+
         if let Some(app) = play_app.upgrade() {
+            PROFILE_SYNC_ACTIVE.store(true, Ordering::SeqCst);
             app.set_is_syncing(true);
             app.set_settings_visible(false);
             app.set_download_panel_visible(true);
-            app.set_download_phase("Получаем профиль".into());
+            app.set_download_phase(
+                if is_initial_migration { "Готовим папку" } else { "Получаем профиль" }.into(),
+            );
             app.set_download_file(profile.name.clone().into());
             app.set_download_counter("0%".into());
             app.set_download_progress(0.0);
@@ -1001,14 +1147,40 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
         let nick_for_rpc = user.login.clone();
         let app_weak = play_app.clone();
         let config = config.clone();
+        let migration_flag = migration_active.clone();
+        let refresh_runtime = state.clone();
         thread::spawn(move || {
-            let result = sync_and_launch(&config, &token, &user, &profile, &app_weak);
+            let preparation = match initial_location {
+                InitialInstallLocation::Current => Ok(()),
+                InitialInstallLocation::Selected { source, destination } => {
+                    install::migrate_users(&source, &destination).and_then(|migration| {
+                        update_settings(|settings| {
+                            settings.install_root =
+                                Some(migration.destination.to_string_lossy().to_string());
+                        })?;
+                        install::finalize_migration(&migration);
+                        Ok(())
+                    })
+                }
+            };
+            if is_initial_migration {
+                migration_flag.store(false, Ordering::SeqCst);
+            }
+            let result = preparation
+                .and_then(|_| sync_and_launch(&config, &token, &user, &profile, &app_weak));
+            PROFILE_SYNC_ACTIVE.store(false, Ordering::SeqCst);
             if let Err(ref message) = result {
                 log_sync_error(message);
             }
             let nick_for_rpc = nick_for_rpc.clone();
+            let refresh_app = app_weak.clone();
+            let refresh_config = config.clone();
+            let refresh_token = token.clone();
+            let refresh_user = user.clone();
+            let refresh_profile = profile.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
+                    apply_install_folder_label(&app);
                     discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
                         nick: nick_for_rpc.clone(),
                     });
@@ -1016,6 +1188,9 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                     app.set_is_syncing(false);
                     match result {
                         Ok(message) => {
+                            if !app.get_profile_update_available() {
+                                set_profile_install_state(&app, ProfileInstallState::Checking);
+                            }
                             app.set_download_phase("Готово".into());
                             app.set_download_file("Minecraft закрыт".into());
                             app.set_download_counter("100%".into());
@@ -1024,6 +1199,14 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
                             app.set_message(message.into());
                             let played = load_settings().unwrap_or_default().played_seconds;
                             app.set_playtime_total(format_playtime(played).into());
+                            refresh_profile_install_state(
+                                refresh_app,
+                                refresh_runtime,
+                                refresh_config,
+                                refresh_token,
+                                refresh_user,
+                                refresh_profile,
+                            );
                         }
                         Err(message) => {
                             if let Some(alert) = message.strip_prefix(anticheat::kick::KICK_PREFIX) {
@@ -1075,6 +1258,48 @@ fn register_play_handler(app: &AppWindow, config: AppConfig, state: Arc<Mutex<Ru
             });
         });
     });
+}
+
+/// На старых установках `installRoot` отсутствует. Если у выбранного профиля уже
+/// есть локальный manifest, продолжаем использовать прежний data-dir. Если файлов
+/// ещё нет, перед первой загрузкой обязательно предлагаем место установки.
+fn choose_initial_install_root(
+    user: &AuthUser,
+    profile: &ProfileSummary,
+) -> Result<Option<InitialInstallLocation>, String> {
+    let settings = load_settings()?;
+    let default_root = project_dirs()?.data_dir().to_path_buf();
+    let configured_root = settings
+        .install_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+        .map(|root| install::configured_root(Some(root), &default_root))
+        .transpose()?;
+    if configured_root.as_ref().is_some_and(|root| root.is_dir()) {
+        return Ok(Some(InitialInstallLocation::Current));
+    }
+    if configured_root.is_none()
+        && profile_paths_at_root(user, &profile.id, &default_root)?
+        .manifest_path
+        .is_file()
+    {
+        return Ok(Some(InitialInstallLocation::Current));
+    }
+
+    let source = configured_root.unwrap_or(default_root);
+
+    let selected = rfd::FileDialog::new()
+        .set_title("Куда установить файлы Minecraft?")
+        .set_directory(source.parent().unwrap_or(&source))
+        .pick_folder();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    Ok(Some(InitialInstallLocation::Selected {
+        source,
+        destination: selected,
+    }))
 }
 
 fn restore_saved_session(
@@ -1202,7 +1427,7 @@ fn apply_session(
     app.set_requires_totp(false);
     app.set_is_authenticated(true);
     app.set_user_login(session.user.login.clone().into());
-    app.set_user_uuid(session.user.provider_uuid.into());
+    app.set_user_uuid(session.user.provider_uuid.clone().into());
     app.set_is_slim(session.user.is_slim);
     app.set_token_expires_at(format_session_expiry(&session.expires_at).into());
     app.set_password_value(SharedString::default());
@@ -1220,6 +1445,16 @@ fn apply_session(
     }
 
     set_profile_ui(app, selected.as_ref());
+    if let Some(profile) = selected {
+        refresh_profile_install_state(
+            app.as_weak(),
+            Arc::clone(state),
+            config.clone(),
+            session.token.clone(),
+            session.user.clone(),
+            profile,
+        );
+    }
 
     let news_model: Vec<NewsItem> = session
         .news
@@ -1232,7 +1467,7 @@ fn apply_session(
         .collect();
     app.set_news_items(ModelRc::new(VecModel::from(news_model)));
 
-    apply_install_folder_label(app, state);
+    apply_install_folder_label(app);
 
     // Запускаем фоновый SSE-слушатель: при изменении профилей на сервере
     // лаунчер перезапрашивает их без перезахода. Увеличение поколения
@@ -1245,24 +1480,267 @@ fn apply_session(
         Arc::clone(generation),
         my_generation,
     );
+    start_local_profile_watch(
+        app.as_weak(),
+        Arc::clone(state),
+        Arc::clone(generation),
+        my_generation,
+    );
     discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
         nick: session.user.login.clone(),
     });
+}
+
+/// Пока пользователь авторизован, быстро отслеживает удаление и обычные локальные
+/// изменения управляемых файлов. Размер/mtime проверяются каждые 5 секунд; SHA-256
+/// считается для файла с изменившимся mtime, а раз в минуту простоя выполняется
+/// полный контроль (ловит замену с сохранёнными размером и mtime). Во время
+/// установки и игры полный аудит пропускается. Серверные обновления приходят SSE.
+fn start_local_profile_watch(
+    app_weak: Weak<AppWindow>,
+    state: Arc<Mutex<RuntimeState>>,
+    generation: Arc<AtomicU64>,
+    my_generation: u64,
+) {
+    thread::spawn(move || {
+        let mut verified_mtimes = HashMap::<PathBuf, i64>::new();
+        let mut audit_tick = 0_u8;
+        while generation.load(Ordering::SeqCst) == my_generation {
+            for _ in 0..10 {
+                if generation.load(Ordering::SeqCst) != my_generation {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            let snapshot = match state.lock() {
+                Ok(state) => state.clone(),
+                Err(_) => return,
+            };
+            let (Some(user), Some(profile)) =
+                (snapshot.user.as_ref(), selected_profile(&snapshot))
+            else {
+                continue;
+            };
+            audit_tick = audit_tick.wrapping_add(1);
+            let force_hash = audit_tick >= 12
+                && !PROFILE_SYNC_ACTIVE.load(Ordering::SeqCst);
+            if audit_tick >= 12 {
+                audit_tick = 0;
+            }
+            let detected_state = local_profile_files_changed(
+                user,
+                &profile,
+                &mut verified_mtimes,
+                force_hash,
+            )
+            .ok()
+            .flatten();
+            let Some(detected_state) = detected_state else {
+                continue;
+            };
+            PROFILE_CHECK_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+            let expected_user = user.provider_uuid.clone();
+            let expected_profile = profile.id.clone();
+            let app_weak = app_weak.clone();
+            let current_state = Arc::clone(&state);
+            let _ = slint::invoke_from_event_loop(move || {
+                let still_current = current_state.lock().is_ok_and(|state| {
+                    state
+                        .user
+                        .as_ref()
+                        .is_some_and(|user| user.provider_uuid == expected_user)
+                        && state.selected_profile_id.as_deref() == Some(expected_profile.as_str())
+                });
+                if let Some(app) = app_weak.upgrade().filter(|_| still_current) {
+                    set_profile_install_state(&app, detected_state);
+                }
+            });
+        }
+    });
+}
+
+fn local_profile_files_changed(
+    user: &AuthUser,
+    profile: &ProfileSummary,
+    verified_mtimes: &mut HashMap<PathBuf, i64>,
+    force_hash: bool,
+) -> Result<Option<ProfileInstallState>, String> {
+    let paths = profile_paths(user, &profile.id)?;
+    local_profile_files_changed_at(&paths, verified_mtimes, force_hash)
+}
+
+fn local_profile_files_changed_at(
+    paths: &ProfilePaths,
+    verified_mtimes: &mut HashMap<PathBuf, i64>,
+    force_hash: bool,
+) -> Result<Option<ProfileInstallState>, String> {
+    if !paths.manifest_path.is_file() {
+        return Ok(Some(ProfileInstallState::Missing));
+    }
+    let data = fs::read_to_string(&paths.manifest_path)
+        .map_err(|_| "Не удалось прочитать локальный manifest.".to_string())?;
+    let local: LocalManifest = serde_json::from_str(&data)
+        .map_err(|_| "Локальный manifest повреждён.".to_string())?;
+    for file in local.files {
+        let path = safe_join(&paths.files_root, &file.path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Some(ProfileInstallState::UpdateAvailable));
+            }
+            Err(_) => return Err(format!("Не удалось проверить {}", file.path)),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() != file.size.max(0) as u64
+        {
+            return Ok(Some(ProfileInstallState::UpdateAvailable));
+        }
+        let current_mtime = file_mtime_millis(&metadata);
+        if force_hash
+            || (current_mtime != file.mtime_millis
+                && verified_mtimes.get(&path) != Some(&current_mtime))
+        {
+            if hash_file(&path)? != file.hash_sha256.to_lowercase() {
+                return Ok(Some(ProfileInstallState::UpdateAvailable));
+            }
+            verified_mtimes.insert(path, current_mtime);
+        }
+    }
+    Ok(None)
 }
 
 /// Обновляет в UI поля выбранного профиля (или показывает «Нет профилей»).
 fn set_profile_ui(app: &AppWindow, selected: Option<&ProfileSummary>) {
     if let Some(profile) = selected {
         app.set_has_profile(true);
-        app.set_profile_status("Доступен".into());
         app.set_selected_profile_name(profile.name.clone().into());
         app.set_selected_profile_version(profile.game_version.clone().into());
+        set_profile_install_state(app, ProfileInstallState::Checking);
     } else {
         app.set_has_profile(false);
         app.set_profile_status("Нет профилей".into());
+        app.set_profile_installed(false);
+        app.set_profile_update_available(false);
+        app.set_profile_state_checking(false);
+        app.set_profile_state_unknown(false);
         app.set_selected_profile_name(SharedString::default());
         app.set_selected_profile_version("-".into());
     }
+}
+
+fn set_profile_install_state(app: &AppWindow, state: ProfileInstallState) {
+    app.set_profile_state_checking(state == ProfileInstallState::Checking);
+    app.set_profile_state_unknown(state == ProfileInstallState::Unknown);
+    app.set_profile_installed(matches!(
+        state,
+        ProfileInstallState::Ready
+            | ProfileInstallState::UpdateAvailable
+            | ProfileInstallState::Unknown
+    ));
+    app.set_profile_update_available(state == ProfileInstallState::UpdateAvailable);
+    app.set_profile_status(
+        match state {
+            ProfileInstallState::Checking => "Проверяем файлы",
+            ProfileInstallState::Missing => "Не установлен",
+            ProfileInstallState::UpdateAvailable => "Доступно обновление",
+            ProfileInstallState::Ready => "Готов к запуску",
+            ProfileInstallState::Unknown => "Проверка недоступна",
+        }
+        .into(),
+    );
+}
+
+/// После входа и каждого серверного события сверяет локальную сборку с актуальным
+/// manifest. Проверяются и версия manifest, и SHA-256 каждого управляемого файла,
+/// поэтому кнопка «Обновить» появляется также после локального изменения файла.
+fn refresh_profile_install_state(
+    app_weak: Weak<AppWindow>,
+    runtime_state: Arc<Mutex<RuntimeState>>,
+    config: AppConfig,
+    token: String,
+    user: AuthUser,
+    profile: ProfileSummary,
+) {
+    let check_sequence = PROFILE_CHECK_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
+    thread::spawn(move || {
+        let expected_user_uuid = user.provider_uuid.clone();
+        let paths = profile_paths(&user, &profile.id);
+        let had_local_manifest = paths
+            .as_ref()
+            .is_ok_and(|paths| paths.manifest_path.is_file());
+        let install_state = match paths {
+            Ok(paths) => match fetch_manifest(&config, &token, &profile.id) {
+                Ok(manifest) => profile_install_state(&paths, &manifest)
+                    .unwrap_or(ProfileInstallState::UpdateAvailable),
+                Err(_) if had_local_manifest => ProfileInstallState::Unknown,
+                Err(_) => ProfileInstallState::Missing,
+            },
+            Err(_) => ProfileInstallState::Missing,
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = app_weak.upgrade() {
+                let still_current = runtime_state.lock().is_ok_and(|state| {
+                    state
+                        .user
+                        .as_ref()
+                        .is_some_and(|user| user.provider_uuid == expected_user_uuid)
+                        && state.selected_profile_id.as_deref() == Some(profile.id.as_str())
+                }) && PROFILE_CHECK_SEQUENCE.load(Ordering::SeqCst) == check_sequence;
+                if app.get_is_authenticated() && still_current {
+                    if install_state == ProfileInstallState::Unknown
+                        && app.get_profile_update_available()
+                    {
+                        return;
+                    }
+                    set_profile_install_state(&app, install_state);
+                }
+            }
+        });
+    });
+}
+
+fn profile_install_state(
+    paths: &ProfilePaths,
+    manifest: &Manifest,
+) -> Result<ProfileInstallState, String> {
+    if !paths.manifest_path.is_file() {
+        return Ok(ProfileInstallState::Missing);
+    }
+    let data = fs::read_to_string(&paths.manifest_path)
+        .map_err(|_| "Не удалось прочитать локальный manifest.".to_string())?;
+    let local: LocalManifest = serde_json::from_str(&data)
+        .map_err(|_| "Локальный manifest повреждён.".to_string())?;
+    if local.profile_id != manifest.profile.id
+        || local.manifest_version != manifest.profile.manifest_version
+        || local.files.len() != manifest.files.len()
+    {
+        return Ok(ProfileInstallState::UpdateAvailable);
+    }
+    let local_files = local
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect::<HashMap<_, _>>();
+    if manifest.files.iter().any(|file| {
+        local_files.get(file.path.as_str()).is_none_or(|local| {
+            local.hash_sha256 != file.hash_sha256 || local.size != file.size
+        })
+    }) {
+        return Ok(ProfileInstallState::UpdateAvailable);
+    }
+    let needs_update = manifest
+        .files
+        .par_iter()
+        .map(|file| needs_download(&paths.files_root, file))
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .any(|needs| needs);
+    Ok(if needs_update {
+        ProfileInstallState::UpdateAvailable
+    } else {
+        ProfileInstallState::Ready
+    })
 }
 
 /// Фоновый поток: держит SSE-подключение к /api/profiles/events и при каждом
@@ -1343,6 +1821,10 @@ fn stream_profile_events(
         return StreamOutcome::Disconnected;
     }
 
+    // SSE не гарантирует replay. После каждого успешного подключения перечитываем
+    // состояние, чтобы обновление, опубликованное во время разрыва, не потерялось.
+    refresh_profiles_now(config, state, app_weak);
+
     let reader = BufReader::new(response);
     for line in reader.lines() {
         if generation.load(Ordering::SeqCst) != my_generation {
@@ -1404,12 +1886,31 @@ fn refresh_profiles_now(
         .as_ref()
         .and_then(|id| profiles.iter().find(|profile| &profile.id == id))
         .cloned();
+    let user = state
+        .lock()
+        .ok()
+        .and_then(|state| state.user.clone());
     let app_weak = app_weak.clone();
+    let install_app = app_weak.clone();
+    let install_runtime = Arc::clone(state);
+    let install_config = config.clone();
+    let install_token = token.clone();
+    let install_profile = selected.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = app_weak.upgrade() {
             set_profile_ui(&app, selected.as_ref());
         }
     });
+    if let (Some(user), Some(profile)) = (user, install_profile) {
+        refresh_profile_install_state(
+            install_app,
+            install_runtime,
+            install_config,
+            install_token,
+            user,
+            profile,
+        );
+    }
 }
 
 /// HTTP-клиент для долгоживущего SSE-потока: без общего таймаута запроса,
@@ -2428,9 +2929,9 @@ fn launch_profile(
     // Наиграно: копим только реальные сессии, краш на старте (быстрый выход с
     // ошибкой) не считаем. Best-effort — сбой записи не должен ломать выход из игры.
     if !is_fast_launch_failure(elapsed, status.success()) {
-        let mut settings = load_settings().unwrap_or_default();
-        settings.played_seconds = settings.played_seconds.saturating_add(elapsed.as_secs());
-        let _ = save_settings(&settings);
+        let _ = update_settings(|settings| {
+            settings.played_seconds = settings.played_seconds.saturating_add(elapsed.as_secs());
+        });
     }
 
     // Если античит убил игру (kick-файл создан агентом) — возвращаем уведомление о
@@ -2772,23 +3273,23 @@ fn choose_profile_for_user(
     user_uuid: &str,
     profiles: &[ProfileSummary],
 ) -> Result<Option<String>, String> {
-    let mut settings = load_settings().unwrap_or_default();
-    settings.last_user_uuid = Some(user_uuid.to_string());
-
-    let selected = settings
-        .selected_profiles
-        .get(user_uuid)
-        .and_then(|profile_id| profiles.iter().find(|profile| &profile.id == profile_id))
-        .or_else(|| profiles.iter().find(|profile| profile.is_active))
-        .or_else(|| profiles.first())
-        .map(|profile| profile.id.clone());
-
-    if let Some(profile_id) = &selected {
-        settings
+    let mut selected = None;
+    update_settings(|settings| {
+        settings.last_user_uuid = Some(user_uuid.to_string());
+        selected = settings
             .selected_profiles
-            .insert(user_uuid.to_string(), profile_id.clone());
-    }
-    save_settings(&settings)?;
+            .get(user_uuid)
+            .and_then(|profile_id| profiles.iter().find(|profile| &profile.id == profile_id))
+            .or_else(|| profiles.iter().find(|profile| profile.is_active))
+            .or_else(|| profiles.first())
+            .map(|profile| profile.id.clone());
+
+        if let Some(profile_id) = &selected {
+            settings
+                .selected_profiles
+                .insert(user_uuid.to_string(), profile_id.clone());
+        }
+    })?;
     Ok(selected)
 }
 
@@ -2895,11 +3396,9 @@ fn register_mirror_handler(
 
     let app_weak = app.as_weak();
     app.on_server_selected(move |index| {
-        let mut settings = load_settings().unwrap_or_default();
         let idx = index.max(0) as usize;
         if idx == 0 {
-            settings.api_url = None;
-            let _ = save_settings(&settings);
+            let _ = update_settings(|settings| settings.api_url = None);
             if let Some(app) = app_weak.upgrade() {
                 app.set_message("Сервер выбирается автоматически…".into());
             }
@@ -2910,8 +3409,8 @@ fn register_mirror_handler(
             return;
         };
         config.set_api_url(url);
-        settings.api_url = Some(url.clone());
-        let _ = save_settings(&settings);
+        let saved_url = url.clone();
+        let _ = update_settings(|settings| settings.api_url = Some(saved_url));
         if let Some(app) = app_weak.upgrade() {
             app.set_api_url(url.into());
             app.set_message(format!("Сервер: {name}").into());
@@ -2960,11 +3459,8 @@ fn format_session_expiry(raw: &str) -> String {
     }
 }
 
-fn apply_install_folder_label(app: &AppWindow, state: &Arc<Mutex<RuntimeState>>) {
-    let folder = state
-        .lock()
-        .map_err(|_| "Не удалось прочитать состояние лаунчера.".to_string())
-        .and_then(|state| install_folder_for_state(&state))
+fn apply_install_folder_label(app: &AppWindow) {
+    let folder = current_install_root()
         .or_else(|_| project_dirs().map(|dirs| dirs.data_dir().to_path_buf()));
 
     if let Ok(folder) = folder {
@@ -2977,12 +3473,11 @@ where
     F: FnOnce(&mut LauncherSettings),
 {
     if let Some(app) = app.upgrade() {
-        let mut settings = load_settings().unwrap_or_default();
-        update(&mut settings);
-        settings.memory_gb = clamp_memory_gb(settings.memory_gb);
-
-        match save_settings(&settings) {
-            Ok(()) => {
+        match update_settings(|settings| {
+            update(settings);
+            settings.memory_gb = clamp_memory_gb(settings.memory_gb);
+        }) {
+            Ok(settings) => {
                 apply_launcher_settings(&app, &settings);
                 app.set_message("Настройки памяти сохранены.".into());
             }
@@ -3282,13 +3777,8 @@ fn save_token(token: &str) -> Result<(), String> {
     // JWT в settings.json (плейнтекст, права по umask) кладём ТОЛЬКО как fallback,
     // когда keyring недоступен. При рабочем keyring поле очищаем — иначе токен всегда
     // лежал бы открыто рядом, и keyring не давал бы защиты (кража = просто чтение файла).
-    let mut settings = load_settings().unwrap_or_default();
-    settings.auth_token = if keyring_ok {
-        None
-    } else {
-        Some(token.to_string())
-    };
-    let settings_result = save_settings(&settings);
+    let fallback_token = (!keyring_ok).then(|| token.to_string());
+    let settings_result = update_settings(|settings| settings.auth_token = fallback_token);
 
     if keyring_ok || settings_result.is_ok() {
         return Ok(());
@@ -3319,9 +3809,7 @@ fn delete_token() -> Result<(), String> {
         let _ = entry.delete_credential();
     }
 
-    let mut settings = load_settings().unwrap_or_default();
-    settings.auth_token = None;
-    save_settings(&settings)
+    update_settings(|settings| settings.auth_token = None).map(|_| ())
 }
 
 fn should_forget_saved_session(message: &str) -> bool {
@@ -3333,22 +3821,96 @@ fn should_forget_saved_session(message: &str) -> bool {
 }
 
 fn load_settings() -> Result<LauncherSettings, String> {
-    let path = settings_path()?;
-    if !path.exists() {
-        return Ok(LauncherSettings::default());
-    }
-    let data = fs::read_to_string(path).map_err(|_| "Не удалось прочитать settings.json.".to_string())?;
-    serde_json::from_str(&data).map_err(|_| "settings.json повреждён.".to_string())
+    let _guard = SETTINGS_IO_LOCK
+        .lock()
+        .map_err(|_| "Не удалось заблокировать settings.json.".to_string())?;
+    load_settings_unlocked()
 }
 
-fn save_settings(settings: &LauncherSettings) -> Result<(), String> {
+fn load_settings_unlocked() -> Result<LauncherSettings, String> {
     let path = settings_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| "Не удалось создать папку настроек.".to_string())?;
+    let pending = path.with_extension("json.new");
+    let backup = path.with_extension("json.old");
+    if !path.exists() {
+        for candidate in [&pending, &backup] {
+            if !candidate.is_file() {
+                continue;
+            }
+            let data = fs::read_to_string(candidate)
+                .map_err(|_| "Не удалось восстановить settings.json.".to_string())?;
+            if serde_json::from_str::<LauncherSettings>(&data).is_ok() {
+                fs::rename(candidate, &path)
+                    .map_err(|_| "Не удалось восстановить settings.json.".to_string())?;
+                break;
+            }
+            let _ = fs::remove_file(candidate);
+        }
+        if !path.exists() {
+            return Ok(LauncherSettings::default());
+        }
     }
+    let data = fs::read_to_string(&path)
+        .map_err(|_| "Не удалось прочитать settings.json.".to_string())?;
+    let settings = serde_json::from_str(&data).map_err(|_| "settings.json повреждён.".to_string())?;
+    let _ = fs::remove_file(pending);
+    let _ = fs::remove_file(backup);
+    Ok(settings)
+}
+
+fn save_settings_unlocked(settings: &LauncherSettings) -> Result<(), String> {
+    let path = settings_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Не удалось определить папку настроек.".to_string())?;
+    fs::create_dir_all(parent).map_err(|_| "Не удалось создать папку настроек.".to_string())?;
     let data = serde_json::to_string_pretty(settings)
         .map_err(|_| "Не удалось сохранить настройки.".to_string())?;
-    fs::write(path, data).map_err(|_| "Не удалось записать settings.json.".to_string())
+    let pending = path.with_extension("json.new");
+    let backup = path.with_extension("json.old");
+    let mut file = File::create(&pending)
+        .map_err(|_| "Не удалось подготовить settings.json.".to_string())?;
+    file.write_all(data.as_bytes())
+        .and_then(|_| file.flush())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "Не удалось записать settings.json.".to_string())?;
+    drop(file);
+
+    if backup.exists() {
+        fs::remove_file(&backup)
+            .map_err(|_| "Не удалось очистить резервную копию настроек.".to_string())?;
+    }
+    if path.exists() {
+        fs::rename(&path, &backup)
+            .map_err(|_| "Не удалось подготовить замену settings.json.".to_string())?;
+    }
+    if let Err(error) = fs::rename(&pending, &path) {
+        if backup.exists() && !path.exists() {
+            let _ = fs::rename(&backup, &path);
+        }
+        return Err(format!("Не удалось заменить settings.json: {error}"));
+    }
+    #[cfg(unix)]
+    if let Ok(directory) = File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    let _ = fs::remove_file(backup);
+    Ok(())
+}
+
+/// Атомарная для потоков лаунчера операция read-modify-write. Все UI-настройки
+/// используют её, поэтому фоновый перенос диска не может затереть память/GPU и
+/// наоборот. Возвращается сохранённый снимок для немедленного обновления UI.
+fn update_settings<F>(update: F) -> Result<LauncherSettings, String>
+where
+    F: FnOnce(&mut LauncherSettings),
+{
+    let _guard = SETTINGS_IO_LOCK
+        .lock()
+        .map_err(|_| "Не удалось заблокировать settings.json.".to_string())?;
+    let mut settings = load_settings_unlocked().unwrap_or_default();
+    update(&mut settings);
+    save_settings_unlocked(&settings)?;
+    Ok(settings)
 }
 
 fn save_local_manifest(path: &Path, files_root: &Path, manifest: &Manifest) -> Result<(), String> {
@@ -3393,14 +3955,27 @@ fn settings_path() -> Result<PathBuf, String> {
 }
 
 fn profile_paths(user: &AuthUser, profile_id: &str) -> Result<ProfilePaths, String> {
+    profile_paths_at_root(user, profile_id, &current_install_root()?)
+}
+
+fn current_install_root() -> Result<PathBuf, String> {
+    let default_root = project_dirs()?.data_dir().to_path_buf();
+    let settings = load_settings()?;
+    install::configured_root(settings.install_root.as_deref(), &default_root)
+}
+
+fn profile_paths_at_root(
+    user: &AuthUser,
+    profile_id: &str,
+    install_root: &Path,
+) -> Result<ProfilePaths, String> {
     let user_key = safe_component(if user.provider_uuid.is_empty() {
         &user.id
     } else {
         &user.provider_uuid
     });
     let profile_key = safe_component(profile_id);
-    let profile_root = project_dirs()?
-        .data_dir()
+    let profile_root = install_root
         .join("users")
         .join(user_key)
         .join("profiles")
@@ -4106,6 +4681,27 @@ mod tests {
         let json = r#"{"memoryGb":4,"memoryAuto":true,"useDiscreteGpu":true}"#;
         let s: LauncherSettings = serde_json::from_str(json).unwrap();
         assert!(s.discord_rpc_enabled);
+        assert!(s.install_root.is_none());
+    }
+
+    #[test]
+    fn custom_install_root_contains_user_profiles() {
+        let root = test_root("custom_install_root_contains_user_profiles");
+        let user = AuthUser {
+            id: "local-id".to_string(),
+            login: "Player".to_string(),
+            provider_uuid: "user-uuid".to_string(),
+            is_slim: false,
+            policy_accepted_version: 1,
+        };
+
+        let paths = profile_paths_at_root(&user, "profile-id", &root).unwrap();
+
+        assert_eq!(
+            paths.files_root,
+            root.join("users/user-uuid/profiles/profile-id/files")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4181,6 +4777,133 @@ mod tests {
         assert!(needs_download(&root, &file).unwrap());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_state_distinguishes_missing_ready_and_modified_files() {
+        let profile_root = test_root("profile_install_state");
+        let files_root = profile_root.join("files");
+        let paths = ProfilePaths {
+            profile_root: profile_root.clone(),
+            files_root: files_root.clone(),
+            manifest_path: profile_root.join("manifest.json"),
+        };
+        let hash = hex_hash(Sha256::digest(b"official").as_slice());
+        let manifest = test_manifest(
+            vec![test_manifest_file(
+                "mods/official.jar",
+                &hash,
+                "official".len() as i64,
+            )],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            profile_install_state(&paths, &manifest).unwrap(),
+            ProfileInstallState::Missing
+        );
+        write_test_file(&files_root.join("mods/official.jar"), "official");
+        save_local_manifest(&paths.manifest_path, &files_root, &manifest).unwrap();
+        assert_eq!(
+            profile_install_state(&paths, &manifest).unwrap(),
+            ProfileInstallState::Ready
+        );
+        write_test_file(&files_root.join("mods/official.jar"), "modified");
+        assert_eq!(
+            profile_install_state(&paths, &manifest).unwrap(),
+            ProfileInstallState::UpdateAvailable
+        );
+
+        let _ = fs::remove_dir_all(profile_root);
+    }
+
+    #[test]
+    fn profile_state_detects_new_manifest_version() {
+        let profile_root = test_root("profile_manifest_version");
+        let files_root = profile_root.join("files");
+        let paths = ProfilePaths {
+            profile_root: profile_root.clone(),
+            files_root: files_root.clone(),
+            manifest_path: profile_root.join("manifest.json"),
+        };
+        let hash = hex_hash(Sha256::digest(b"official").as_slice());
+        let old = test_manifest(
+            vec![test_manifest_file(
+                "mods/official.jar",
+                &hash,
+                "official".len() as i64,
+            )],
+            Vec::new(),
+        );
+        write_test_file(&files_root.join("mods/official.jar"), "official");
+        save_local_manifest(&paths.manifest_path, &files_root, &old).unwrap();
+        let mut updated = old.clone();
+        updated.profile.manifest_version += 1;
+
+        assert_eq!(
+            profile_install_state(&paths, &updated).unwrap(),
+            ProfileInstallState::UpdateAvailable
+        );
+
+        let _ = fs::remove_dir_all(profile_root);
+    }
+
+    #[test]
+    fn local_profile_watch_detects_changed_managed_file() {
+        let profile_root = test_root("local_profile_watch");
+        let install_root = profile_root.join("install");
+        let user = AuthUser {
+            id: "id".to_string(),
+            login: "Player".to_string(),
+            provider_uuid: "uuid".to_string(),
+            is_slim: false,
+            policy_accepted_version: 1,
+        };
+        let profile = ProfileSummary {
+            id: "profile".to_string(),
+            name: "Profile".to_string(),
+            game_version: "1.21.1".to_string(),
+            is_active: true,
+        };
+        let paths = profile_paths_at_root(&user, &profile.id, &install_root).unwrap();
+        let hash = hex_hash(Sha256::digest(b"official").as_slice());
+        let manifest = test_manifest(
+            vec![test_manifest_file(
+                "mods/official.jar",
+                &hash,
+                "official".len() as i64,
+            )],
+            Vec::new(),
+        );
+        write_test_file(&paths.files_root.join("mods/official.jar"), "official");
+        save_local_manifest(&paths.manifest_path, &paths.files_root, &manifest).unwrap();
+
+        let mut verified_mtimes = HashMap::new();
+        assert_eq!(
+            local_profile_files_changed_at(&paths, &mut verified_mtimes, false).unwrap(),
+            None
+        );
+        thread::sleep(Duration::from_millis(2));
+        write_test_file(&paths.files_root.join("mods/official.jar"), "modified");
+        let changed_path = paths.files_root.join("mods/official.jar");
+        let changed_mtime = file_mtime_millis(&fs::metadata(&changed_path).unwrap());
+        verified_mtimes.insert(changed_path, changed_mtime);
+        assert_eq!(
+            local_profile_files_changed_at(&paths, &mut verified_mtimes, false).unwrap(),
+            None
+        );
+        assert_eq!(
+            local_profile_files_changed_at(&paths, &mut verified_mtimes, true).unwrap(),
+            Some(ProfileInstallState::UpdateAvailable)
+        );
+
+        fs::remove_file(&paths.manifest_path).unwrap();
+        assert_eq!(
+            local_profile_files_changed_at(&paths, &mut verified_mtimes, false).unwrap(),
+            Some(ProfileInstallState::Missing)
+        );
+
+        let _ = fs::remove_dir_all(profile_root);
     }
 
     #[test]

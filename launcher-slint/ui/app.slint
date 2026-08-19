@@ -410,6 +410,10 @@ export component AppWindow inherits Window {
     in property <bool> is-slim;
     in property <bool> is-syncing;
     in property <bool> has-profile;
+    in property <bool> profile-installed;
+    in property <bool> profile-update-available;
+    in property <bool> profile-state-checking;
+    in property <bool> profile-state-unknown;
     in property <bool> download-panel-visible;
     in property <string> selected-profile-name;
     in property <string> selected-profile-version;
@@ -469,6 +473,7 @@ export component AppWindow inherits Window {
     callback discrete-gpu-requested(bool);
     callback discord-rpc-requested(bool);
     callback open-install-folder-requested();
+    callback change-install-folder-requested();
     callback open-url(string);
 
     Rectangle {
@@ -1302,9 +1307,14 @@ export component AppWindow inherits Window {
                         width: 258px;
                         height: 72px;
                         label: root.update-mandatory ? "ТРЕБУЕТСЯ ОБНОВЛЕНИЕ"
-                            : (root.is-syncing ? "ЗАГРУЗКА..." : "ИГРАТЬ");
+                            : (root.is-syncing ? "ЗАГРУЗКА..."
+                                : (root.profile-state-checking ? "ПРОВЕРКА..."
+                                    : (root.profile-state-unknown ? "ПРОВЕРИТЬ"
+                                        : (!root.profile-installed ? "УСТАНОВИТЬ"
+                                            : (root.profile-update-available ? "ОБНОВИТЬ" : "ИГРАТЬ")))));
                         icon-source: @image-url("../assets/play.svg");
-                        enabled: root.has-profile && !root.is-syncing && !root.update-mandatory;
+                        enabled: root.has-profile && !root.is-syncing
+                            && !root.profile-state-checking && !root.update-mandatory;
                         clicked => { root.play-requested(); }
                     }
 
@@ -1830,12 +1840,21 @@ export component AppWindow inherits Window {
                     }
 
                     DarkButton {
-                        width: 180px;
+                        width: 116px;
                         height: 48px;
-                        label: "Открыть папку";
+                        label: "Открыть";
                         icon-source: @image-url("../assets/folder.svg");
                         enabled: root.settings-visible && root.is-authenticated;
                         clicked => { root.open-install-folder-requested(); }
+                    }
+
+                    DarkButton {
+                        width: 142px;
+                        height: 48px;
+                        label: "Сменить диск";
+                        icon-source: @image-url("../assets/folder.svg");
+                        enabled: root.settings-visible && root.is-authenticated && !root.is-syncing;
+                        clicked => { root.change-install-folder-requested(); }
                     }
                 }
             }
