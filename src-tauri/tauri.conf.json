@@ -14,10 +14,14 @@
       {
         "label": "main",
         "title": "Project Minecraft Launcher",
-        "width": 1200,
-        "height": 750,
-        "minWidth": 1024,
-        "minHeight": 640,
+        "width": 1440,
+        "height": 810,
+        "minWidth": 960,
+        "minHeight": 540,
+        "backgroundColor": "#111313",
+        "theme": "Dark",
+        "visible": false,
+        "decorations": false,
         "center": true,
         "resizable": true,
         "fullscreen": false

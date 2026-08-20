@@ -1,30 +1,10 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  AlertTriangle,
-  Check,
-  ChevronRight,
-  CircleUserRound,
-  Cpu,
-  Download,
-  ExternalLink,
-  Folder,
-  Gamepad2,
-  Gauge,
-  HardDrive,
-  LogOut,
-  MapPin,
-  MessageCircle,
-  Newspaper,
-  Play,
-  RefreshCw,
-  Server,
-  Settings,
-  ShieldAlert,
-  Sparkles,
-  X,
-} from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+const logoAsset = new URL("../src-tauri/assets/logo.svg", import.meta.url).href;
 
 type NewsItem = { title: string; date: string; body: string };
 
@@ -168,6 +148,9 @@ function browserPreviewState(): LauncherState {
   if (screen === "restore") {
     return { ...browserPreview, isAuthenticated: false, sessionRestoring: true, isLoading: true, message: "Измеряем задержку серверов…" };
   }
+  if (screen === "download") {
+    return { ...browserPreview, isSyncing: true, downloadPanelVisible: true, downloadPhase: "Синхронизация файлов", downloadCounter: "142 / 318", downloadFile: "mods/project-minecraft-content.jar", downloadProgress: .45 };
+  }
   if (screen === "settings") return { ...browserPreview, settingsVisible: true, discreteGpuAvailable: true, discreteGpuLabel: "NVIDIA GeForce RTX" };
   if (screen === "policy") return { ...browserPreview, policyVisible: true, policyVersionLabel: "Версия 4", policyText: "Project Minecraft обрабатывает данные аккаунта и технические сведения, необходимые для запуска игры и работы системы защиты.\n\nПродолжая, вы подтверждаете согласие с актуальной политикой конфиденциальности." };
   return browserPreview;
@@ -207,8 +190,42 @@ function IconButton({ label, children, onClick, danger = false }: { label: strin
   );
 }
 
+function WindowTitleBar() {
+  const windowAction = (run: (window: ReturnType<typeof getCurrentWindow>) => Promise<void>) => {
+    if (isTauriRuntime()) void run(getCurrentWindow());
+  };
+
+  return (
+    <header className="window-titlebar">
+      <div
+        className="window-drag-region"
+        data-tauri-drag-region
+        onDoubleClick={() => windowAction((window) => window.toggleMaximize())}
+      >
+        <strong>Project Minecraft</strong>
+        <span>Launcher</span>
+      </div>
+      <div className="window-controls">
+        <button aria-label="Свернуть" title="Свернуть" onClick={() => windowAction((window) => window.minimize())}><i className="window-glyph minimize" /></button>
+        <button aria-label="Развернуть" title="Развернуть" onClick={() => windowAction((window) => window.toggleMaximize())}><i className="window-glyph maximize" /></button>
+        <button className="window-close" aria-label="Закрыть" title="Закрыть" onClick={() => windowAction((window) => window.close())}><PixelIcon name="close" /></button>
+      </div>
+    </header>
+  );
+}
+
 function StatusDot({ active = true }: { active?: boolean }) {
   return <span className={`status-dot${active ? " active" : ""}`} aria-hidden="true" />;
+}
+
+type PixelIconName = "article" | "check" | "close" | "corner" | "cpu" | "download" | "folder" | "gamepad" | "lock" | "logout" | "play" | "reload" | "server" | "user";
+
+function PixelIcon({ name, className = "" }: { name: PixelIconName; className?: string }) {
+  return <span className={`pixel-icon pixel-icon-${name}${className ? ` ${className}` : ""}`} aria-hidden="true" />;
+}
+
+function Brand({ compact = false }: { compact?: boolean }) {
+  return <div className={`brand${compact ? " compact" : ""}`}><img className="brand-logo" src={logoAsset} alt="Project Minecraft" /></div>;
 }
 
 function LoginScreen({ state }: { state: LauncherState }) {
@@ -223,22 +240,11 @@ function LoginScreen({ state }: { state: LauncherState }) {
   };
 
   return (
-    <main className="login-layout">
-      <section className="login-thesis">
-        <div className="brand-lockup">
-          <span className="brand-mark"><MapPin size={22} /></span>
-          <div><b>PROJECT MINECRAFT</b><span>PLAYER LAUNCH SYSTEM</span></div>
-        </div>
-        <div className="coordinates">44°57′ N / 34°06′ E</div>
-        <h1>Точка входа<br />в вашу <em>операцию.</em></h1>
-        <p>Лаунчер проверит сборку, доставит обновления и подготовит защищённую игровую сессию.</p>
-        <div className="system-line"><StatusDot /><span>{state.apiUrl || "Подключение к серверу"}</span></div>
-      </section>
-
+    <main className="auth-screen">
+      <header className="auth-header"><Brand /></header>
       <form className="login-card" onSubmit={submit}>
-        <div className="card-kicker"><span>Авторизация</span><ShieldAlert size={18} /></div>
-        <h2>С возвращением</h2>
-        <p className="muted">Используйте аккаунт Project Minecraft.</p>
+        <div className="card-kicker"><span>Вход в аккаунт</span><PixelIcon name="lock" /></div>
+        <h1>Авторизация</h1>
 
         <label>
           <span>Логин</span>
@@ -265,15 +271,9 @@ function LoginScreen({ state }: { state: LauncherState }) {
         )}
 
         <button className="primary-button" type="submit" disabled={state.isLoading || !login.trim() || !password}>
-          {state.isLoading ? <RefreshCw className="spin" size={20} /> : <ChevronRight size={20} />}
-          {state.isLoading ? "Проверяем аккаунт" : "Войти в лаунчер"}
+          <PixelIcon name={state.isLoading ? "reload" : "corner"} className={state.isLoading ? "spin" : ""} />
+          {state.isLoading ? "Проверяем аккаунт" : "Войти"}
         </button>
-        <div className={`inline-message${state.message ? " visible" : ""}`}>{state.message}</div>
-        <div className="login-links">
-          <button type="button" onClick={() => void action("openUrl", { url: "https://t.me/project_minecraft" })}>Telegram</button>
-          <span />
-          <button type="button" onClick={() => void action("openUrl", { url: "https://pjm.likonchik.xyz" })}>Сайт проекта</button>
-        </div>
       </form>
     </main>
   );
@@ -282,41 +282,36 @@ function LoginScreen({ state }: { state: LauncherState }) {
 function RestoreScreen({ state }: { state: LauncherState }) {
   return (
     <main className="restore-layout" aria-live="polite">
-      <div className="restore-radar" aria-hidden="true"><span /><i /><b /></div>
-      <div className="brand-lockup">
-        <span className="brand-mark"><MapPin size={22} /></span>
-        <div><b>PROJECT MINECRAFT</b><span>PLAYER LAUNCH SYSTEM</span></div>
-      </div>
+      <header className="auth-header"><Brand /></header>
       <section>
-        <span className="eyebrow">Безопасный вход</span>
-        <h1>Возвращаем<br />вашу сессию</h1>
+        <PixelIcon name="reload" className="restore-spinner spin" />
+        <span className="eyebrow">Подключение</span>
+        <h1>Возвращаем сессию</h1>
         <p>{state.message}</p>
-        <div className="restore-steps">
-          <span className="done"><Check />Токен найден</span>
-          <span className="active"><RefreshCw className="spin" />Ищем лучший сервер</span>
-          <span><ShieldAlert />Проверяем профиль</span>
-        </div>
       </section>
     </main>
   );
 }
 
-function Sidebar({ state, tab, setTab }: { state: LauncherState; tab: "home" | "news"; setTab: (tab: "home" | "news") => void }) {
+function HeaderBar({ state, tab, setTab }: { state: LauncherState; tab: "home" | "news"; setTab: (tab: "home" | "news") => void }) {
   return (
-    <aside className="sidebar">
-      <div className="compact-brand"><span className="brand-mark"><MapPin size={18} /></span><div><b>PROJECT</b><span>MINECRAFT</span></div></div>
-      <nav aria-label="Основная навигация">
-        <button className={tab === "home" ? "active" : ""} onClick={() => setTab("home")}><Gamepad2 size={20} /><span>Играть</span></button>
-        <button className={tab === "news" ? "active" : ""} onClick={() => setTab("news")}><Newspaper size={20} /><span>Новости</span>{state.newsItems.length > 0 && <b>{state.newsItems.length}</b>}</button>
-        <button onClick={() => void action("openModsFolder")}><Folder size={20} /><span>Папка модов</span></button>
-      </nav>
-      <div className="sidebar-spacer" />
-      <div className="connection-card"><StatusDot /><div><span>Подключение</span><b>{state.serverNames[state.serverIndex] || "Авто"}</b></div></div>
-      <div className="sidebar-actions">
-        <IconButton label="Настройки" onClick={() => void action("openSettings")}><Settings size={20} /></IconButton>
-        <IconButton label="Выйти из аккаунта" danger onClick={() => void action("logout")}><LogOut size={20} /></IconButton>
+    <header className="launcher-header">
+      <div className="header-inner">
+        <Brand compact />
+        <nav aria-label="Основная навигация">
+          <button className={tab === "home" ? "active" : ""} onClick={() => setTab("home")}>Игра</button>
+          <button className={tab === "news" ? "active" : ""} onClick={() => setTab("news")}>Новости</button>
+          <button onClick={() => void action("openSettings")}>Настройки</button>
+          <button onClick={() => void action("openUrl", { url: "https://pjm.likonchik.xyz" })}>Сайт</button>
+          <button onClick={() => void action("openUrl", { url: "https://t.me/project_minecraft" })}>Поддержка</button>
+        </nav>
+        <div className="account-block">
+          <PixelIcon name="user" />
+          <div><b>{state.userLogin}</b><span><StatusDot /> Онлайн</span></div>
+          <IconButton label="Выйти из аккаунта" danger onClick={() => void action("logout")}><PixelIcon name="logout" /></IconButton>
+        </div>
       </div>
-    </aside>
+    </header>
   );
 }
 
@@ -333,66 +328,43 @@ function PlayButton({ state }: { state: LauncherState }) {
             ? "Установить сборку"
             : state.profileUpdateAvailable
               ? "Обновить сборку"
-              : "Запустить игру";
+              : "Играть";
 
   return (
     <button className="launch-button" onClick={() => void action("play")} disabled={!state.hasProfile || state.isSyncing || state.updateMandatory}>
-      <span className="launch-button-icon">{state.isSyncing || state.profileStateChecking ? <RefreshCw className="spin" /> : state.profileInstalled ? <Play /> : <Download />}</span>
-      <span><small>{state.isSyncing ? state.downloadCounter : "Основное действие"}</small><b>{label}</b></span>
-      <ChevronRight />
+      <PixelIcon name={state.isSyncing || state.profileStateChecking ? "reload" : state.profileInstalled ? "play" : "download"} className={state.isSyncing || state.profileStateChecking ? "spin" : ""} />
+      <span>{label}</span>
     </button>
   );
 }
 
-function HomeView({ state }: { state: LauncherState }) {
-  const steps = useMemo(() => [
-    { label: "Профиль", value: state.hasProfile ? "Выбран" : "Не найден", done: state.hasProfile },
-    { label: "Файлы", value: state.profileStatus, done: state.profileInstalled && !state.profileUpdateAvailable },
-    { label: "Сессия", value: state.isAuthenticated ? "Активна" : "Не активна", done: state.isAuthenticated },
-  ], [state]);
+function launchStatus(state: LauncherState) {
+  if (state.updateMandatory) return "Обновите лаунчер для продолжения";
+  if (state.isSyncing) return state.downloadPhase || "Подготавливаем файлы";
+  if (state.profileStateChecking) return "Проверяем файлы";
+  if (state.profileStateUnknown) return "Требуется проверка файлов";
+  if (!state.hasProfile) return "Игра сейчас недоступна";
+  if (!state.profileInstalled) return "Игра не установлена";
+  if (state.profileUpdateAvailable) return "Доступно обновление";
+  return "Готово к запуску";
+}
 
+function HomeView({ state }: { state: LauncherState }) {
   return (
     <section className="home-view">
-      <header className="topbar">
-        <div><span className="eyebrow">Активный профиль</span><h1>{state.selectedProfileName || "Профиль не назначен"}</h1></div>
-        <div className="account-pill"><CircleUserRound size={22} /><div><b>{state.userLogin}</b><span>Сессия до {state.tokenExpiresAt || "—"}</span></div></div>
-      </header>
-
-      <div className="mission-card">
-        <div className="mission-visual">
-          <div className="map-grid" />
-          <div className="mission-copy"><span className="eyebrow">Сборка проекта</span><h2>{state.selectedProfileName || "Нет доступной сборки"}</h2><p>Minecraft {state.selectedProfileVersion}</p></div>
-          <div className="mission-stamp"><Sparkles size={16} /> LIVE BUILD</div>
-        </div>
-        <div className="readiness-panel">
-          <div className="readiness-heading"><div><span>Линия готовности</span><b>{state.profileStatus}</b></div><Gauge size={24} /></div>
-          <ol>
-            {steps.map((step, index) => (
-              <li key={step.label} className={step.done ? "done" : ""}>
-                <span className="rail-node">{step.done ? <Check size={14} /> : index + 1}</span>
-                <div><small>{step.label}</small><b>{step.value}</b></div>
-              </li>
-            ))}
-          </ol>
-          <PlayButton state={state} />
-        </div>
+      <div className="utility-row">
+        <button className="quick-settings" onClick={() => void action("openSettings")}><PixelIcon name="cpu" /> Настройки</button>
       </div>
 
-      {state.downloadPanelVisible && (
-        <section className="progress-panel" aria-live="polite">
-          <div className="progress-meta"><span>{state.downloadPhase}</span><b>{state.downloadCounter}</b></div>
-          <div className="progress-track"><span style={{ width: `${Math.round(state.downloadProgress * 100)}%` }} /></div>
-          <div className="progress-file"><Download size={16} /><span>{state.downloadFile}</span></div>
-        </section>
-      )}
-
-      <div className="dashboard-grid">
-        <article className="telemetry-card"><div className="card-kicker"><span>Состояние</span><Gauge size={18} /></div><strong>{state.profileInstalled ? "ГОТОВ" : "ОЖИДАНИЕ"}</strong><p>{state.profileStatus}</p></article>
-        <article className="telemetry-card"><div className="card-kicker"><span>Время в игре</span><Gamepad2 size={18} /></div><strong>{state.playtimeTotal}</strong><p>На этом устройстве</p></article>
-        <article className="telemetry-card wide"><div className="card-kicker"><span>Последняя сводка</span><Newspaper size={18} /></div><strong>{state.newsItems[0]?.title || "Новостей пока нет"}</strong><p>{state.newsItems[0]?.body || "Когда появится новая сводка проекта, она будет здесь."}</p></article>
+      <div className={`launch-console${state.downloadPanelVisible ? " downloading" : ""}`}>
+        <div className="launch-readout" aria-live="polite">
+          <span>{state.isSyncing ? state.downloadCounter || "Синхронизация" : "Состояние игры"}</span>
+          <strong>{launchStatus(state)}</strong>
+          {state.downloadPanelVisible && <small>{state.downloadFile}</small>}
+        </div>
+        <PlayButton state={state} />
+        {state.downloadPanelVisible && <div className="launch-progress" style={{ "--launch-progress": `${Math.round(state.downloadProgress * 100)}%` } as CSSProperties}><span /></div>}
       </div>
-
-      <div className={`status-toast${state.message ? " visible" : ""}`} aria-live="polite"><StatusDot active={!state.message.toLowerCase().includes("ошиб")} /><span>{state.message}</span></div>
     </section>
   );
 }
@@ -400,45 +372,71 @@ function HomeView({ state }: { state: LauncherState }) {
 function NewsView({ state }: { state: LauncherState }) {
   return (
     <section className="news-view">
-      <header className="topbar"><div><span className="eyebrow">Сводки проекта</span><h1>Новости</h1></div><div className="topbar-mark"><MessageCircle size={22} /> Telegram channel</div></header>
+      <header className="view-title"><span>Project Minecraft</span><h1>Новости</h1></header>
       <div className="news-list">
         {state.newsItems.length ? state.newsItems.map((item, index) => (
           <article key={`${item.title}-${index}`} className="news-card">
-            <div className="news-index">{String(index + 1).padStart(2, "0")}</div>
-            <div><div className="news-meta"><span>{item.date || "Недавно"}</span><span>Project Minecraft</span></div><h2>{item.title || "Сводка проекта"}</h2><p>{item.body}</p></div>
+            <div className="news-meta"><span>{item.date || "Недавно"}</span><span>Project Minecraft</span></div><h2>{item.title || "Сводка проекта"}</h2><p>{item.body}</p>
           </article>
-        )) : <div className="empty-state"><Newspaper size={38} /><h2>Сводок пока нет</h2><p>Лента обновится автоматически после публикации.</p></div>}
+        )) : <div className="empty-state"><PixelIcon name="article" /><h2>Сводок пока нет</h2><p>Лента обновится автоматически после публикации.</p></div>}
       </div>
     </section>
   );
 }
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
-  return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle${checked ? " checked" : ""}`} onClick={() => onChange(!checked)}><span /></button>;
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`pixel-toggle${checked ? " checked" : ""}`} onClick={() => onChange(!checked)}><span /><b>{checked ? "ВКЛ" : "ВЫКЛ"}</b></button>;
 }
 
 function SettingsOverlay({ state }: { state: LauncherState }) {
-  if (!state.settingsVisible) return null;
+  const [present, setPresent] = useState(state.settingsVisible);
+
+  useEffect(() => {
+    if (state.settingsVisible) setPresent(true);
+  }, [state.settingsVisible]);
+
+  if (!state.settingsVisible && !present) return null;
+  const memoryProgress = Math.max(0, Math.min(100, ((state.memoryGb - 2) / Math.max(1, state.memoryMax - 2)) * 100));
+  const closing = !state.settingsVisible;
   return (
-    <div className="overlay settings-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-      <div className="settings-sheet">
-        <header><div><span className="eyebrow">Конфигурация лаунчера</span><h2 id="settings-title">Настройки</h2></div><IconButton label="Закрыть настройки" onClick={() => void action("closeSettings")}><X /></IconButton></header>
-        <div className="settings-content">
-          <section className="setting-section">
-            <div className="setting-heading"><Cpu /><div><h3>Память Minecraft</h3><p>Лаунчер подставит значение в параметры JVM.</p></div><strong>{state.memoryLabel}</strong></div>
-            <input className="memory-slider" type="range" min={2} max={state.memoryMax} value={state.memoryGb} onChange={(event) => void action("setMemory", { value: Number(event.target.value) })} aria-label="Объём памяти" />
-            <div className="memory-actions"><button onClick={() => void action("memoryDecrease")}>− 1 ГБ</button><button className={state.memoryAuto ? "active" : ""} onClick={() => void action("memoryAuto")}>Автоматически</button><button onClick={() => void action("memoryIncrease")}>+ 1 ГБ</button></div>
-          </section>
+    <div
+      className={`overlay settings-overlay${closing ? " closing" : ""}`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-title"
+      onClick={() => void action("closeSettings")}
+      onAnimationEnd={(event) => {
+        if (closing && event.target === event.currentTarget) setPresent(false);
+      }}
+    >
+      <div className="settings-sheet" onClick={(event) => event.stopPropagation()}>
+        <header className="settings-header"><div><span>Параметры клиента</span><h2 id="settings-title">Настройки</h2></div><IconButton label="Закрыть настройки" onClick={() => void action("closeSettings")}><PixelIcon name="close" /></IconButton></header>
+        <div className="settings-layout">
+          <aside className="settings-memory-panel">
+            <div className="memory-emblem"><PixelIcon name="cpu" /></div>
+            <span className="settings-caption">Оперативная память</span>
+            <strong className="memory-number">{state.memoryGb}<small>ГБ</small></strong>
+            <div className="memory-control" style={{ "--memory-progress": `${memoryProgress}%` } as CSSProperties}>
+              <span className="memory-fill" />
+              <input className="memory-slider" type="range" min={2} max={state.memoryMax} value={state.memoryGb} onChange={(event) => void action("setMemory", { value: Number(event.target.value) })} aria-label="Объём памяти" />
+            </div>
+            <div className="memory-actions"><button onClick={() => void action("memoryDecrease")}>− 1</button><button className={state.memoryAuto ? "active" : ""} onClick={() => void action("memoryAuto")}>Авто</button><button onClick={() => void action("memoryIncrease")}>+ 1</button></div>
+          </aside>
 
-          {state.discreteGpuAvailable && <section className="setting-row"><div><h3>Дискретная видеокарта</h3><p>{state.discreteGpuLabel}</p></div><Toggle label="Дискретная видеокарта" checked={state.useDiscreteGpu} onChange={(enabled) => void action("setDiscreteGpu", { enabled })} /></section>}
-          <section className="setting-row"><div><h3>Статус в Discord</h3><p>Показывать профиль и состояние игры.</p></div><Toggle label="Discord Rich Presence" checked={state.discordRpcEnabled} onChange={(enabled) => void action("setDiscordRpc", { enabled })} /></section>
+          <div className="settings-main">
+            <section className="settings-group">
+              <header className="settings-group-title"><PixelIcon name="gamepad" /><div><h3>Система</h3><p>Производительность и присутствие в игре.</p></div></header>
+              {state.discreteGpuAvailable && <div className="settings-option"><div className="settings-option-copy"><strong>Дискретная видеокарта</strong><span>{state.discreteGpuLabel}</span></div><Toggle label="Дискретная видеокарта" checked={state.useDiscreteGpu} onChange={(enabled) => void action("setDiscreteGpu", { enabled })} /></div>}
+              <div className="settings-option"><div className="settings-option-copy"><strong>Статус в Discord</strong><span>Показывать профиль и состояние игры.</span></div><Toggle label="Discord Rich Presence" checked={state.discordRpcEnabled} onChange={(enabled) => void action("setDiscordRpc", { enabled })} /></div>
+            </section>
 
-          <section className="setting-section install-location">
-            <div className="setting-heading"><HardDrive /><div><h3>Папка установки</h3><p title={state.installFolder}>{state.installFolder || "Системная папка лаунчера"}</p></div></div>
-            <div className="folder-actions"><button onClick={() => void action("openInstallFolder")}><Folder size={18} />Открыть</button><button onClick={() => void action("changeInstallFolder")} disabled={state.isSyncing}><RefreshCw size={18} />Перенести</button></div>
-          </section>
+            <section className="settings-group">
+              <header className="settings-group-title"><PixelIcon name="folder" /><div><h3>Файлы</h3><p>Расположение установленного клиента.</p></div></header>
+              <div className="settings-option settings-folder-option"><div className="settings-option-copy"><strong>Папка установки</strong><span title={state.installFolder}>{state.installFolder || "Системная папка лаунчера"}</span></div><div className="folder-actions"><button onClick={() => void action("openInstallFolder")}><PixelIcon name="folder" />Открыть</button><button onClick={() => void action("changeInstallFolder")} disabled={state.isSyncing}><PixelIcon name="reload" />Перенести</button></div></div>
+            </section>
 
-          {state.serverVisible && <section className="setting-section"><div className="setting-heading"><Server /><div><h3>Сервер подключения</h3><p>Автовыбор ищет самый быстрый доступный адрес.</p></div></div><select value={state.serverIndex} onChange={(event) => void action("selectServer", { index: Number(event.target.value) })}>{state.serverNames.map((name, index) => <option key={`${name}-${index}`} value={index}>{name}</option>)}</select></section>}
+            {state.serverVisible && <section className="settings-group"><header className="settings-group-title"><PixelIcon name="server" /><div><h3>Подключение</h3><p>Адрес для авторизации и загрузок.</p></div></header><div className="settings-option settings-server-option"><div className="settings-option-copy"><strong>Сервер</strong><span>Автовыбор использует самый быстрый доступный адрес.</span></div><div className="select-field"><select value={state.serverIndex} onChange={(event) => void action("selectServer", { index: Number(event.target.value) })}>{state.serverNames.map((name, index) => <option key={`${name}-${index}`} value={index}>{name}</option>)}</select><PixelIcon name="corner" /></div></div></section>}
+          </div>
         </div>
       </div>
     </div>
@@ -449,7 +447,7 @@ function UpdateBanner({ state }: { state: LauncherState }) {
   if (!state.updateReady && !state.updateStatus && !state.updateMandatory) return null;
   return (
     <aside className={`update-banner${state.updateMandatory ? " mandatory" : ""}`}>
-      <RefreshCw className={!state.updateReady ? "spin" : ""} />
+      <PixelIcon name="reload" className={!state.updateReady ? "spin" : ""} />
       <div><b>{state.updateReady ? `Версия ${state.updateVersion} готова` : state.updateStatus || "Проверяем обновление"}</b><span>{state.updateMandatory ? "Обновление обязательно для запуска игры." : "Перезапустите лаунчер, когда будете готовы."}</span></div>
       {state.updateReady && <button onClick={() => void action("restartForUpdate")}>Перезапустить</button>}
     </aside>
@@ -460,7 +458,7 @@ function PolicyOverlay({ state }: { state: LauncherState }) {
   if (!state.policyVisible) return null;
   return (
     <div className="overlay critical-overlay" role="dialog" aria-modal="true" aria-labelledby="policy-title">
-      <section className="policy-card"><div className="policy-icon"><ShieldAlert /></div><span className="eyebrow">Перед запуском игры · {state.policyVersionLabel}</span><h2 id="policy-title">Политика конфиденциальности</h2><div className="policy-text">{state.policyText || "Загружаем актуальный текст политики…"}</div><button className="primary-button" onClick={() => void action("acceptPolicy")} disabled={state.policyAccepting}>{state.policyAccepting ? <RefreshCw className="spin" /> : <Check />} {state.policyAccepting ? "Сохраняем" : "Принять и продолжить"}</button></section>
+      <section className="policy-card"><div className="policy-icon"><PixelIcon name="lock" /></div><span className="eyebrow">Перед запуском игры · {state.policyVersionLabel}</span><h2 id="policy-title">Политика конфиденциальности</h2><div className="policy-text">{state.policyText || "Загружаем актуальный текст политики…"}</div><button className="primary-button" onClick={() => void action("acceptPolicy")} disabled={state.policyAccepting}><PixelIcon name={state.policyAccepting ? "reload" : "check"} className={state.policyAccepting ? "spin" : ""} /> {state.policyAccepting ? "Сохраняем" : "Принять и продолжить"}</button></section>
     </div>
   );
 }
@@ -469,7 +467,7 @@ function AnticheatOverlay({ message }: { message: string }) {
   if (!message) return null;
   return (
     <div className="overlay critical-overlay" role="alertdialog" aria-modal="true" aria-labelledby="anticheat-title">
-      <section className="anticheat-card"><div className="danger-emblem"><ShieldAlert /></div><span className="eyebrow">Защитная система</span><h2 id="anticheat-title">Запуск остановлен</h2><p>{message}</p><button className="danger-button" onClick={() => void action("dismissAnticheatAlert")}><X />Закрыть уведомление</button></section>
+      <section className="anticheat-card"><div className="danger-emblem"><PixelIcon name="lock" /></div><span className="eyebrow">Защитная система</span><h2 id="anticheat-title">Запуск остановлен</h2><p>{message}</p><button className="danger-button" onClick={() => void action("dismissAnticheatAlert")}><PixelIcon name="close" />Закрыть уведомление</button></section>
     </div>
   );
 }
@@ -480,17 +478,20 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <div className="ambient" aria-hidden="true" />
-      {state.sessionRestoring ? <RestoreScreen state={state} /> : !state.isAuthenticated ? <LoginScreen state={state} /> : (
-        <div className="authenticated-layout">
-          <Sidebar state={state} tab={tab} setTab={setTab} />
-          <main className="workspace">{tab === "home" ? <HomeView state={state} /> : <NewsView state={state} />}</main>
-        </div>
-      )}
-      <UpdateBanner state={state} />
-      <SettingsOverlay state={state} />
-      <PolicyOverlay state={state} />
-      <AnticheatOverlay message={state.anticheatAlert} />
+      <WindowTitleBar />
+      <div className="app-viewport">
+        <div className="ambient" aria-hidden="true" />
+        {state.sessionRestoring ? <RestoreScreen state={state} /> : !state.isAuthenticated ? <LoginScreen state={state} /> : (
+          <div className="authenticated-layout">
+            <HeaderBar state={state} tab={tab} setTab={setTab} />
+            <main className="workspace"><div key={tab} className={`screen-view screen-${tab}`}>{tab === "home" ? <HomeView state={state} /> : <NewsView state={state} />}</div></main>
+          </div>
+        )}
+        <UpdateBanner state={state} />
+        <SettingsOverlay state={state} />
+        <PolicyOverlay state={state} />
+        <AnticheatOverlay message={state.anticheatAlert} />
+      </div>
     </div>
   );
 }

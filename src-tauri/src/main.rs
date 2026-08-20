@@ -557,7 +557,7 @@ struct LauncherSettings {
     /// совместимость со старым системным data-dir.
     #[serde(default)]
     install_root: Option<String>,
-    /// Выбранное на окне входа зеркало бэкенда. None → «Основной».
+    /// Выбранное зеркало бэкенда. None → «Авто».
     #[serde(default)]
     api_url: Option<String>,
     /// Суммарное наигранное время (секунды), локальный счётчик этой машины.
@@ -624,6 +624,15 @@ fn main() {
             initialize_launcher(&app);
             tauri_app.manage(app);
             Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+            {
+                // Окно создаётся скрытым: показываем его только после первого
+                // полного WebView-кадра, чтобы игрок не видел белую заглушку до React.
+                let _ = webview.window().show();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_launcher_state,
@@ -3809,13 +3818,15 @@ fn register_mirror_handler(
         if idx == 0 {
             let _ = update_settings(|settings| settings.api_url = None);
             if let Some(app) = app_weak.upgrade() {
+                // Селектор показывает уже сохранённый выбор, даже если живую
+                // авторизованную сессию ещё нельзя переносить на другой backend.
+                app.set_server_index(0);
                 if app.get_is_authenticated() {
                     app.set_message(
                         "Автовыбор сервера применится после выхода из аккаунта.".into(),
                     );
                     return;
                 }
-                app.set_server_index(0);
                 app.set_message("Сервер выбирается автоматически…".into());
             }
             spawn_mirror_probe(app_weak.clone(), config.clone(), mirrors.clone(), true);
@@ -3827,13 +3838,13 @@ fn register_mirror_handler(
         let saved_url = url.clone();
         let _ = update_settings(|settings| settings.api_url = Some(saved_url));
         if let Some(app) = app_weak.upgrade() {
+            app.set_server_index(idx as i32);
             if app.get_is_authenticated() {
                 app.set_message(
                     format!("Сервер {name} будет использован после выхода из аккаунта.").into(),
                 );
                 return;
             }
-            app.set_server_index(idx as i32);
             config.set_api_url(url);
             app.set_api_url(url.into());
             app.set_message(format!("Сервер: {name}").into());
@@ -5491,7 +5502,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "launcher-slint-test-{}-{}-{}",
+            "project-minecraft-launcher-test-{}-{}-{}",
             std::process::id(),
             name,
             nanos
