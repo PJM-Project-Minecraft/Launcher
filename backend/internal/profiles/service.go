@@ -338,13 +338,15 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 		}
 
 		executable := info.Mode()&0111 != 0
+		changeTimeNS := sourceChangeTimeNS(info)
 		previous, existed := previousByPath[rel]
 		fileID := uuid.NewString()
 		hash := ""
 		if existed {
 			fileID = previous.ID
 		}
-		if existed && previous.SourceModTimeNS != 0 && previous.SourceModTimeNS == info.ModTime().UnixNano() &&
+		if existed && previous.SourceModTimeNS != 0 && previous.SourceChangeTimeNS != 0 &&
+			previous.SourceModTimeNS == info.ModTime().UnixNano() && previous.SourceChangeTimeNS == changeTimeNS &&
 			previous.Size == info.Size() && previous.Executable == executable && validSHA256(previous.HashSHA256) {
 			hash = previous.HashSHA256
 			reusedHashes++
@@ -358,16 +360,17 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 
 		totalSize += info.Size()
 		files = append(files, models.GameFile{
-			ID:              fileID,
-			ProfileID:       profile.ID,
-			Name:            filepath.Base(rel),
-			Path:            rel,
-			URL:             "/api/profiles/" + profile.ID + "/files/" + escapePath(rel),
-			HashSHA256:      hash,
-			Size:            info.Size(),
-			FileType:        inferFileType(rel),
-			Executable:      executable,
-			SourceModTimeNS: info.ModTime().UnixNano(),
+			ID:                 fileID,
+			ProfileID:          profile.ID,
+			Name:               filepath.Base(rel),
+			Path:               rel,
+			URL:                "/api/profiles/" + profile.ID + "/files/" + escapePath(rel),
+			HashSHA256:         hash,
+			Size:               info.Size(),
+			FileType:           inferFileType(rel),
+			Executable:         executable,
+			SourceModTimeNS:    info.ModTime().UnixNano(),
+			SourceChangeTimeNS: changeTimeNS,
 		})
 		if len(files) == 1 || len(files)%64 == 0 {
 			reportScan(report, ScanProgress{
@@ -513,7 +516,8 @@ func sameSourceMetadata(left, right []models.GameFile) bool {
 		return false
 	}
 	for index := range left {
-		if left[index].SourceModTimeNS != right[index].SourceModTimeNS {
+		if left[index].SourceModTimeNS != right[index].SourceModTimeNS ||
+			left[index].SourceChangeTimeNS != right[index].SourceChangeTimeNS {
 			return false
 		}
 	}

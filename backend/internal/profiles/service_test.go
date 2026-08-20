@@ -152,6 +152,41 @@ func TestUnchangedScanReusesPublishedManifestAndBundle(t *testing.T) {
 	}
 }
 
+func TestScanDetectsSameSizeChangeWithPreservedModTime(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name: "Preserved mtime", Slug: "preserved-mtime", Loader: "fabric", GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "a.jar")
+	writeTestFile(t, path, "version-one")
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, path, "version-two") // тот же размер
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.Manifest(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Profile.ManifestVersion != 2 {
+		t.Fatalf("same-size preserved-mtime change kept manifest v%d, want v2", manifest.Profile.ManifestVersion)
+	}
+}
+
 func TestScanHandlesLargeFileCount(t *testing.T) {
 	service := newTestService(t)
 	profile, err := service.Create(context.Background(), ProfileRequest{
