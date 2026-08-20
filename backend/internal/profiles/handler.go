@@ -57,7 +57,11 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// Браузерный WebSocket не умеет Authorization header. Админ сначала получает
 	// одноразовый билет обычным защищённым POST, затем билет погашается до upgrade.
 	app.Post("/api/admin/profiles/events-ticket", authMiddleware, auth.RequireAdmin, h.createEventsTicket)
-	app.Get("/api/admin/profiles/ws", h.requireSocketTicket, websocket.New(h.eventsSocket, websocket.Config{
+	// Socket намеренно находится вне /api/admin: общий admin middleware
+	// регистрируется раньше profiles-модуля и иначе перехватывает browser upgrade,
+	// у которого по стандарту нет Authorization header. Доступ всё равно закрыт
+	// одноразовым билетом, выданным защищённым admin endpoint выше.
+	app.Get("/api/profiles/events/ws", h.requireSocketTicket, websocket.New(h.eventsSocket, websocket.Config{
 		HandshakeTimeout: 10 * time.Second,
 		ReadBufferSize:   4096,
 		WriteBufferSize:  4096,

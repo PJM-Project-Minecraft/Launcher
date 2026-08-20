@@ -109,6 +109,13 @@ func TestAdminWebSocketUsesSingleUseTicketAndSendsSnapshot(t *testing.T) {
 	service := newTestService(t)
 	handler := NewHandler(service, events.NewBroker())
 	app := fiber.New()
+	// В production общий /api/admin middleware регистрируется до profiles.
+	// WebSocket обязан жить вне этого prefix, иначе upgrade без Authorization
+	// будет отклонён раньше проверки одноразового билета.
+	admin := app.Group("/api/admin")
+	admin.Use(func(c fiber.Ctx) error {
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"message": "Требуется авторизация"})
+	})
 	handler.RegisterRoutes(app, func(c fiber.Ctx) error { return c.Next() })
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -122,7 +129,7 @@ func TestAdminWebSocketUsesSingleUseTicketAndSendsSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	url := fmt.Sprintf("ws://%s/api/admin/profiles/ws?ticket=%s", ln.Addr(), ticket)
+	url := fmt.Sprintf("ws://%s/api/profiles/events/ws?ticket=%s", ln.Addr(), ticket)
 	conn, _, err := fastws.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
