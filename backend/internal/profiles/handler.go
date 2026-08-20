@@ -8,10 +8,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/events"
 
+	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/sse"
 	"gorm.io/gorm"
@@ -20,6 +22,8 @@ import (
 type Handler struct {
 	service Service
 	broker  *events.Broker
+	builds  *BuildManager
+	tickets *SocketTickets
 }
 
 type ErrorResponse struct {
@@ -27,7 +31,13 @@ type ErrorResponse struct {
 }
 
 func NewHandler(service Service, broker *events.Broker) Handler {
-	return Handler{service: service, broker: broker}
+	handler := Handler{
+		service: service,
+		broker:  broker,
+		tickets: NewSocketTickets(30 * time.Second),
+	}
+	handler.builds = NewBuildManager(service, handler.notifyProfilesChanged)
+	return handler
 }
 
 // profilesEvent — имя SSE-события, по которому клиент перезапрашивает список профилей.
@@ -44,6 +54,15 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	group.Get("/:id/objects/:hash", h.object)
 	group.Get("/:id/files/*", h.download)
 
+	// Браузерный WebSocket не умеет Authorization header. Админ сначала получает
+	// одноразовый билет обычным защищённым POST, затем билет погашается до upgrade.
+	app.Post("/api/admin/profiles/events-ticket", authMiddleware, auth.RequireAdmin, h.createEventsTicket)
+	app.Get("/api/admin/profiles/ws", h.requireSocketTicket, websocket.New(h.eventsSocket, websocket.Config{
+		HandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:   4096,
+		WriteBufferSize:  4096,
+	}))
+
 	admin := app.Group("/api/admin/profiles")
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/", h.listAll)
@@ -55,6 +74,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Post("/:id/prepare-client", h.prepareClient)
 	admin.Post("/:id/scan", h.scan)
 	admin.Post("/:id/publish", h.scan)
+	admin.Get("/:id/build", h.buildStatus)
 	admin.Get("/:id/drift", h.drift)
 }
 
@@ -149,12 +169,102 @@ func (h Handler) delete(c fiber.Ctx) error {
 }
 
 func (h Handler) scan(c fiber.Ctx) error {
-	result, err := h.service.Scan(c.Context(), c.Params("id"))
+	result, started, err := h.builds.Start(c.Context(), c.Params("id"))
 	if err != nil {
 		return h.writeError(c, err)
 	}
-	h.notifyProfilesChanged()
+	if !started {
+		return c.Status(http.StatusOK).JSON(result)
+	}
+	return c.Status(http.StatusAccepted).JSON(result)
+}
+
+func (h Handler) buildStatus(c fiber.Ctx) error {
+	result, ok := h.builds.Snapshot(c.Params("id"))
+	if !ok {
+		return h.writeError(c, gorm.ErrRecordNotFound)
+	}
 	return c.JSON(result)
+}
+
+func (h Handler) createEventsTicket(c fiber.Ctx) error {
+	ticket, expiresAt, err := h.tickets.Issue()
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось открыть WebSocket"})
+	}
+	return c.JSON(fiber.Map{"ticket": ticket, "expiresAt": expiresAt})
+}
+
+func (h Handler) requireSocketTicket(c fiber.Ctx) error {
+	if !websocket.IsWebSocketUpgrade(c) {
+		return c.Status(http.StatusUpgradeRequired).JSON(ErrorResponse{Message: "Требуется WebSocket upgrade"})
+	}
+	if err := h.tickets.Consume(c.Query("ticket")); err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "WebSocket-билет недействителен"})
+	}
+	return c.Next()
+}
+
+type socketEnvelope struct {
+	Type   string          `json:"type"`
+	Event  string          `json:"event,omitempty"`
+	Build  *BuildSnapshot  `json:"build,omitempty"`
+	Builds []BuildSnapshot `json:"builds,omitempty"`
+}
+
+func (h Handler) eventsSocket(conn *websocket.Conn) {
+	buildSubID, buildCh := h.builds.Subscribe()
+	defer h.builds.Unsubscribe(buildSubID)
+
+	var brokerSubID int
+	var brokerCh <-chan string
+	if h.broker != nil {
+		brokerSubID, brokerCh = h.broker.Subscribe()
+		defer h.broker.Unsubscribe(brokerSubID)
+	}
+
+	if err := conn.WriteJSON(socketEnvelope{Type: "manifest.snapshot", Builds: h.builds.Snapshots()}); err != nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.SetReadLimit(1024)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case build, ok := <-buildCh:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(socketEnvelope{Type: "manifest.build", Build: &build}); err != nil {
+				return
+			}
+		case event, ok := <-brokerCh:
+			if !ok {
+				brokerCh = nil
+				continue
+			}
+			if err := conn.WriteJSON(socketEnvelope{Type: "system.event", Event: event}); err != nil {
+				return
+			}
+		case <-heartbeat.C:
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // drift — read-only сверка storage с манифестом (см. Service.Drift): дашборд
@@ -177,11 +287,30 @@ func (h Handler) prepareClient(c fiber.Ctx) error {
 }
 
 func (h Handler) manifest(c fiber.Ctx) error {
+	etag, err := h.service.ManifestETag(c.Context(), c.Params("id"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	c.Set(fiber.HeaderETag, etag)
+	c.Set(fiber.HeaderCacheControl, "private, no-cache")
+	if requestETagMatches(c.Get(fiber.HeaderIfNoneMatch), etag) {
+		return c.SendStatus(http.StatusNotModified)
+	}
 	manifest, err := h.service.Manifest(c.Context(), c.Params("id"))
 	if err != nil {
 		return h.writeError(c, err)
 	}
 	return c.JSON(manifest)
+}
+
+func requestETagMatches(header, current string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == current || strings.TrimPrefix(candidate, "W/") == current {
+			return true
+		}
+	}
+	return false
 }
 
 func (h Handler) download(c fiber.Ctx) error {

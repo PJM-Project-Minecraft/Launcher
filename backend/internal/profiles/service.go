@@ -148,6 +148,20 @@ type ScanResult struct {
 	TotalSize int64          `json:"totalSize"`
 }
 
+// ScanProgress описывает наблюдаемый этап публикации manifest. Percent
+// относится ко всей операции (0..1), Current/Total — к текущему этапу.
+type ScanProgress struct {
+	Phase   string
+	Message string
+	Percent float64
+	Current int64
+	Total   int64
+	Log     bool
+}
+
+// ScanReporter вызывается синхронно и должен возвращаться быстро.
+type ScanReporter func(ScanProgress)
+
 type FileDownload struct {
 	AbsolutePath string
 	File         models.GameFile
@@ -238,12 +252,20 @@ func (s Service) Delete(ctx context.Context, id string) error {
 }
 
 func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
+	return s.ScanWithProgress(ctx, id, nil)
+}
+
+// ScanWithProgress атомарно собирает и публикует manifest, оставляя файловую
+// систему, object-store, bundle и транзакцию БД за одной глубокой interface.
+func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanReporter) (ScanResult, error) {
+	reportScan(report, ScanProgress{Phase: "waiting", Message: "Ожидаем очередь публикации", Log: true})
 	// Scan одновременно создаёт manifest и его неизменяемый архив. Сериализация
 	// исключает публикацию двух разных bundle под одним manifestVersion.
 	if s.scanMu != nil {
 		s.scanMu.Lock()
 		defer s.scanMu.Unlock()
 	}
+	reportScan(report, ScanProgress{Phase: "scan", Message: "Читаем дерево файлов", Percent: 0.03, Log: true})
 	var profile models.Profile
 	if err := s.db.WithContext(ctx).First(&profile, "id = ?", id).Error; err != nil {
 		return ScanResult{}, err
@@ -322,23 +344,51 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 			FileType:   inferFileType(rel),
 			Executable: info.Mode()&0111 != 0,
 		})
+		if len(files) == 1 || len(files)%64 == 0 {
+			reportScan(report, ScanProgress{
+				Phase: "scan", Message: rel, Percent: 0.12,
+				Current: int64(len(files)),
+			})
+		}
 		return nil
 	})
 	if err != nil {
 		return ScanResult{}, err
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	reportScan(report, ScanProgress{
+		Phase: "validate", Message: fmt.Sprintf("Проверяем %d файлов", len(files)),
+		Percent: 0.20, Current: int64(len(files)), Total: int64(len(files)), Log: true,
+	})
 	if err := validatePortablePaths(files); err != nil {
 		return ScanResult{}, err
 	}
-	for _, file := range files {
+	objectStep := progressStep(len(files), 100)
+	for index, file := range files {
 		if err := s.ensureObject(profile, file); err != nil {
 			return ScanResult{}, err
+		}
+		if index == 0 || (index+1)%objectStep == 0 || index+1 == len(files) {
+			fraction := progressFraction(index+1, len(files))
+			reportScan(report, ScanProgress{
+				Phase: "objects", Message: file.Path, Percent: 0.22 + fraction*0.23,
+				Current: int64(index + 1), Total: int64(len(files)),
+			})
 		}
 	}
 
 	nextVersion := profile.ManifestVersion + 1
-	bundle, err := s.createBundle(profile, nextVersion, files)
+	reportScan(report, ScanProgress{Phase: "bundle", Message: "Собираем tar.zst", Percent: 0.46, Total: totalSize, Log: true})
+	bundle, err := s.createBundle(profile, nextVersion, files, func(current int64, name string) {
+		fraction := 0.0
+		if totalSize > 0 {
+			fraction = float64(current) / float64(totalSize)
+		}
+		reportScan(report, ScanProgress{
+			Phase: "bundle", Message: name, Percent: 0.46 + fraction*0.38,
+			Current: current, Total: totalSize,
+		})
+	})
 	if err != nil {
 		return ScanResult{}, err
 	}
@@ -353,6 +403,7 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 	profile.ManifestUpdatedAt = &now
 	profile.BundleHashSHA256 = bundle.HashSHA256
 	profile.BundleSize = bundle.Size
+	reportScan(report, ScanProgress{Phase: "database", Message: "Публикуем новую версию manifest", Percent: 0.88, Log: true})
 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("profile_id = ?", profile.ID).Delete(&models.GameFile{}).Error; err != nil {
@@ -375,6 +426,7 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 	s.cleanupOldBundles(profile, 3)
 	s.cleanupOldObjectRefs(profile, 3)
 	s.gcObjects()
+	reportScan(report, ScanProgress{Phase: "cleanup", Message: "Очищаем старые артефакты", Percent: 0.97, Log: true})
 
 	summary, err := s.summary(ctx, profile)
 	if err != nil {
@@ -385,6 +437,30 @@ func (s Service) Scan(ctx context.Context, id string) (ScanResult, error) {
 		FileCount: int64(len(files)),
 		TotalSize: totalSize,
 	}, nil
+}
+
+func reportScan(report ScanReporter, progress ScanProgress) {
+	if report != nil {
+		report(progress)
+	}
+}
+
+func progressStep(total, targetUpdates int) int {
+	if total <= 0 || targetUpdates <= 0 {
+		return 1
+	}
+	step := total / targetUpdates
+	if step < 1 {
+		return 1
+	}
+	return step
+}
+
+func progressFraction(current, total int) float64 {
+	if total <= 0 {
+		return 1
+	}
+	return float64(current) / float64(total)
 }
 
 // DriftResult — итог дешёвой сверки storage с манифестом в БД: пути, размеры и
@@ -542,6 +618,28 @@ func (s Service) Manifest(ctx context.Context, id string) (Manifest, error) {
 		TotalSize:     totalSize,
 		Bundle:        bundle,
 	}, nil
+}
+
+// ManifestETag делает дешёвую проверку версии до загрузки тысяч строк
+// game_files. Неизменившийся Launcher получает 304 без JSON/сжатия/передачи тела.
+func (s Service) ManifestETag(ctx context.Context, id string) (string, error) {
+	var profile models.Profile
+	if err := s.db.WithContext(ctx).
+		Select("id", "manifest_version", "updated_at", "bundle_size").
+		Where("id = ? AND is_active = ?", id, true).
+		First(&profile).Error; err != nil {
+		return "", err
+	}
+	// Одна manifestVersion недостаточна: редактирование JVM args/команды запуска
+	// обновляет Profile без пересборки файлов. Наличие артефактов и CDN config
+	// тоже участвуют, иначе 304 мог бы оставить у клиента уже несуществующий URL.
+	bundleReady := regularFileHasSize(s.bundlePath(profile, profile.ManifestVersion), profile.BundleSize)
+	objectsReady := regularFileExists(s.objectRefsPath(profile, profile.ManifestVersion))
+	cdnTag := sha256.Sum256([]byte(s.cdnBase))
+	return fmt.Sprintf(
+		"\"profile-%s-v%d-u%d-b%t-o%t-c%x\"",
+		profile.ID, profile.ManifestVersion, profile.UpdatedAt.UnixNano(), bundleReady, objectsReady, cdnTag[:4],
+	), nil
 }
 
 func (s Service) Download(ctx context.Context, id string, requestedPath string) (FileDownload, error) {

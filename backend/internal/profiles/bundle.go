@@ -57,7 +57,12 @@ func (s Service) bundlePath(profile models.Profile, version int) string {
 // createBundle создаёт детерминированный архив опубликованного manifest. Во время
 // упаковки каждый файл повторно хешируется: изменение staging между Scan и записью
 // архива отменяет публикацию, а не создаёт manifest с чужими байтами.
-func (s Service) createBundle(profile models.Profile, version int, files []models.GameFile) (createdBundle, error) {
+func (s Service) createBundle(
+	profile models.Profile,
+	version int,
+	files []models.GameFile,
+	report func(written int64, path string),
+) (createdBundle, error) {
 	dir := s.bundlesRoot(profile)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return createdBundle{}, err
@@ -86,7 +91,9 @@ func (s Service) createBundle(profile models.Profile, version int, files []model
 	}
 	tarWriter := tar.NewWriter(encoder)
 
-	for _, file := range files {
+	var totalWritten int64
+	step := progressStep(len(files), 100)
+	for index, file := range files {
 		rel, err := safeRelativePath(file.Path)
 		if err != nil {
 			return createdBundle{}, err
@@ -121,6 +128,10 @@ func (s Service) createBundle(profile models.Profile, version int, files []model
 		}
 		if written != file.Size || hex.EncodeToString(fileHash.Sum(nil)) != strings.ToLower(file.HashSHA256) {
 			return createdBundle{}, fmt.Errorf("файл %s изменился во время публикации; повторите", rel)
+		}
+		totalWritten += written
+		if report != nil && (index == 0 || (index+1)%step == 0 || index+1 == len(files)) {
+			report(totalWritten, rel)
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
