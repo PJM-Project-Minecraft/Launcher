@@ -21,7 +21,12 @@ func TestBuildManagerCopiesBorrowedProfileID(t *testing.T) {
 
 	manager := NewBuildManager(service, nil)
 	manager.worker <- struct{}{}
-	defer func() { <-manager.worker }()
+	workerBlocked := true
+	defer func() {
+		if workerBlocked {
+			<-manager.worker
+		}
+	}()
 	// Fiber/fasthttp возвращает Params как borrowed string из переиспользуемого
 	// request-буфера. После ответа следующий запрос меняет его backing bytes.
 	buffer := []byte(profile.ID)
@@ -36,6 +41,22 @@ func TestBuildManagerCopiesBorrowedProfileID(t *testing.T) {
 	if !ok || restored.ID != started.ID || restored.ProfileID != profile.ID {
 		t.Fatalf("borrowed profile id escaped into background state: ok=%v snapshot=%+v", ok, restored)
 	}
+	<-manager.worker
+	workerBlocked = false
+	waitBuildTerminal(t, manager, profile.ID)
+}
+
+func waitBuildTerminal(t *testing.T, manager *BuildManager, profileID string) BuildSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if snapshot, ok := manager.Snapshot(profileID); ok && !isBuildActive(snapshot.Status) {
+			return snapshot
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("build %s did not finish", profileID)
+	return BuildSnapshot{}
 }
 
 func TestBuildManagerPublishesProgressAndDeduplicatesActiveJob(t *testing.T) {

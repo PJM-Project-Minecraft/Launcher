@@ -173,7 +173,12 @@ func TestAdminBuildSnapshotsRestoreProgressAfterPageReload(t *testing.T) {
 	// Держим worker занятым: HTTP-гидратация должна вернуть именно активную
 	// queued-задачу, как при обновлении страницы посреди публикации.
 	handler.builds.worker <- struct{}{}
-	defer func() { <-handler.builds.worker }()
+	workerBlocked := true
+	defer func() {
+		if workerBlocked {
+			<-handler.builds.worker
+		}
+	}()
 	started, created, err := handler.builds.Start(context.Background(), profile.ID)
 	if err != nil || !created {
 		t.Fatalf("Start() created=%v err=%v", created, err)
@@ -199,6 +204,9 @@ func TestAdminBuildSnapshotsRestoreProgressAfterPageReload(t *testing.T) {
 	if len(snapshots) != 1 || snapshots[0].ID != started.ID || snapshots[0].Status != BuildQueued {
 		t.Fatalf("build snapshots = %+v, want queued %s", snapshots, started.ID)
 	}
+	<-handler.builds.worker
+	workerBlocked = false
+	waitBuildTerminal(t, handler.builds, profile.ID)
 }
 
 // TestEventsStreamDeliversProfileChange поднимает реальный Fiber-сервер и через
