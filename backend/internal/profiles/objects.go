@@ -53,9 +53,10 @@ func (s Service) ensureObject(profile models.Profile, file models.GameFile) erro
 	}
 	target := s.objectPath(hash)
 	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() && info.Size() == file.Size {
-		if actual, hashErr := hashFile(target); hashErr == nil && actual == hash {
-			return nil
-		}
+		// Object создаётся атомарно только после SHA-проверки. Повторное чтение
+		// каждого неизменяемого объекта здесь удваивало I/O всей публикации;
+		// createBundle ниже всё равно проверяет SHA bytes из object-store.
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return err

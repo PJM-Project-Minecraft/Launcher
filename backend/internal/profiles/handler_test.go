@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"launcher-backend/internal/events"
+	"launcher-backend/internal/models"
 
 	fastws "github.com/fasthttp/websocket"
 	"github.com/gofiber/fiber/v3"
@@ -155,6 +156,48 @@ func TestAdminWebSocketUsesSingleUseTicketAndSendsSnapshot(t *testing.T) {
 	}
 	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("reused ticket response=%v err=%v", response, err)
+	}
+}
+
+func TestAdminBuildSnapshotsRestoreProgressAfterPageReload(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name: "Reload", Slug: "reload", Loader: "fabric", GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "a.jar"), "data")
+
+	handler := NewHandler(service, nil)
+	// Держим worker занятым: HTTP-гидратация должна вернуть именно активную
+	// queued-задачу, как при обновлении страницы посреди публикации.
+	handler.builds.worker <- struct{}{}
+	defer func() { <-handler.builds.worker }()
+	started, created, err := handler.builds.Start(context.Background(), profile.ID)
+	if err != nil || !created {
+		t.Fatalf("Start() created=%v err=%v", created, err)
+	}
+
+	app := fiber.New()
+	handler.RegisterRoutes(app, func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
+		return c.Next()
+	})
+	response, err := app.Test(httptest.NewRequest("GET", "/api/admin/profiles/builds", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("build snapshots status=%d, want 200", response.StatusCode)
+	}
+	var snapshots []BuildSnapshot
+	if err := json.NewDecoder(response.Body).Decode(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].ID != started.ID || snapshots[0].Status != BuildQueued {
+		t.Fatalf("build snapshots = %+v, want queued %s", snapshots, started.ID)
 	}
 }
 

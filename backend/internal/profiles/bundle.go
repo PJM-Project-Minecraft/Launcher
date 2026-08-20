@@ -54,9 +54,9 @@ func (s Service) bundlePath(profile models.Profile, version int) string {
 	return filepath.Join(s.bundlesRoot(profile), fmt.Sprintf("%d.tar.zst", version))
 }
 
-// createBundle создаёт детерминированный архив опубликованного manifest. Во время
-// упаковки каждый файл повторно хешируется: изменение staging между Scan и записью
-// архива отменяет публикацию, а не создаёт manifest с чужими байтами.
+// createBundle создаёт детерминированный архив из уже атомарно зафиксированных
+// content-addressed objects. Bundle и пофайловая раздача поэтому всегда содержат
+// одни и те же байты, даже если SFTP меняет staging во время публикации.
 func (s Service) createBundle(
 	profile models.Profile,
 	version int,
@@ -98,10 +98,7 @@ func (s Service) createBundle(
 		if err != nil {
 			return createdBundle{}, err
 		}
-		sourcePath, err := safeJoin(s.filesRoot(profile), rel)
-		if err != nil {
-			return createdBundle{}, err
-		}
+		sourcePath := s.objectPath(strings.ToLower(file.HashSHA256))
 		source, err := os.Open(sourcePath)
 		if err != nil {
 			return createdBundle{}, fmt.Errorf("bundle source %s: %w", rel, err)

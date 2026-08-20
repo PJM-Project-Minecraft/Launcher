@@ -282,8 +282,18 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 		return ScanResult{}, err
 	}
 
+	var previousFiles []models.GameFile
+	if err := s.db.WithContext(ctx).Where("profile_id = ?", profile.ID).Order("path asc").Find(&previousFiles).Error; err != nil {
+		return ScanResult{}, err
+	}
+	previousByPath := make(map[string]models.GameFile, len(previousFiles))
+	for _, file := range previousFiles {
+		previousByPath[file.Path] = file
+	}
+
 	files := make([]models.GameFile, 0)
 	var totalSize int64
+	var reusedHashes, calculatedHashes int
 	preservePaths := profilePreservePaths(profile)
 
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
@@ -327,22 +337,37 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 			return nil
 		}
 
-		hash, err := hashFile(path)
-		if err != nil {
-			return err
+		executable := info.Mode()&0111 != 0
+		previous, existed := previousByPath[rel]
+		fileID := uuid.NewString()
+		hash := ""
+		if existed {
+			fileID = previous.ID
+		}
+		if existed && previous.SourceModTimeNS != 0 && previous.SourceModTimeNS == info.ModTime().UnixNano() &&
+			previous.Size == info.Size() && previous.Executable == executable && validSHA256(previous.HashSHA256) {
+			hash = previous.HashSHA256
+			reusedHashes++
+		} else {
+			hash, err = hashFile(path)
+			if err != nil {
+				return err
+			}
+			calculatedHashes++
 		}
 
 		totalSize += info.Size()
 		files = append(files, models.GameFile{
-			ID:         uuid.NewString(),
-			ProfileID:  profile.ID,
-			Name:       filepath.Base(rel),
-			Path:       rel,
-			URL:        "/api/profiles/" + profile.ID + "/files/" + escapePath(rel),
-			HashSHA256: hash,
-			Size:       info.Size(),
-			FileType:   inferFileType(rel),
-			Executable: info.Mode()&0111 != 0,
+			ID:              fileID,
+			ProfileID:       profile.ID,
+			Name:            filepath.Base(rel),
+			Path:            rel,
+			URL:             "/api/profiles/" + profile.ID + "/files/" + escapePath(rel),
+			HashSHA256:      hash,
+			Size:            info.Size(),
+			FileType:        inferFileType(rel),
+			Executable:      executable,
+			SourceModTimeNS: info.ModTime().UnixNano(),
 		})
 		if len(files) == 1 || len(files)%64 == 0 {
 			reportScan(report, ScanProgress{
@@ -357,7 +382,7 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	reportScan(report, ScanProgress{
-		Phase: "validate", Message: fmt.Sprintf("Проверяем %d файлов", len(files)),
+		Phase: "validate", Message: fmt.Sprintf("Индекс: %d файлов; SHA из кэша: %d; пересчитано: %d", len(files), reusedHashes, calculatedHashes),
 		Percent: 0.20, Current: int64(len(files)), Total: int64(len(files)), Log: true,
 	})
 	if err := validatePortablePaths(files); err != nil {
@@ -375,6 +400,26 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 				Current: int64(index + 1), Total: int64(len(files)),
 			})
 		}
+	}
+	if profile.ManifestVersion > 0 && samePublishedFiles(previousFiles, files) &&
+		regularFileHasSize(s.bundlePath(profile, profile.ManifestVersion), profile.BundleSize) &&
+		regularFileExists(s.objectRefsPath(profile, profile.ManifestVersion)) {
+		// Содержимое не изменилось: обновляем только fingerprints staging-файлов.
+		// Версия и гигабайтный bundle остаются прежними.
+		if !sameSourceMetadata(previousFiles, files) {
+			if err := s.replaceManifestFiles(ctx, profile.ID, files); err != nil {
+				return ScanResult{}, err
+			}
+		}
+		reportScan(report, ScanProgress{
+			Phase: "unchanged", Message: "Изменений нет — используем готовые manifest и bundle",
+			Percent: 1, Current: int64(len(files)), Total: int64(len(files)), Log: true,
+		})
+		summary, err := s.summary(ctx, profile)
+		if err != nil {
+			return ScanResult{}, err
+		}
+		return ScanResult{Profile: summary, FileCount: int64(len(files)), TotalSize: totalSize}, nil
 	}
 
 	nextVersion := profile.ManifestVersion + 1
@@ -406,16 +451,8 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 	reportScan(report, ScanProgress{Phase: "database", Message: "Публикуем новую версию manifest", Percent: 0.88, Log: true})
 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("profile_id = ?", profile.ID).Delete(&models.GameFile{}).Error; err != nil {
+		if err := replaceManifestFiles(tx, profile.ID, files); err != nil {
 			return err
-		}
-		if len(files) > 0 {
-			// Профиль может содержать тысячи файлов (assets/libraries), поэтому
-			// вставляем пачками — одиночный INSERT упирается в
-			// SQLITE_MAX_VARIABLE_NUMBER ("too many SQL variables").
-			if err := tx.CreateInBatches(&files, 100).Error; err != nil {
-				return err
-			}
 		}
 		return tx.Save(&profile).Error
 	}); err != nil {
@@ -437,6 +474,50 @@ func (s Service) ScanWithProgress(ctx context.Context, id string, report ScanRep
 		FileCount: int64(len(files)),
 		TotalSize: totalSize,
 	}, nil
+}
+
+func (s Service) replaceManifestFiles(ctx context.Context, profileID string, files []models.GameFile) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return replaceManifestFiles(tx, profileID, files)
+	})
+}
+
+func replaceManifestFiles(tx *gorm.DB, profileID string, files []models.GameFile) error {
+	if err := tx.Where("profile_id = ?", profileID).Delete(&models.GameFile{}).Error; err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	// Профиль может содержать тысячи файлов (assets/libraries), поэтому
+	// вставляем пачками — одиночный INSERT упирается в лимит SQL-параметров.
+	return tx.CreateInBatches(&files, 100).Error
+}
+
+func samePublishedFiles(left, right []models.GameFile) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ID != right[index].ID || left[index].Path != right[index].Path ||
+			left[index].HashSHA256 != right[index].HashSHA256 || left[index].Size != right[index].Size ||
+			left[index].FileType != right[index].FileType || left[index].Executable != right[index].Executable {
+			return false
+		}
+	}
+	return true
+}
+
+func sameSourceMetadata(left, right []models.GameFile) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].SourceModTimeNS != right[index].SourceModTimeNS {
+			return false
+		}
+	}
+	return true
 }
 
 func reportScan(report ScanReporter, progress ScanProgress) {

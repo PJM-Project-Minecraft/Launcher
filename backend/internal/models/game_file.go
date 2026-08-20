@@ -10,4 +10,7 @@ type GameFile struct {
 	Size       int64  `gorm:"not null" json:"size"`
 	FileType   string `gorm:"size:16;not null;default:mod" json:"fileType"`
 	Executable bool   `gorm:"not null;default:false" json:"executable"`
+	// SourceModTimeNS — дешёвый fingerprint staging-файла. Он позволяет не читать
+	// гигабайты неизменённых данных при каждой повторной публикации.
+	SourceModTimeNS int64 `gorm:"not null;default:0" json:"-"`
 }

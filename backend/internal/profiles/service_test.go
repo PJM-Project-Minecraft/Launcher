@@ -109,6 +109,49 @@ func TestScanBuildsManifest(t *testing.T) {
 	}
 }
 
+func TestUnchangedScanReusesPublishedManifestAndBundle(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name: "Incremental", Slug: "incremental", Loader: "fabric", GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "a.jar"), strings.Repeat("data", 1024))
+
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.Manifest(context.Background(), profile.ID)
+	if err != nil || first.Bundle == nil {
+		t.Fatalf("first manifest bundle=%+v err=%v", first.Bundle, err)
+	}
+	bundlePath := service.bundlePath(models.Profile{ID: profile.ID}, first.Profile.ManifestVersion)
+	before, err := os.Stat(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	if _, err := service.Scan(context.Background(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Manifest(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Profile.ManifestVersion != first.Profile.ManifestVersion {
+		t.Fatalf("unchanged scan advanced manifest %d -> %d", first.Profile.ManifestVersion, second.Profile.ManifestVersion)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("unchanged scan rebuilt bundle: %s -> %s", before.ModTime(), after.ModTime())
+	}
+}
+
 func TestScanHandlesLargeFileCount(t *testing.T) {
 	service := newTestService(t)
 	profile, err := service.Create(context.Background(), ProfileRequest{

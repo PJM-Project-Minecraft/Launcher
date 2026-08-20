@@ -71,6 +71,9 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/", h.listAll)
 	admin.Get("/loader-options", h.loaderOptions)
+	// HTTP snapshot нужен для детерминированного восстановления страницы после
+	// reload; WebSocket остаётся каналом последующих изменений.
+	admin.Get("/builds", h.buildSnapshots)
 	admin.Post("/", h.create)
 	admin.Get("/:id/manifest", h.manifest)
 	admin.Patch("/:id", h.update)
@@ -189,6 +192,10 @@ func (h Handler) buildStatus(c fiber.Ctx) error {
 		return h.writeError(c, gorm.ErrRecordNotFound)
 	}
 	return c.JSON(result)
+}
+
+func (h Handler) buildSnapshots(c fiber.Ctx) error {
+	return c.JSON(h.builds.Snapshots())
 }
 
 func (h Handler) createEventsTicket(c fiber.Ctx) error {

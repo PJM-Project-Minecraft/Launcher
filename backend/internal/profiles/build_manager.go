@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -188,6 +189,7 @@ func (m *BuildManager) Snapshots() []BuildSnapshot {
 	for _, job := range m.jobs {
 		result = append(result, cloneBuild(*job))
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
 	return result
 }
 
