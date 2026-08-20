@@ -1,4 +1,4 @@
-# Ручная сборка плеер-лаунчера под Windows (mingw-w64, кросс) и Linux с зашитым URL бэкенда
+# Ручная сборка плеер-лаунчера под Windows (MSVC, кросс) и Linux с зашитым URL бэкенда
 # и подписью автообновления. Один ран — оба бинарника, подписаны ОДНИМ ключом.
 #
 # Запуск: вкладка Actions → Build Launcher Release → Run workflow,
@@ -32,27 +32,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-pc-windows-gnu
+          - target: x86_64-pc-windows-msvc
             platform: windows-x64
             binary: project-minecraft-launcher.exe
             artifact_name: ProjectMinecraftLauncher.exe
+            runner: cargo-xwin
           - target: x86_64-unknown-linux-gnu
             platform: linux-x64
             binary: project-minecraft-launcher
             artifact_name: project-minecraft-launcher
+            runner: cargo
     # Оба таргета собираются на Linux: зеркало репо на git.likonchik.xyz крутит Forgejo
     # Actions, Windows-раннера там нет и windows-джоб висел в очереди вечно.
-    # Windows-бинарник — кросс-компиляция mingw-w64 (x86_64-pc-windows-gnu), как и anticheat.dll.
+    # Windows-лаунчер собирается MSVC-таргетом через cargo-xwin. Так Tauri
+    # статически линкует WebView2Loader и автообновлению по-прежнему нужен один .exe.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-          # mingw нужен и как линкер, и как windres для winresource (иконка/манифест .exe).
-          if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
-            sudo apt-get install -y gcc-mingw-w64-x86-64
+          if [ "${{ matrix.platform }}" = "linux-x64" ]; then
+            sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          else
+            sudo apt-get install -y clang-18 clang-tools-18 lld-18 llvm-18
+            # cc-rs и MSVC-линковщик ищут неверсионированные имена. В Ubuntu
+            # эти инструменты могут ставиться только с суффиксом версии.
+            for tool in clang-cl lld-link llvm-lib llvm-rc; do
+              if ! command -v "$tool" >/dev/null 2>&1; then
+                candidate="$(find /usr/bin /usr/lib/llvm-18/bin -maxdepth 1 -name "$tool-18" | head -1)"
+                test -n "$candidate"
+                sudo ln -s "$candidate" "/usr/local/bin/$tool"
+              fi
+            done
           fi
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,6 +83,10 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
+
+      - name: Install cargo-xwin
+        if: matrix.platform == 'windows-x64'
+        run: cargo install cargo-xwin --locked --version 0.23.1
 
       # Определяем публичный ключ: из приватного (секрет) — приоритет и одна точка правды;
       # иначе из variables. Приватный ключ пишем в файл только на время рана (раннер эфемерный).
@@ -101,10 +117,9 @@ jobs:
         env:
           LAUNCHER_DEFAULT_API_URL: ${{ inputs.api_url }}
           LAUNCHER_UPDATE_PUBKEY: ${{ steps.resolve.outputs.pubkey }}
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
         # Только Tauri CLI встраивает frontendDist вместо devUrl. Голый cargo build
         # оставляет WebView на 127.0.0.1:1420 и непригоден для player-релиза.
-        run: npm run tauri -- build --no-bundle --target ${{ matrix.target }}
+        run: npm run tauri -- build --no-bundle --runner ${{ matrix.runner }} --target ${{ matrix.target }}
 
       - name: Read version
         id: version
@@ -117,6 +132,19 @@ jobs:
           mkdir -p dist
           cp "src-tauri/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact_name }}"
           chmod +x "dist/${{ matrix.artifact_name }}" || true
+
+      # Автообновление доставляет один .exe: внешние WebView2/VC++ DLL сделают его нерабочим.
+      - name: Verify portable Windows executable
+        if: matrix.platform == 'windows-x64'
+        shell: bash
+        run: |
+          IMPORTS="$(objdump -p "dist/${{ matrix.artifact_name }}")"
+          if grep -Eiq 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS"; then
+            echo "ОШИБКА: Windows-бинарник зависит от внешней DLL:" >&2
+            grep -Ei 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS" >&2
+            exit 1
+          fi
+          echo "Windows-бинарник самодостаточен для однофайлового обновления ✓"
 
       # Страховка: публичный ключ реально попал в бинарник (иначе лаунчер не проверял бы подпись).
       - name: Verify pubkey embedded

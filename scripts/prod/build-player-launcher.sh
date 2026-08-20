@@ -186,6 +186,18 @@ EOF
 PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
 [[ "$PLATFORM" == windows-* ]] && PLAYER_BIN="$PACKAGE_DIR/ProjectMinecraftLauncher.exe"
 
+# Updater заменяет ровно один бинарник, поэтому Windows-сборка не может
+# зависеть от WebView2Loader.dll или Visual C++ Runtime рядом с .exe.
+if [[ "$PLATFORM" == windows-* ]] && command -v objdump >/dev/null 2>&1; then
+  IMPORTS="$(objdump -p "$PLAYER_BIN")"
+  if grep -Eiq 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS"; then
+    echo "[launcher] ОШИБКА: Windows-бинарник зависит от внешней DLL:" >&2
+    grep -Ei 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS" >&2
+    echo "[launcher] Собирай x86_64-pc-windows-msvc через cargo-xwin; Tauri сам встроит VC runtime." >&2
+    exit 1
+  fi
+fi
+
 # Подпись автообновления (Ed25519). Публичный ключ вшивается через option_env! на этапе
 # cargo — проверяем, что он реально попал в бинарник (страховка от кэша cargo/сбоя).
 if [[ -n "$PUBKEY" ]]; then
