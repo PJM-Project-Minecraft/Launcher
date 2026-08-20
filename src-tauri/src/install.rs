@@ -63,8 +63,11 @@ pub(crate) fn migrate_users(
     // Маркер делает перенос повторяемым. При повторе данные копируются заново:
     // после неудачной записи settings.json игрок мог ещё запускать старую копию,
     // поэтому уже подготовленный destination/users мог успеть устареть.
-    fs::write(destination.join(MIGRATION_MARKER), source.to_string_lossy().as_bytes())
-        .map_err(|err| format!("Не удалось подготовить перенос: {err}"))?;
+    fs::write(
+        destination.join(MIGRATION_MARKER),
+        source.to_string_lossy().as_bytes(),
+    )
+    .map_err(|err| format!("Не удалось подготовить перенос: {err}"))?;
     let destination_users = destination.join(USERS_DIR);
     let staging = destination.join(MIGRATION_DIR);
     let backup_users = destination.join(MIGRATION_BACKUP_DIR);
@@ -311,11 +314,19 @@ mod tests {
         let source = root.join("source");
         let destination = root.join("destination");
         fs::create_dir_all(source.join("users/u/profiles/p/files")).unwrap();
-        fs::write(source.join("users/u/profiles/p/files/options.txt"), b"first").unwrap();
+        fs::write(
+            source.join("users/u/profiles/p/files/options.txt"),
+            b"first",
+        )
+        .unwrap();
 
         let first = migrate_users(&source, &destination).unwrap();
         assert!(destination.join(MIGRATION_MARKER).exists());
-        fs::write(source.join("users/u/profiles/p/files/options.txt"), b"second").unwrap();
+        fs::write(
+            source.join("users/u/profiles/p/files/options.txt"),
+            b"second",
+        )
+        .unwrap();
         let retry = migrate_users(&source, &destination).unwrap();
         assert_eq!(
             fs::read(destination.join("users/u/profiles/p/files/options.txt")).unwrap(),
@@ -335,7 +346,11 @@ mod tests {
         let source = root.join("source");
         let destination = root.join("destination");
         fs::create_dir_all(source.join("users/u/profiles/p/files")).unwrap();
-        fs::write(source.join("users/u/profiles/p/files/options.txt"), b"complete").unwrap();
+        fs::write(
+            source.join("users/u/profiles/p/files/options.txt"),
+            b"complete",
+        )
+        .unwrap();
         fs::create_dir_all(destination.join(MIGRATION_DIR).join("users/u")).unwrap();
         let canonical_source = source.canonicalize().unwrap();
         fs::write(

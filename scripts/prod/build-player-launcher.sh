@@ -117,7 +117,7 @@ if [[ -n "$SIGNING_KEY" ]]; then
   echo "[launcher] Публичный ключ выведен из приватного: $PUBKEY"
 fi
 
-VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT_DIR/launcher-slint/Cargo.toml")"
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT_DIR/src-tauri/Cargo.toml")"
 TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 PLATFORM="linux-x64"
 case "$TARGET_TRIPLE" in
@@ -129,16 +129,17 @@ esac
 
 if (( BUILD == 1 )); then
   echo "[launcher] Building release with LAUNCHER_DEFAULT_API_URL=$API_URL"
+  (cd "$ROOT_DIR" && npm ci && npm run build:web)
   (
-    cd "$ROOT_DIR/launcher-slint"
+    cd "$ROOT_DIR/src-tauri"
     # PUBKEY передаётся ЯВНО (не через export родителя) — иначе option_env! его не увидит.
     LAUNCHER_DEFAULT_API_URL="$API_URL" LAUNCHER_UPDATE_PUBKEY="$PUBKEY" cargo build --release
   )
 fi
 
-BIN_NAME="launcher-slint"
-[[ "$PLATFORM" == windows-* ]] && BIN_NAME="launcher-slint.exe"
-SOURCE_BIN="$ROOT_DIR/launcher-slint/target/release/$BIN_NAME"
+BIN_NAME="project-minecraft-launcher"
+[[ "$PLATFORM" == windows-* ]] && BIN_NAME="project-minecraft-launcher.exe"
+SOURCE_BIN="$ROOT_DIR/src-tauri/target/release/$BIN_NAME"
 
 if [[ ! -x "$SOURCE_BIN" ]]; then
   echo "ERROR: release binary not found: $SOURCE_BIN" >&2
@@ -188,7 +189,7 @@ if [[ -n "$PUBKEY" ]]; then
     echo "[launcher] Публичный ключ вшит в бинарник ✓"
   else
     echo "[launcher] ОШИБКА: публичный ключ задан, но в бинарнике его НЕТ (cargo не пересобрал?)." >&2
-    echo "[launcher]        Удали launcher-slint/target/release и пересобери." >&2
+    echo "[launcher]        Удали src-tauri/target/release и пересобери." >&2
     exit 1
   fi
 fi

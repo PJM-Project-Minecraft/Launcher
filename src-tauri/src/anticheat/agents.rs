@@ -25,7 +25,10 @@ pub fn ensure_agent(
     config: &AppConfig,
     expected_sha: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
-    let Some(dir) = crate::project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
+    let Some(dir) = crate::project_dirs()
+        .ok()
+        .map(|d| d.data_dir().to_path_buf())
+    else {
         return Ok(None);
     };
     let path = dir.join("anticheat-agent.jar");
@@ -47,7 +50,10 @@ pub fn ensure_native(
     let Some((os_token, file_name)) = native_target() else {
         return Ok(None);
     };
-    let Some(dir) = crate::project_dirs().ok().map(|d| d.data_dir().to_path_buf()) else {
+    let Some(dir) = crate::project_dirs()
+        .ok()
+        .map(|d| d.data_dir().to_path_buf())
+    else {
         return Ok(None);
     };
     let path = dir.join(file_name);

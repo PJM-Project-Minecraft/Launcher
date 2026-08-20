@@ -2,14 +2,15 @@
 
 Phase 1 skeleton for a Minecraft launcher:
 
-- Slint + Rust desktop launcher
-- React + TypeScript UI prototype
+- Tauri 2 + Rust desktop launcher
+- React + TypeScript production UI
 - Go + Fiber v3 backend
 - GML custom authorization adapter
 
 ## Desktop Launcher Run
 
-The launcher is a Rust desktop app built with Slint. Vite is only a legacy UI debug prototype and is not required for the launcher.
+The launcher is a Tauri 2 desktop app: Rust owns authentication, updates, files,
+anticheat and Minecraft launch; React renders the complete player interface.
 
 Development backend:
 
@@ -35,13 +36,13 @@ Release build:
 npm run build:launcher
 ```
 
-UI debug only:
+Browser-only UI preview (uses demo state and does not call the backend):
 
 ```bash
 npm run dev:web
 ```
 
-For a deployed backend, set `LAUNCHER_API_URL` before starting/building the Slint launcher. Browser debug can use `VITE_API_URL`.
+For a deployed backend, set `LAUNCHER_API_URL` before starting/building the Tauri launcher.
 
 For VPS production release flow, use [docs/vps-production.md](docs/vps-production.md).
 The player launcher can be built with a baked-in backend URL via:
@@ -136,10 +137,17 @@ Example:
 
 ## Desktop Platform Notes
 
-Slint does not require Tauri WebKit packages. If `cargo` is not available in your shell, load Rust first:
+Tauri 2 uses the system webview. On Debian/Ubuntu, install its build dependencies first:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+If `cargo` is not available in your shell, load Rust first:
 
 ```bash
 . "$HOME/.cargo/env"
 ```
 
-Windows and Linux builds use the same Slint Rust crate in `launcher-slint/`. Build platform-specific binaries on the target OS or in CI.
+Windows and Linux builds use the same Rust crate in `src-tauri/` and the same bundled
+frontend from `src/`. Build platform-specific binaries on the target OS or in CI.

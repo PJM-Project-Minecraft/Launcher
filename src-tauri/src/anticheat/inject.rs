@@ -24,7 +24,11 @@ pub struct InjectionPlan {
 fn native_args(native_path: &Path, flag_path: &Path) -> Vec<String> {
     vec![
         obfstr!("-XX:+DisableAttachMechanism").to_string(),
-        format!("{}{}", obfstr!("-Dac.native.flag="), flag_path.to_string_lossy()),
+        format!(
+            "{}{}",
+            obfstr!("-Dac.native.flag="),
+            flag_path.to_string_lossy()
+        ),
         format!(
             "{}{}={}",
             obfstr!("-agentpath:"),
@@ -61,7 +65,11 @@ fn agent_args(
     vec![
         format!("{}{}", obfstr!("-Dac.token="), token),
         format!("{}{}", obfstr!("-Dac.url="), api_url),
-        format!("{}{}", obfstr!("-Dac.kickfile="), kick_path.to_string_lossy()),
+        format!(
+            "{}{}",
+            obfstr!("-Dac.kickfile="),
+            kick_path.to_string_lossy()
+        ),
         format!("{}{}", obfstr!("-Dac.challenge="), challenge),
         format!("{}{}", obfstr!("-javaagent:"), agent_path.to_string_lossy()),
     ]
@@ -85,14 +93,17 @@ pub fn build(
     if let Some(native) = agents::ensure_native(config, native_sha)? {
         let flag = native.with_file_name(NATIVE_FLAG);
         let _ = fs::remove_file(&flag); // свежий старт: убираем прошлый флаг
-        // КРИТИЧНО: чистим и файл событий, иначе Java-поллер при новом запуске
-        // перечитает старые детекты прошлой (читерской) сессии и кикнет чистую игру.
+                                        // КРИТИЧНО: чистим и файл событий, иначе Java-поллер при новом запуске
+                                        // перечитает старые детекты прошлой (читерской) сессии и кикнет чистую игру.
         let _ = fs::remove_file(native.with_file_name(format!("{}.events", NATIVE_FLAG)));
         // Ключ подписи скриншотов — единственный секрет, который получает нативка.
         // Кладём его В ФАЙЛ, а не в JVM-аргументы: аргументы командной строки видны
         // любому моду внутри игры (RuntimeMXBean.getInputArguments), а файл нативка
         // читает и удаляет в Agent_OnLoad — до того, как выполнится первый Java-класс.
-        write_capture_key(&native.with_file_name(format!("{}.key", NATIVE_FLAG)), capture_secret);
+        write_capture_key(
+            &native.with_file_name(format!("{}.key", NATIVE_FLAG)),
+            capture_secret,
+        );
         args.extend(native_args(&native, &flag));
     }
 
@@ -123,7 +134,9 @@ mod tests {
     fn native_args_contain_guards() {
         let a = native_args(Path::new("/d/lib.so"), Path::new("/d/ac_native.flag"));
         assert!(a.iter().any(|s| s == "-XX:+DisableAttachMechanism"));
-        assert!(a.iter().any(|s| s.contains("-Dac.native.flag=/d/ac_native.flag")));
+        assert!(a
+            .iter()
+            .any(|s| s.contains("-Dac.native.flag=/d/ac_native.flag")));
         assert!(a
             .iter()
             .any(|s| s.contains("-agentpath:/d/lib.so=/d/ac_native.flag")));
@@ -140,7 +153,9 @@ mod tests {
         );
         assert!(a.iter().any(|s| s == "-Dac.token=tok"));
         assert!(a.iter().any(|s| s == "-Dac.url=https://x.test"));
-        assert!(a.iter().any(|s| s.contains("-Dac.kickfile=/d/ac_kick.flag")));
+        assert!(a
+            .iter()
+            .any(|s| s.contains("-Dac.kickfile=/d/ac_kick.flag")));
         assert!(a.iter().any(|s| s == "-Dac.challenge=chal"));
         assert!(a.iter().any(|s| s.contains("-javaagent:/d/agent.jar")));
     }

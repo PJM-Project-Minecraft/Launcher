@@ -34,11 +34,11 @@ jobs:
         include:
           - target: x86_64-pc-windows-gnu
             platform: windows-x64
-            binary: launcher-slint.exe
+            binary: project-minecraft-launcher.exe
             artifact_name: ProjectMinecraftLauncher.exe
           - target: x86_64-unknown-linux-gnu
             platform: linux-x64
-            binary: launcher-slint
+            binary: project-minecraft-launcher
             artifact_name: project-minecraft-launcher
     # Оба таргета собираются на Linux: зеркало репо на git.likonchik.xyz крутит Forgejo
     # Actions, Windows-раннера там нет и windows-джоб висел в очереди вечно.
@@ -49,7 +49,7 @@ jobs:
       - name: Build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
           # mingw нужен и как линкер, и как windres для winresource (иконка/манифест .exe).
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
             sudo apt-get install -y gcc-mingw-w64-x86-64
@@ -59,8 +59,14 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: launcher-slint
+          workspaces: src-tauri
           key: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Build Tauri frontend
+        run: npm ci && npm run build:web
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
@@ -92,7 +98,7 @@ jobs:
           fi
 
       - name: Build release
-        working-directory: launcher-slint
+        working-directory: src-tauri
         env:
           LAUNCHER_DEFAULT_API_URL: ${{ inputs.api_url }}
           LAUNCHER_UPDATE_PUBKEY: ${{ steps.resolve.outputs.pubkey }}
@@ -102,13 +108,13 @@ jobs:
       - name: Read version
         id: version
         shell: bash
-        run: echo "version=$(awk -F '"' '/^version = / { print $2; exit }' launcher-slint/Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(awk -F '"' '/^version = / { print $2; exit }' src-tauri/Cargo.toml)" >> "$GITHUB_OUTPUT"
 
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
-          cp "launcher-slint/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact_name }}"
+          cp "src-tauri/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact_name }}"
           chmod +x "dist/${{ matrix.artifact_name }}" || true
 
       # Страховка: публичный ключ реально попал в бинарник (иначе лаунчер не проверял бы подпись).

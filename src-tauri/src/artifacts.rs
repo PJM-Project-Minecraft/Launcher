@@ -164,7 +164,11 @@ mod tests {
 
         let res = install_verified(&tmp, &path, Some("deadbeef"));
         assert!(matches!(res, Err(IntegrityError::Tampered(_))));
-        assert_eq!(fs::read(&path).unwrap(), b"good", "старый файл должен остаться");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"good",
+            "старый файл должен остаться"
+        );
         assert!(!tmp.exists(), "мусорный .part должен удаляться");
         let _ = fs::remove_dir_all(&dir);
     }

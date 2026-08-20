@@ -65,8 +65,16 @@ pub fn collect_hwid_components() -> HwidComponents {
 
     HwidComponents {
         aggregate,
-        machine_id: raw.machine_id.as_deref().map(salted_hash).unwrap_or_default(),
-        board_uuid: raw.board_uuid.as_deref().map(salted_hash).unwrap_or_default(),
+        machine_id: raw
+            .machine_id
+            .as_deref()
+            .map(salted_hash)
+            .unwrap_or_default(),
+        board_uuid: raw
+            .board_uuid
+            .as_deref()
+            .map(salted_hash)
+            .unwrap_or_default(),
         macs: raw.macs.iter().map(|m| salted_hash(m)).collect(),
     }
 }
@@ -110,7 +118,11 @@ fn mac_addresses_linux() -> Vec<String> {
         let name = entry.file_name();
         // Виртуальные интерфейсы нестабильны — пропускаем lo и docker/veth/br.
         let name = name.to_string_lossy();
-        if name == "lo" || name.starts_with("docker") || name.starts_with("veth") || name.starts_with("br-") {
+        if name == "lo"
+            || name.starts_with("docker")
+            || name.starts_with("veth")
+            || name.starts_with("br-")
+        {
             continue;
         }
         let addr_path = entry.path().join("address");
@@ -197,7 +209,10 @@ mod tests {
     fn hwid_aggregate_is_64_hex_and_stable() {
         let a = collect_hwid_components().aggregate;
         let b = collect_hwid_components().aggregate;
-        assert_eq!(a, b, "агрегатный HWID-хэш должен быть стабильным между вызовами");
+        assert_eq!(
+            a, b,
+            "агрегатный HWID-хэш должен быть стабильным между вызовами"
+        );
         assert_eq!(a.len(), 64, "SHA-256 в hex = 64 символа");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -207,7 +222,10 @@ mod tests {
         // Хеш компонента — солёный SHA-256 непустого сырья (или пустая строка).
         let c = collect_hwid_components();
         for h in [&c.machine_id, &c.board_uuid] {
-            assert!(h.is_empty() || h.len() == 64, "хеш компонента — пустой или 64 hex");
+            assert!(
+                h.is_empty() || h.len() == 64,
+                "хеш компонента — пустой или 64 hex"
+            );
         }
     }
 

@@ -16,7 +16,11 @@ pub fn debugger_present() -> bool {
     };
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("TracerPid:") {
-            return rest.trim().parse::<i64>().map(|pid| pid != 0).unwrap_or(false);
+            return rest
+                .trim()
+                .parse::<i64>()
+                .map(|pid| pid != 0)
+                .unwrap_or(false);
         }
     }
     false

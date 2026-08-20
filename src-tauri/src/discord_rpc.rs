@@ -197,7 +197,9 @@ fn now_unix() -> i64 {
 fn apply_presence(client: &mut DiscordIpcClient, p: &Presence, session_start: i64) -> bool {
     let fields = presence_to_activity_fields(p);
 
-    let mut assets = Assets::new().large_image(LARGE_IMAGE).large_text(LARGE_TEXT);
+    let mut assets = Assets::new()
+        .large_image(LARGE_IMAGE)
+        .large_text(LARGE_TEXT);
     if let Some(small) = fields.small_image {
         assets = assets.small_image(small);
     }
@@ -242,7 +244,9 @@ mod tests {
 
     #[test]
     fn browsing_shows_nick() {
-        let f = presence_to_activity_fields(&Presence::Browsing { nick: "Steve".into() });
+        let f = presence_to_activity_fields(&Presence::Browsing {
+            nick: "Steve".into(),
+        });
         assert_eq!(f.details, "Сидит в лаунчере");
         assert_eq!(f.state, Some("Steve".to_string()));
         assert_eq!(f.small_image, Some("idle"));
@@ -251,7 +255,9 @@ mod tests {
 
     #[test]
     fn downloading_shows_nick() {
-        let f = presence_to_activity_fields(&Presence::Downloading { nick: "Steve".into() });
+        let f = presence_to_activity_fields(&Presence::Downloading {
+            nick: "Steve".into(),
+        });
         assert_eq!(f.details, "Загружает сборку");
         assert_eq!(f.state, Some("Steve".to_string()));
         assert_eq!(f.small_image, Some("download"));
@@ -259,7 +265,9 @@ mod tests {
 
     #[test]
     fn playing_shows_nick() {
-        let f = presence_to_activity_fields(&Presence::Playing { nick: "Steve".into() });
+        let f = presence_to_activity_fields(&Presence::Playing {
+            nick: "Steve".into(),
+        });
         // details не повторяет имя сервера/приложения (Discord и так его показывает).
         assert_eq!(f.details, "Играет на сервере");
         assert_eq!(f.state, Some("Steve".to_string()));

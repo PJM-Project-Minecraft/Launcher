@@ -6,10 +6,10 @@ mod agents;
 mod handshake;
 mod hwid;
 mod inject;
+pub mod kick;
 mod manifest;
 mod scan;
 mod selfdebug;
-pub mod kick;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -72,7 +72,9 @@ impl LaunchGuard {
             }),
             handshake::InitOutcome::Blocked(reason) => Err(reason),
             handshake::InitOutcome::UpdateRequired(message) => Err(message),
-            handshake::InitOutcome::PolicyRequired => Err(handshake::POLICY_REQUIRED_ERR.to_string()),
+            handshake::InitOutcome::PolicyRequired => {
+                Err(handshake::POLICY_REQUIRED_ERR.to_string())
+            }
             // fail-open: недоступность бэкенда не блокирует игрока.
             handshake::InitOutcome::Unavailable => Ok(Self {
                 launch_token: String::new(),
@@ -180,7 +182,11 @@ pub fn spawn_ingame_scan(
             // Отладчик, подключённый к лаунчеру уже во время игры (один раз за сессию).
             if !debugger_reported && selfdebug::debugger_present() {
                 debugger_reported = true;
-                scan::report_detection(&api_url, &launch_token, &scan::Detection::launcher_debugger());
+                scan::report_detection(
+                    &api_url,
+                    &launch_token,
+                    &scan::Detection::launcher_debugger(),
+                );
             }
         });
     })

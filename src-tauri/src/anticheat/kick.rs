@@ -29,6 +29,18 @@ impl KickReason {
 
     /// Текст уведомления игроку (с KICK_PREFIX в начале — по нему UI отличает kick).
     pub fn into_alert(self) -> String {
+        if self.0 == "launcher-update-required" {
+            return format!(
+                "{}Вышло обязательное обновление лаунчера. Игра закрыта, чтобы обновить клиент. Перезапустите лаунчер и запустите игру снова.",
+                KICK_PREFIX
+            );
+        }
+        if self.0 == "unknown-mod" {
+            return format!(
+                "{}Состав сборки изменён: найден лишний, заменённый или повреждённый мод. Игра закрыта без блокировки аккаунта. Запустите её снова — лаунчер восстановит файлы.",
+                KICK_PREFIX
+            );
+        }
         let detail = match self.0.as_str() {
             "illegal-class-name" => "обнаружена инъекция стороннего кода (чит-клиент)",
             "inject" => "обнаружена инъекция стороннего кода",
@@ -69,6 +81,12 @@ mod tests {
         assert!(KickReason(String::new())
             .into_alert()
             .contains("попытка вмешательства"));
+        assert!(KickReason("unknown-mod".to_string())
+            .into_alert()
+            .contains("без блокировки аккаунта"));
+        assert!(KickReason("launcher-update-required".to_string())
+            .into_alert()
+            .contains("обязательное обновление"));
         // Неизвестная причина проходит как есть.
         assert!(KickReason("custom-x".to_string())
             .into_alert()

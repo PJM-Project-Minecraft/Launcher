@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "npm run dev:launcher",
-    "dev:launcher": "sh -c '. \"$HOME/.cargo/env\" 2>/dev/null || true; cargo run --manifest-path launcher-slint/Cargo.toml'",
-    "dev:web": "vite --host 127.0.0.1",
+    "dev:launcher": "tauri dev",
+    "dev:web": "vite --host 127.0.0.1 --port 1420",
     "build": "npm run build:launcher",
     "build:web": "tsc && vite build",
-    "build:launcher": "sh -c '. \"$HOME/.cargo/env\" 2>/dev/null || true; cargo build --release --manifest-path launcher-slint/Cargo.toml'",
+    "build:launcher": "tauri build --no-bundle",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev"
@@ -18,16 +18,14 @@
     "@tauri-apps/api": "^2.11.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-router-dom": "^7.10.1",
-    "zustand": "^5.0.14"
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@vitejs/plugin-react": "^4.7.0",
     "typescript": "^5.9.3",
-    "vite": "^8.0.16"
+    "vite": "^6.4.3"
   }
 }

@@ -10,10 +10,10 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `launcher-slint/` — десктоп-лаунчер на Rust + Slint. Текущая версия: `0.4.5` (в `Cargo.toml`).
+- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.0` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
-- `src/` + Vite — **легаси** React-прототип UI, для лаунчера не нужен (`npm run dev:web`).
+- `src/` + React/Vite — production-интерфейс десктоп-лаунчера.
 
 Артефакты агентов (`backend/data/`):
 - `libanticheat.so`, `anticheat.dll` — нативный JVMTI-агент (собирается через `anticheat-native/build.sh`)
@@ -35,8 +35,8 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 
 Отдельные части:
 ```bash
-npm run dev:launcher      # cargo run -p launcher-slint (десктоп-лаунчер)
-npm run build:launcher    # cargo build --release
+npm run dev:launcher      # Tauri 2 + Vite dev server
+npm run build:launcher    # production frontend + Rust binary
 npm run dev:dashboard     # next dev на 127.0.0.1:3000
 npm run build:dashboard   # next build (включает проверку типов; eslint не настроен)
 ```
@@ -69,7 +69,8 @@ docker run --rm \
 scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 # либо переменная LAUNCHER_API_URL при cargo build/run
 ```
-Версия бампится в `launcher-slint/Cargo.toml` → обязательно `cargo update -p launcher-slint` после правки.
+Версия бампится одновременно в `src-tauri/Cargo.toml` и `src-tauri/tauri.conf.json` →
+обязательно `cargo update -p project-minecraft-launcher` после правки.
 
 ---
 
@@ -161,7 +162,7 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
    `proxy_buffering off` (SSE), таймауты 3600 (скачивание сборок),
    `X-Forwarded-For $remote_addr` **перезаписью** (клиент не должен подсовывать чужой IP
    в ключ брутфорс-лимитера).
-2. Прописать в `EXTRA_API_MIRRORS` (`launcher-slint/src/main.rs`), бампнуть версию,
+2. Прописать в `EXTRA_API_MIRRORS` (`src-tauri/src/main.rs`), бампнуть версию,
    собрать и залить релиз — список зеркал вшит в лаунчер, не приходит с бэкенда.
 3. Проверка: `curl https://mirror.likonchik.xyz/api/policy` → 200 JSON, плюс
    `tail /var/log/nginx/mirror.log` на Latvia (в логе видны `$server_port`/`$scheme`).
@@ -254,15 +255,16 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 
 ---
 
-## Десктоп-лаунчер (launcher-slint)
+## Десктоп-лаунчер (Tauri 2)
 
 Проект-ориентированный: игрок не выбирает game-dir в v1. Поток: логин → JWT в
 системном keyring → загрузка активных профилей с бэкенда → скачивание выбранного
 профиля в app data → проверка SHA-256 → удаление только файлов из прошлого
 локального манифеста → запуск команды профиля **без shell**.
 
-`src/main.rs` — вся логика (HTTP-клиент, манифесты, запуск Java); UI в `ui/app.slint`.
-`src/anticheat/` — HWID-сбор и локальное сканирование.
+`src-tauri/src/main.rs` — orchestration (HTTP-клиент, манифесты, запуск Java),
+`src-tauri/src/ui_bridge.rs` — единое сериализуемое UI-state + IPC callbacks,
+`src/` — React-интерфейс. `src-tauri/src/anticheat/` — HWID и локальное сканирование.
 URL бэкенда: env `LAUNCHER_API_URL` или зашитый при сборке `LAUNCHER_DEFAULT_API_URL`.
 
 Автообновление: `src/updater.rs` — проверка при старте / по SSE / раз в 30 мин,
@@ -278,26 +280,10 @@ MC мгновенно выходит. Профили НЕ мигрируются
 **В backend-образе есть Temurin 21 JRE** (нужен для `PrepareClient` — headless-установщик
 NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Java 8 (старый Forge 1.12) не добавлена.
 
-**Slint-гочи:**
-
-1. **Layout + width:** `HorizontalLayout`/`VerticalLayout` как один из нескольких детей элемента
-   не фиксирует ширину — `width: parent.width` и `min-width: 0px` на дочерних `Text` игнорируются,
-   layout берёт ширину по контенту. Чинить **абсолютным позиционированием** с явными `x`/`width`
-   (как сделан весь `ui/app.slint`). При заданном `width` у `Text` корректно работает `overflow: elide`.
-
-2. **Скриншот виджета** (машина пользователя, X11 `:1`, есть wmctrl/ffmpeg):
-   ```bash
-   # 1. cargo install slint-viewer
-   # 2. Создать ui/preview.slint с тестовым компонентом; title: "SLINT_PREVIEW_WIDGET"
-   #    (не "Project Minecraft Launcher" — иначе wmctrl схватит реальный лаунчер)
-   # 3. Запустить через run_in_background: slint-viewer <abs>/ui/preview.slint
-   # 4. wmctrl -lG | grep "SLINT_PREVIEW_WIDGET" → x,y,w,h,id
-   # 5. wmctrl -i -a <id> && sleep 1.5
-   # 6. ffmpeg -f x11grab -video_size 1920x1080 -i :1 -frames:v 1 -update 1 /tmp/full.png
-   #    ffmpeg -i /tmp/full.png -vf "crop=W:H:X:Y" /tmp/crop.png
-   # 7. pkill -x slint-viewer  ← ТОЛЬКО -x, не -f (иначе убьёт шелл)
-   ```
-   Ждать освобождения file lock после `cargo build` перед запуском viewer.
+**Tauri-гочи:** `npm run build:web` должен пройти до прямого `cargo build`, потому что
+`tauri-build` встраивает `../dist`. Linux-сборке нужны WebKitGTK 4.1 и GTK runtime;
+Windows использует WebView2. Состояние Rust→React идёт целиком событием `launcher-state`,
+а команды React→Rust — через `launcher_action`; пароль в Rust-state не сохраняется.
 
 ---
 
@@ -434,7 +420,8 @@ NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Jav
   Блокирует включение `PROFILE_CDN_BASE`: 0.4.0 шлёт bearer на бакет и ловит 400 на каждом файле.
 - **0.4.0** (видимые ошибки синка на карточке + `sync-errors.log` + детект мгновенного краша игры с `launch.log`) — залит на прод.
 - **0.3.8** (политика конфиденциальности) — залит на прод 04.07.2026.
-- Версия бампится в `launcher-slint/Cargo.toml` → после правки `cargo update -p launcher-slint`.
+- Версия бампится в `src-tauri/Cargo.toml` и `src-tauri/tauri.conf.json` → после правки
+  `cargo update -p project-minecraft-launcher`.
 
 Workflow заливки:
 1. Собрать оба бинарника В CI: `gh workflow run build-launcher.yml -f api_url=https://launcher.likonchik.xyz`

@@ -1,10 +1,11 @@
 [package]
-name = "launcher-slint"
-version = "0.4.9"
+name = "project-minecraft-launcher"
+version = "0.5.0"
 edition = "2021"
 build = "build.rs"
 
 [dependencies]
+base64 = "0.22"
 directories = "6"
 discord-rich-presence = "1.1"
 # Системное хранилище токена. Бэкенды подключаются ТОЛЬКО фичами: без них крейт
@@ -27,7 +28,7 @@ sha2 = "0.10"
 # Проверка подписи автообновления (публичный ключ вшивается при сборке).
 ed25519-dalek = "2"
 hex = "0.4"
-slint = "1.16.1"
+tauri = { version = "2.11", features = [] }
 tar = "0.4"
 zstd = "0.13"
 
@@ -40,8 +41,7 @@ obfstr = "0.4"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug"] }
 
 [build-dependencies]
-slint-build = "1.16.1"
-winresource = "0.1"
+tauri-build = { version = "2.5", features = [] }
 
 # Релиз-профиль: максимальная стойкость к реверс-инжинирингу бинарника.
 [profile.release]

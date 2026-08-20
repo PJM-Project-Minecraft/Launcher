@@ -229,8 +229,8 @@ fn verify_signature(data: &[u8], sig_hex: &str) -> Result<(), String> {
     let Some(pubkey) = update_pubkey() else {
         return Ok(());
     };
-    let sig_bytes =
-        hex::decode(sig_hex.trim()).map_err(|_| "Обновление без корректной подписи.".to_string())?;
+    let sig_bytes = hex::decode(sig_hex.trim())
+        .map_err(|_| "Обновление без корректной подписи.".to_string())?;
     let arr: [u8; 64] = sig_bytes
         .try_into()
         .map_err(|_| "Обновление без корректной подписи.".to_string())?;
@@ -348,6 +348,8 @@ mod tests {
             PathBuf::from("/opt/launcher/launcher-slint.update.partial")
         );
         let staged_win = staging_path(Path::new("C:/launcher/launcher.exe"));
-        assert!(staged_win.to_string_lossy().ends_with("launcher.update.partial"));
+        assert!(staged_win
+            .to_string_lossy()
+            .ends_with("launcher.update.partial"));
     }
 }

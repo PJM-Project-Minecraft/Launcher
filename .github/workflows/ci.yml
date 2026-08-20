@@ -24,18 +24,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci && npm run build:web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: launcher-slint
+          workspaces: src-tauri
       - run: cargo check --locked
-        working-directory: launcher-slint
+        working-directory: src-tauri
       # Тесты лаунчера гоняем здесь же: в них лежат проверки безопасности (маркер версии
       # обновления, safe_join, сверка SHA артефактов до установки) — без них CI пропускал
       # регрессии, которые видны только в рантайме у игрока.
       - run: cargo test --locked
-        working-directory: launcher-slint
+        working-directory: src-tauri
 
   # Нативный JVMTI-агент собирается вне Go/Rust/Node, поэтому раньше CI его вообще не
   # компилировал: ошибка в C всплывала только при ручной сборке перед выкаткой.

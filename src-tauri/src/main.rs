@@ -12,13 +12,17 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use directories::ProjectDirs;
 use rayon::prelude::*;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
+use tauri::Manager;
+
+use ui_bridge::{invoke_from_ui, AppWindow, NewsItem, SharedString, UiState, Weak};
 
 mod anticheat;
 mod artifacts;
@@ -26,9 +30,8 @@ mod bundle;
 mod discord_rpc;
 mod gpu;
 mod install;
+mod ui_bridge;
 mod updater;
-
-slint::include_modules!();
 
 const KEYRING_SERVICE: &str = "xyz.projectminecraft.launcher";
 const KEYRING_USER: &str = "launcher-auth-token";
@@ -37,13 +40,12 @@ const JAVA_RUNTIME_INDEX_URL: &str =
 const DEFAULT_MEMORY_GB: i32 = 8;
 const MIN_MEMORY_GB: i32 = 2;
 const MAX_MEMORY_GB: i32 = 64;
+static MANIFEST_CACHE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Зеркала бэкенда: игрок выбирает на окне входа, если основной домен недоступен.
 /// Первым пунктом всегда идёт вшитый при сборке URL («Основной»), сюда — только
 /// дополнительные адреса. Дубликат основного URL отсеивается в `api_mirrors`.
-const EXTRA_API_MIRRORS: &[(&str, &str)] = &[
-    ("Зеркало", "https://mirror.likonchik.xyz"),
-];
+const EXTRA_API_MIRRORS: &[(&str, &str)] = &[("Зеркало", "https://mirror.likonchik.xyz")];
 
 /// Таймаут пинга зеркала. Короткий: это подсказка в списке, а не проверка здоровья.
 const MIRROR_PING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,6 +110,18 @@ fn best_ping_index(pings: &[Option<u128>]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Доступные адреса от самого быстрого к самому медленному. При равной задержке
+/// сохраняется исходный порядок, поэтому основной сервер имеет приоритет.
+fn ranked_ping_indices(pings: &[Option<u128>]) -> Vec<usize> {
+    let mut ranked = pings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ping)| ping.map(|ms| (index, ms)))
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(index, ms)| (*ms, *index));
+    ranked.into_iter().map(|(index, _)| index).collect()
+}
+
 /// Пинг зеркала: время ответа публичного `/api/policy`. None — сеть/не-2xx, т.е.
 /// зеркало непригодно (домен режется, прокси лежит).
 ///
@@ -133,6 +147,33 @@ fn mirror_label(name: &str, ping_ms: Option<u128>) -> String {
     match ping_ms {
         Some(ms) => format!("{name} — {ms} мс"),
         None => format!("{name} — недоступен"),
+    }
+}
+
+fn probe_mirrors(mirrors: &[(String, String)]) -> Vec<Option<u128>> {
+    thread::scope(|scope| {
+        let handles = mirrors
+            .iter()
+            .map(|(_, url)| scope.spawn(move || ping_mirror(url)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or(None))
+            .collect()
+    })
+}
+
+fn update_mirror_labels(
+    app_weak: &Weak<AppWindow>,
+    mirrors: &[(String, String)],
+    pings: &[Option<u128>],
+) {
+    for (index, ((name, _), ms)) in mirrors.iter().zip(pings.iter()).enumerate() {
+        let label = mirror_label(name, *ms);
+        let app_weak = app_weak.clone();
+        let _ = app_weak.upgrade_in_event_loop(move |app| {
+            app.set_server_name(index + 1, label);
+        });
     }
 }
 
@@ -276,11 +317,16 @@ fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc
 }
 
 /// Пробрасывает состояние обновления в UI-свойства (из любого потока).
-fn set_update_ui(app_weak: &Weak<AppWindow>, info: &updater::UpdateInfo, ready: bool, status: String) {
+fn set_update_ui(
+    app_weak: &Weak<AppWindow>,
+    info: &updater::UpdateInfo,
+    ready: bool,
+    status: String,
+) {
     let app_weak = app_weak.clone();
     let version = info.latest_version.clone();
     let mandatory = info.mandatory;
-    let _ = slint::invoke_from_event_loop(move || {
+    let _ = invoke_from_ui(move || {
         if let Some(app) = app_weak.upgrade() {
             app.set_update_ready(ready);
             app.set_update_mandatory(mandatory);
@@ -295,11 +341,7 @@ fn register_update_restart_handler(app: &AppWindow) {
     let app_weak = app.as_weak();
     app.on_update_restart_requested(move || {
         let shared = update_shared();
-        let staged = shared
-            .staged
-            .lock()
-            .ok()
-            .and_then(|staged| staged.clone());
+        let staged = shared.staged.lock().ok().and_then(|staged| staged.clone());
         let Some((info, staged_path)) = staged else {
             return;
         };
@@ -575,9 +617,37 @@ struct ProfilePaths {
     manifest_path: PathBuf,
 }
 
-fn main() -> Result<(), slint::PlatformError> {
-    std::env::set_var("SLINT_SCALE_FACTOR", "0.95");
+fn main() {
+    tauri::Builder::default()
+        .setup(|tauri_app| {
+            let app = AppWindow::new(tauri_app.handle().clone());
+            initialize_launcher(&app);
+            tauri_app.manage(app);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_launcher_state,
+            launcher_action
+        ])
+        .run(tauri::generate_context!())
+        .expect("не удалось запустить Project Minecraft Launcher");
+}
 
+#[tauri::command]
+fn get_launcher_state(app: tauri::State<'_, AppWindow>) -> UiState {
+    app.snapshot()
+}
+
+#[tauri::command]
+fn launcher_action(
+    action: String,
+    payload: Option<Value>,
+    app: tauri::State<'_, AppWindow>,
+) -> Result<(), String> {
+    app.dispatch(&action, payload.unwrap_or(Value::Null))
+}
+
+fn initialize_launcher(app: &AppWindow) {
     let default_api_url = option_env!("LAUNCHER_DEFAULT_API_URL")
         .unwrap_or("http://127.0.0.1:8080")
         .to_string();
@@ -596,17 +666,23 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Discord Rich Presence (опционально). Client ID — из env при сборке или
     // константы-плейсхолдера; при "0" rpc_init — no-op.
-    let discord_client_id = option_env!("DISCORD_CLIENT_ID")
-        .unwrap_or(discord_rpc::DEFAULT_DISCORD_CLIENT_ID);
+    let discord_client_id =
+        option_env!("DISCORD_CLIENT_ID").unwrap_or(discord_rpc::DEFAULT_DISCORD_CLIENT_ID);
     discord_rpc::rpc_init(discord_client_id);
 
-    let app = AppWindow::new()?;
     // Автообновление: подчищаем следы прошлой установки и проверяем новую
     // версию при старте (до логина — эндпоинт публичный).
     updater::cleanup_leftovers();
-    app.window().set_size(slint::LogicalSize::new(1152.0, 720.0));
     app.set_api_url(config.api_url().into());
-    register_mirror_handler(&app, config.clone(), mirrors, server_idx);
+    let saved_token = read_token().ok().filter(|token| !token.trim().is_empty());
+    let restoring_through_auto = saved_token.is_some() && server_idx == 0;
+    register_mirror_handler(
+        app,
+        config.clone(),
+        mirrors.clone(),
+        server_idx,
+        !restoring_through_auto,
+    );
     app.set_message("Готов к входу.".into());
     app.set_profile_status("Offline".into());
     app.set_selected_profile_name(SharedString::default());
@@ -621,37 +697,44 @@ fn main() -> Result<(), slint::PlatformError> {
     // Поколение сессии: при логине/перелогине увеличивается, что останавливает
     // фоновый SSE-слушатель предыдущей сессии (см. start_profile_event_listener).
     let session_generation = Arc::new(AtomicU64::new(0));
-    apply_launcher_settings(&app, &load_settings().unwrap_or_default());
+    apply_launcher_settings(app, &load_settings().unwrap_or_default());
     {
         let settings = load_settings().unwrap_or_default();
         discord_rpc::rpc_set_enabled(settings.discord_rpc_enabled);
         discord_rpc::rpc_set(discord_rpc::Presence::Idle);
     }
-    apply_install_folder_label(&app);
+    apply_install_folder_label(app);
 
-    register_login_handler(&app, config.clone(), state.clone(), session_generation.clone());
-    register_policy_accept_handler(&app, config.clone(), state.clone());
+    register_login_handler(
+        app,
+        config.clone(),
+        state.clone(),
+        session_generation.clone(),
+    );
+    register_policy_accept_handler(app, config.clone(), state.clone());
     let migration_active = Arc::new(AtomicBool::new(false));
     register_logout_handler(
-        &app,
+        app,
         state.clone(),
         session_generation.clone(),
         migration_active.clone(),
+        config.clone(),
+        mirrors.clone(),
     );
-    register_settings_handler(&app, state.clone(), migration_active.clone());
-    register_play_handler(&app, config.clone(), state.clone(), migration_active);
-    register_update_restart_handler(&app);
+    register_settings_handler(app, state.clone(), migration_active.clone());
+    register_play_handler(app, config.clone(), state.clone(), migration_active);
+    register_update_restart_handler(app);
     spawn_update_check(app.as_weak(), config.clone());
     start_periodic_update_check(app.as_weak(), config.clone());
-    restore_saved_session(&app, config, state, session_generation);
-
-    app.window().on_close_requested(|| {
-        let _ = slint::quit_event_loop();
-        slint::CloseRequestResponse::HideWindow
-    });
-
-    app.show()?;
-    slint::run_event_loop_until_quit()
+    restore_saved_session(
+        app,
+        config,
+        state,
+        session_generation,
+        saved_token,
+        mirrors,
+        server_idx,
+    );
 }
 
 fn register_login_handler(
@@ -686,7 +769,7 @@ fn register_login_handler(
         let generation = generation.clone();
         thread::spawn(move || {
             let result = login_and_bootstrap(&config, login, password, totp);
-            let _ = slint::invoke_from_event_loop(move || {
+            let _ = invoke_from_ui(move || {
                 if let Some(app) = app_weak.upgrade() {
                     app.set_is_loading(false);
                     match result {
@@ -720,7 +803,9 @@ fn register_policy_accept_handler(
     let app_weak = app.as_weak();
     let state = state.clone();
     app.on_policy_accept_requested(move || {
-        let Some(app) = app_weak.upgrade() else { return };
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
         // Защита от двойного клика: игнорируем повторный вызов пока запрос выполняется.
         if app.get_policy_accepting() {
             return;
@@ -743,8 +828,10 @@ fn register_policy_accept_handler(
             } else {
                 None
             };
-            let _ = slint::invoke_from_event_loop(move || {
-                let Some(app) = app_weak.upgrade() else { return };
+            let _ = invoke_from_ui(move || {
+                let Some(app) = app_weak.upgrade() else {
+                    return;
+                };
                 match result {
                     Ok(()) => {
                         app.set_policy_accepting(false);
@@ -771,6 +858,8 @@ fn register_logout_handler(
     state: Arc<Mutex<RuntimeState>>,
     generation: Arc<AtomicU64>,
     migration_active: Arc<AtomicBool>,
+    config: AppConfig,
+    mirrors: Vec<(String, String)>,
 ) {
     let logout_app = app.as_weak();
     app.on_logout_requested(move || {
@@ -807,6 +896,24 @@ fn register_logout_handler(
             app.set_policy_visible(false);
             apply_install_folder_label(&app);
             app.set_message("Сессия завершена.".into());
+
+            // Выбор сервера, сделанный в настройках во время живой игровой сессии,
+            // применяется только теперь: до logout менять backend нельзя, потому что
+            // yggdrasil-сессия и JWT принадлежат адресу, на котором начался вход.
+            let selected = load_settings().unwrap_or_default().api_url;
+            let index = server_item_index(&mirrors, selected.as_deref());
+            app.set_server_index(index as i32);
+            if index == 0 {
+                if let Some((_, url)) = mirrors.first() {
+                    config.set_api_url(url);
+                    app.set_api_url(url.clone());
+                }
+                spawn_mirror_probe(app.as_weak(), config.clone(), mirrors.clone(), true);
+            } else if let Some((name, url)) = mirrors.get(index - 1) {
+                config.set_api_url(url);
+                app.set_api_url(url.clone());
+                app.set_message(format!("Сессия завершена. Сервер: {name}").into());
+            }
         }
     });
 }
@@ -1008,7 +1115,7 @@ fn register_settings_handler(
             PROFILE_SYNC_ACTIVE.store(false, Ordering::SeqCst);
             active.store(false, Ordering::SeqCst);
 
-            let _ = slint::invoke_from_event_loop(move || {
+            let _ = invoke_from_ui(move || {
                 if let Some(app) = app_weak.upgrade() {
                     app.set_is_syncing(false);
                     match result {
@@ -1178,7 +1285,7 @@ fn register_play_handler(
             let refresh_token = token.clone();
             let refresh_user = user.clone();
             let refresh_profile = profile.clone();
-            let _ = slint::invoke_from_event_loop(move || {
+            let _ = invoke_from_ui(move || {
                 if let Some(app) = app_weak.upgrade() {
                     apply_install_folder_label(&app);
                     discord_rpc::rpc_set(discord_rpc::Presence::Browsing {
@@ -1222,7 +1329,7 @@ fn register_play_handler(
                                 let app_weak_bg = app_weak.clone();
                                 thread::spawn(move || {
                                     let policy = fetch_policy(&config_bg);
-                                    let _ = slint::invoke_from_event_loop(move || {
+                                    let _ = invoke_from_ui(move || {
                                         let Some(app) = app_weak_bg.upgrade() else { return };
                                         if let Ok(p) = policy {
                                             app.set_policy_text(p.text.into());
@@ -1281,8 +1388,8 @@ fn choose_initial_install_root(
     }
     if configured_root.is_none()
         && profile_paths_at_root(user, &profile.id, &default_root)?
-        .manifest_path
-        .is_file()
+            .manifest_path
+            .is_file()
     {
         return Ok(Some(InitialInstallLocation::Current));
     }
@@ -1307,30 +1414,93 @@ fn restore_saved_session(
     config: AppConfig,
     state: Arc<Mutex<RuntimeState>>,
     generation: Arc<AtomicU64>,
+    token: Option<String>,
+    mirrors: Vec<(String, String)>,
+    server_idx: usize,
 ) {
-    let token = match read_token() {
-        Ok(token) if !token.trim().is_empty() => token,
-        _ => return,
+    let Some(token) = token else {
+        app.set_is_loading(false);
+        app.set_session_restoring(false);
+        return;
     };
 
+    app.set_session_restoring(true);
     app.set_is_loading(true);
-    app.set_message("Восстанавливаем сессию...".into());
+    app.set_message("Восстанавливаем сохранённую сессию…".into());
     discord_rpc::rpc_set(discord_rpc::Presence::LoggingIn);
 
     let app_weak = app.as_weak();
     thread::spawn(move || {
-        let result = restore_session(&config, token);
-        let _ = slint::invoke_from_event_loop(move || {
+        // В ручном режиме уважаем выбранный адрес. В «Авто» сначала параллельно
+        // измеряем все зеркала, затем пробуем восстановление от быстрого к медленному.
+        // Так мёртвый основной домен не превращает валидный сохранённый токен в экран
+        // входа, если доступное зеркало уже отвечает.
+        let auto_mode = server_idx == 0;
+        let pings = auto_mode.then(|| probe_mirrors(&mirrors));
+        if let Some(pings) = &pings {
+            update_mirror_labels(&app_weak, &mirrors, pings);
+        }
+        let mut candidates = if let Some(pings) = &pings {
+            ranked_ping_indices(pings)
+        } else {
+            vec![server_idx.saturating_sub(1)]
+        };
+        if candidates.is_empty() && !mirrors.is_empty() {
+            candidates.push(0);
+        }
+
+        let mut restored = None;
+        let mut last_error = "Ни один сервер не ответил.".to_string();
+        for index in candidates {
+            let Some((name, url)) = mirrors.get(index) else {
+                continue;
+            };
+            config.set_api_url(url);
+            match restore_session(&config, token.clone()) {
+                Ok(session) => {
+                    restored = Some((session, name.clone(), url.clone(), index));
+                    break;
+                }
+                Err(message) => {
+                    let invalid = should_forget_saved_session(&message);
+                    last_error = message;
+                    if invalid {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = invoke_from_ui(move || {
             if let Some(app) = app_weak.upgrade() {
+                app.set_session_restoring(false);
                 app.set_is_loading(false);
-                match result {
-                    Ok(session) => apply_session(&app, &state, &config, &generation, session),
-                    Err(message) => {
-                        discord_rpc::rpc_set(discord_rpc::Presence::Idle);
-                        if should_forget_saved_session(&message) {
-                            let _ = delete_token();
+                match restored {
+                    Some((mut session, name, url, index)) => {
+                        config.set_api_url(&url);
+                        app.set_api_url(url);
+                        if auto_mode {
+                            let latency = pings
+                                .as_ref()
+                                .and_then(|values| values.get(index))
+                                .and_then(|value| *value)
+                                .map(|ms| format!(" — {ms} мс"))
+                                .unwrap_or_default();
+                            app.set_server_name(0, format!("{AUTO_SERVER_LABEL}: {name}"));
+                            session.message =
+                                format!("Сессия восстановлена через {name}{latency}.");
                         }
-                        app.set_message(message.into());
+                        apply_session(&app, &state, &config, &generation, session);
+                    }
+                    None => {
+                        discord_rpc::rpc_set(discord_rpc::Presence::Idle);
+                        if should_forget_saved_session(&last_error) {
+                            let _ = delete_token();
+                            app.set_message("Сохранённая сессия истекла. Войдите снова.".into());
+                        } else {
+                            app.set_message(
+                                format!("Не удалось восстановить сессию: {last_error}").into(),
+                            );
+                        }
                     }
                 }
             }
@@ -1365,13 +1535,31 @@ fn login_and_bootstrap(
 
 fn restore_session(config: &AppConfig, token: String) -> Result<SessionData, String> {
     let user = current_user(config, &token)?;
+    let expires_at = token_expiry_label(&token);
     bootstrap_session(
         config,
         token,
         user,
-        String::default(),
+        expires_at,
         "Сессия восстановлена.".to_string(),
     )
+}
+
+fn token_expiry_label(token: &str) -> String {
+    let Some(payload) = token.split('.').nth(1) else {
+        return String::new();
+    };
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return String::new();
+    };
+    value
+        .get("exp")
+        .and_then(Value::as_u64)
+        .map(format_log_timestamp)
+        .unwrap_or_default()
 }
 
 fn bootstrap_session(
@@ -1465,7 +1653,7 @@ fn apply_session(
             body: item.body.clone().into(),
         })
         .collect();
-    app.set_news_items(ModelRc::new(VecModel::from(news_model)));
+    app.set_news_items(news_model);
 
     apply_install_folder_label(app);
 
@@ -1516,25 +1704,19 @@ fn start_local_profile_watch(
                 Ok(state) => state.clone(),
                 Err(_) => return,
             };
-            let (Some(user), Some(profile)) =
-                (snapshot.user.as_ref(), selected_profile(&snapshot))
+            let (Some(user), Some(profile)) = (snapshot.user.as_ref(), selected_profile(&snapshot))
             else {
                 continue;
             };
             audit_tick = audit_tick.wrapping_add(1);
-            let force_hash = audit_tick >= 12
-                && !PROFILE_SYNC_ACTIVE.load(Ordering::SeqCst);
+            let force_hash = audit_tick >= 12 && !PROFILE_SYNC_ACTIVE.load(Ordering::SeqCst);
             if audit_tick >= 12 {
                 audit_tick = 0;
             }
-            let detected_state = local_profile_files_changed(
-                user,
-                &profile,
-                &mut verified_mtimes,
-                force_hash,
-            )
-            .ok()
-            .flatten();
+            let detected_state =
+                local_profile_files_changed(user, &profile, &mut verified_mtimes, force_hash)
+                    .ok()
+                    .flatten();
             let Some(detected_state) = detected_state else {
                 continue;
             };
@@ -1543,7 +1725,7 @@ fn start_local_profile_watch(
             let expected_profile = profile.id.clone();
             let app_weak = app_weak.clone();
             let current_state = Arc::clone(&state);
-            let _ = slint::invoke_from_event_loop(move || {
+            let _ = invoke_from_ui(move || {
                 let still_current = current_state.lock().is_ok_and(|state| {
                     state
                         .user
@@ -1579,8 +1761,8 @@ fn local_profile_files_changed_at(
     }
     let data = fs::read_to_string(&paths.manifest_path)
         .map_err(|_| "Не удалось прочитать локальный manifest.".to_string())?;
-    let local: LocalManifest = serde_json::from_str(&data)
-        .map_err(|_| "Локальный manifest повреждён.".to_string())?;
+    let local: LocalManifest =
+        serde_json::from_str(&data).map_err(|_| "Локальный manifest повреждён.".to_string())?;
     for file in local.files {
         let path = safe_join(&paths.files_root, &file.path)?;
         let metadata = match fs::symlink_metadata(&path) {
@@ -1671,7 +1853,7 @@ fn refresh_profile_install_state(
             .as_ref()
             .is_ok_and(|paths| paths.manifest_path.is_file());
         let install_state = match paths {
-            Ok(paths) => match fetch_manifest(&config, &token, &profile.id) {
+            Ok(paths) => match fetch_manifest(&config, &token, &profile.id, &paths) {
                 Ok(manifest) => profile_install_state(&paths, &manifest)
                     .unwrap_or(ProfileInstallState::UpdateAvailable),
                 Err(_) if had_local_manifest => ProfileInstallState::Unknown,
@@ -1679,7 +1861,7 @@ fn refresh_profile_install_state(
             },
             Err(_) => ProfileInstallState::Missing,
         };
-        let _ = slint::invoke_from_event_loop(move || {
+        let _ = invoke_from_ui(move || {
             if let Some(app) = app_weak.upgrade() {
                 let still_current = runtime_state.lock().is_ok_and(|state| {
                     state
@@ -1687,7 +1869,8 @@ fn refresh_profile_install_state(
                         .as_ref()
                         .is_some_and(|user| user.provider_uuid == expected_user_uuid)
                         && state.selected_profile_id.as_deref() == Some(profile.id.as_str())
-                }) && PROFILE_CHECK_SEQUENCE.load(Ordering::SeqCst) == check_sequence;
+                }) && PROFILE_CHECK_SEQUENCE.load(Ordering::SeqCst)
+                    == check_sequence;
                 if app.get_is_authenticated() && still_current {
                     if install_state == ProfileInstallState::Unknown
                         && app.get_profile_update_available()
@@ -1710,8 +1893,8 @@ fn profile_install_state(
     }
     let data = fs::read_to_string(&paths.manifest_path)
         .map_err(|_| "Не удалось прочитать локальный manifest.".to_string())?;
-    let local: LocalManifest = serde_json::from_str(&data)
-        .map_err(|_| "Локальный manifest повреждён.".to_string())?;
+    let local: LocalManifest =
+        serde_json::from_str(&data).map_err(|_| "Локальный manifest повреждён.".to_string())?;
     if local.profile_id != manifest.profile.id
         || local.manifest_version != manifest.profile.manifest_version
         || local.files.len() != manifest.files.len()
@@ -1724,9 +1907,9 @@ fn profile_install_state(
         .map(|file| (file.path.as_str(), file))
         .collect::<HashMap<_, _>>();
     if manifest.files.iter().any(|file| {
-        local_files.get(file.path.as_str()).is_none_or(|local| {
-            local.hash_sha256 != file.hash_sha256 || local.size != file.size
-        })
+        local_files
+            .get(file.path.as_str())
+            .is_none_or(|local| local.hash_sha256 != file.hash_sha256 || local.size != file.size)
     }) {
         return Ok(ProfileInstallState::UpdateAvailable);
     }
@@ -1898,8 +2081,8 @@ fn refresh_profiles_now(
         .lock()
         .ok()
         .and_then(|state| state.user.as_ref().map(|user| user.provider_uuid.clone()));
-    let selected_id = user_uuid
-        .and_then(|uuid| choose_profile_for_user(&uuid, &profiles).ok().flatten());
+    let selected_id =
+        user_uuid.and_then(|uuid| choose_profile_for_user(&uuid, &profiles).ok().flatten());
 
     if let Ok(mut state) = state.lock() {
         state.profiles = profiles.clone();
@@ -1910,17 +2093,14 @@ fn refresh_profiles_now(
         .as_ref()
         .and_then(|id| profiles.iter().find(|profile| &profile.id == id))
         .cloned();
-    let user = state
-        .lock()
-        .ok()
-        .and_then(|state| state.user.clone());
+    let user = state.lock().ok().and_then(|state| state.user.clone());
     let app_weak = app_weak.clone();
     let install_app = app_weak.clone();
     let install_runtime = Arc::clone(state);
     let install_config = config.clone();
     let install_token = token.clone();
     let install_profile = selected.clone();
-    let _ = slint::invoke_from_event_loop(move || {
+    let _ = invoke_from_ui(move || {
         if let Some(app) = app_weak.upgrade() {
             set_profile_ui(&app, selected.as_ref());
         }
@@ -1995,7 +2175,10 @@ fn login_to_backend(
 fn current_user(config: &AppConfig, token: &str) -> Result<AuthUser, String> {
     let client = http_client()?;
     let response = client
-        .get(format!("{}/api/auth/me", config.api_url().trim_end_matches('/')))
+        .get(format!(
+            "{}/api/auth/me",
+            config.api_url().trim_end_matches('/')
+        ))
         .bearer_auth(token)
         .send()
         .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
@@ -2005,7 +2188,10 @@ fn current_user(config: &AppConfig, token: &str) -> Result<AuthUser, String> {
 fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>, String> {
     let client = http_client()?;
     let response = client
-        .get(format!("{}/api/profiles", config.api_url().trim_end_matches('/')))
+        .get(format!(
+            "{}/api/profiles",
+            config.api_url().trim_end_matches('/')
+        ))
         .bearer_auth(token)
         .send()
         .map_err(|_| "Не удалось получить профили проекта.".to_string())?;
@@ -2016,7 +2202,10 @@ fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>
 fn fetch_policy(config: &AppConfig) -> Result<PolicyInfo, String> {
     let client = http_client()?;
     let response = client
-        .get(format!("{}/api/policy", config.api_url().trim_end_matches('/')))
+        .get(format!(
+            "{}/api/policy",
+            config.api_url().trim_end_matches('/')
+        ))
         .send()
         .map_err(|_| "Backend лаунчера недоступен.".to_string())?;
     parse_json_response(response, "Backend вернул некорректную политику")
@@ -2045,7 +2234,10 @@ fn fetch_news(config: &AppConfig, token: &str) -> Vec<NewsSummary> {
         Ok(client) => client,
         Err(_) => return Vec::new(),
     };
-    let url = format!("{}/api/news?limit=20", config.api_url().trim_end_matches('/'));
+    let url = format!(
+        "{}/api/news?limit=20",
+        config.api_url().trim_end_matches('/')
+    );
     let response = match client.get(url).bearer_auth(token).send() {
         Ok(response) => response,
         Err(_) => return Vec::new(),
@@ -2166,18 +2358,95 @@ fn invalidate_yggdrasil_session(config: &AppConfig, access_token: &str) {
         .send();
 }
 
-fn fetch_manifest(config: &AppConfig, token: &str, profile_id: &str) -> Result<Manifest, String> {
+fn fetch_manifest(
+    config: &AppConfig,
+    token: &str,
+    profile_id: &str,
+    paths: &ProfilePaths,
+) -> Result<Manifest, String> {
     let client = http_client()?;
-    let response = client
-        .get(format!(
-            "{}/api/profiles/{}/manifest",
-            config.api_url().trim_end_matches('/'),
-            profile_id
-        ))
-        .bearer_auth(token)
+    let url = format!(
+        "{}/api/profiles/{}/manifest",
+        config.api_url().trim_end_matches('/'),
+        profile_id
+    );
+    let cache_path = paths.profile_root.join("manifest.remote.json");
+    let etag_path = paths.profile_root.join("manifest.remote.etag");
+    let cached_etag = fs::read_to_string(&etag_path).ok();
+
+    let mut request = client.get(&url).bearer_auth(token);
+    if let Some(etag) = cached_etag
+        .as_deref()
+        .map(str::trim)
+        .filter(|etag| !etag.is_empty())
+    {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let mut response = request
         .send()
         .map_err(|_| "Не удалось получить manifest профиля.".to_string())?;
-    parse_json_response(response, "Backend вернул некорректный manifest")
+
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        if let Ok(data) = fs::read(&cache_path) {
+            if let Ok(manifest) = serde_json::from_slice::<Manifest>(&data) {
+                return Ok(manifest);
+            }
+        }
+        // 304 без пригодного локального тела возможен после ручной чистки или
+        // аварийного выключения между записью ETag и JSON. Один раз повторяем
+        // запрос без условия и восстанавливаем кэш.
+        let _ = fs::remove_file(&etag_path);
+        response = client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|_| "Не удалось повторно получить manifest профиля.".to_string())?;
+    }
+
+    if !response.status().is_success() {
+        return parse_json_response(response, "Backend вернул некорректный manifest");
+    }
+
+    let response_etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let data = response
+        .bytes()
+        .map_err(|error| format!("Не удалось прочитать manifest профиля: {error}"))?;
+    let manifest = serde_json::from_slice::<Manifest>(&data)
+        .map_err(|error| format!("Backend вернул некорректный manifest: {error}"))?;
+
+    // Кэш — ускорение, не условие запуска: ошибка записи не мешает использовать
+    // уже проверенный ответ текущего запроса.
+    if write_manifest_cache(&cache_path, &data).is_ok() {
+        if let Some(etag) = response_etag {
+            let _ = write_manifest_cache(&etag_path, etag.as_bytes());
+        }
+    }
+    Ok(manifest)
+}
+
+fn write_manifest_cache(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let sequence = MANIFEST_CACHE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut temp_name = path.as_os_str().to_os_string();
+    temp_name.push(format!(".{}.{}.part", std::process::id(), sequence));
+    let temp = PathBuf::from(temp_name);
+    fs::write(&temp, data)?;
+    let result = (|| {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
 }
 
 fn parse_json_response<T: for<'de> Deserialize<'de>>(
@@ -2212,8 +2481,11 @@ fn sync_and_launch(
     app: &Weak<AppWindow>,
 ) -> Result<String, String> {
     post_progress(app, "Получаем профиль", &profile.name, "0%", 0.0, true);
-    let manifest = fetch_manifest(config, token, &profile.id)?;
-    let paths = profile_paths(user, &manifest.profile.id)?;
+    let paths = profile_paths(user, &profile.id)?;
+    let manifest = fetch_manifest(config, token, &profile.id, &paths)?;
+    if manifest.profile.id != profile.id {
+        return Err("Backend вернул manifest другого профиля.".to_string());
+    }
     ensure_directory(&paths.profile_root, "Не удалось создать папку профиля.")?;
     ensure_directory(&paths.files_root, "Не удалось создать папку профиля.")?;
 
@@ -2230,7 +2502,11 @@ fn sync_and_launch(
         .iter()
         .map(|file| file.size.max(0) as u64)
         .sum();
-    if bundle::should_use(manifest.bundle.as_ref(), files_to_download.len(), missing_bytes) {
+    if bundle::should_use(
+        manifest.bundle.as_ref(),
+        files_to_download.len(),
+        missing_bytes,
+    ) {
         let bundle = manifest.bundle.as_ref().expect("checked by should_use");
         let url = absolute_api_url(config, &bundle.download_url);
         let specs = manifest
@@ -2253,25 +2529,54 @@ fn sync_and_launch(
             bundle,
             &specs,
             |downloaded, total| {
-                let fraction = if total == 0 { 0.0 } else { downloaded as f32 / total as f32 };
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    downloaded as f32 / total as f32
+                };
                 post_progress(
                     app,
                     "Скачиваем сборку",
                     &format!("bundle v{}", bundle.build_id),
-                    &format!("{} / {}", format_bytes(downloaded as i64), format_bytes(total as i64)),
+                    &format!(
+                        "{} / {}",
+                        format_bytes(downloaded as i64),
+                        format_bytes(total as i64)
+                    ),
                     0.22 + fraction * 0.70,
                     true,
                 );
             },
         )?;
     } else {
-        download_files(config, token, app, &paths.files_root, &manifest, &files_to_download)?;
+        download_files(
+            config,
+            token,
+            app,
+            &paths.files_root,
+            &manifest,
+            &files_to_download,
+        )?;
     }
 
-    post_progress(app, "Проверяем Java", "Runtime текущей ОС", "92%", 0.92, true);
+    post_progress(
+        app,
+        "Проверяем Java",
+        "Runtime текущей ОС",
+        "92%",
+        0.92,
+        true,
+    );
     let java_managed_paths = ensure_java_runtime(app, &paths, &manifest)?;
 
-    post_progress(app, "Очищаем", "Удаляем устаревшие файлы", "96%", 0.96, true);
+    post_progress(
+        app,
+        "Очищаем",
+        "Удаляем устаревшие файлы",
+        "96%",
+        0.96,
+        true,
+    );
     cleanup_unmanaged_files(&paths, &manifest, &java_managed_paths)?;
     save_local_manifest(&paths.manifest_path, &paths.files_root, &manifest)?;
 
@@ -2320,7 +2625,14 @@ fn download_files(
     files: &[ManifestFile],
 ) -> Result<(), String> {
     if files.is_empty() {
-        post_progress(app, "Скачиваем", "Все файлы уже актуальны", "92%", 0.92, true);
+        post_progress(
+            app,
+            "Скачиваем",
+            "Все файлы уже актуальны",
+            "92%",
+            0.92,
+            true,
+        );
         return Ok(());
     }
 
@@ -2328,7 +2640,11 @@ fn download_files(
     // для файлов с публичного S3-зеркала (download_one_file выбирает по is_api_url).
     let backend_client = backend_download_client()?;
     let asset_client = download_client()?;
-    let total_bytes = files.iter().map(|file| file.size.max(0) as u64).sum::<u64>().max(1);
+    let total_bytes = files
+        .iter()
+        .map(|file| file.size.max(0) as u64)
+        .sum::<u64>()
+        .max(1);
     let completed_bytes = AtomicU64::new(0);
     let completed_files = AtomicUsize::new(0);
     let total_files = files.len();
@@ -2349,8 +2665,14 @@ fn download_files(
         files
             .par_iter()
             .map(|file| -> Result<(), String> {
-                let file_bytes =
-                    download_one_file(&backend_client, &asset_client, config, token, files_root, file)?;
+                let file_bytes = download_one_file(
+                    &backend_client,
+                    &asset_client,
+                    config,
+                    token,
+                    files_root,
+                    file,
+                )?;
 
                 let done_files = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
                 let done_bytes =
@@ -2372,7 +2694,11 @@ fn download_files(
     post_progress(
         app,
         "Скачиваем",
-        &format!("{} файлов, {}", manifest.file_count, format_bytes(manifest.total_size)),
+        &format!(
+            "{} файлов, {}",
+            manifest.file_count,
+            format_bytes(manifest.total_size)
+        ),
         "92%",
         0.92,
         true,
@@ -2393,7 +2719,8 @@ fn download_one_file(
 ) -> Result<u64, String> {
     let target = safe_join(files_root, &file.path)?;
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|_| "Не удалось создать папку для файла.".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|_| "Не удалось создать папку для файла.".to_string())?;
     }
 
     let url = absolute_api_url(config, &file.download_url);
@@ -2401,7 +2728,11 @@ fn download_one_file(
     // зеркало (S3-бакет) — обычный клиент без токена: JWT туда слать и незачем, и
     // вредно (S3 отвечает 400 на Authorization), а его CA может быть вне webpki.
     let is_backend = is_api_url(config, &url);
-    let client = if is_backend { backend_client } else { asset_client };
+    let client = if is_backend {
+        backend_client
+    } else {
+        asset_client
+    };
     let mut request = client.get(&url);
     if is_backend {
         request = request.bearer_auth(token);
@@ -2410,7 +2741,11 @@ fn download_one_file(
         .send()
         .map_err(|_| format!("Не удалось скачать {}", file.path))?;
     if !response.status().is_success() {
-        return Err(format!("Ошибка скачивания {}: HTTP {}", file.path, response.status().as_u16()));
+        return Err(format!(
+            "Ошибка скачивания {}: HTTP {}",
+            file.path,
+            response.status().as_u16()
+        ));
     }
 
     let temp_path = temp_download_path(&target);
@@ -2433,7 +2768,9 @@ fn download_one_file(
         hasher.update(&buffer[..read]);
         file_bytes += read as u64;
     }
-    output.flush().map_err(|_| format!("Ошибка записи {}", file.path))?;
+    output
+        .flush()
+        .map_err(|_| format!("Ошибка записи {}", file.path))?;
 
     let hash = hex_hash(hasher.finalize().as_slice());
     if hash != file.hash_sha256.to_lowercase() {
@@ -2536,7 +2873,10 @@ fn prepare_java_directories(root: &Path, manifest: &JavaRuntimeManifest) -> Resu
             continue;
         }
         let target = safe_join(root, path)?;
-        ensure_directory(&target, &format!("Не удалось создать папку Java runtime: {}", path))?;
+        ensure_directory(
+            &target,
+            &format!("Не удалось создать папку Java runtime: {}", path),
+        )?;
     }
     Ok(())
 }
@@ -2563,29 +2903,31 @@ fn collect_java_download_tasks(
     // полностью сверяется с manifest, меняется только скорость хеширования.
     let tasks = files
         .par_iter()
-        .map(|&(path, entry, download)| -> Result<Option<JavaRuntimeDownloadTask>, String> {
-            let needs = java_file_needs_download(root, path, download)?;
-            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-            post_progress(
-                app,
-                "Проверяем Java",
-                path,
-                &format!("{}/{}", done, total),
-                0.925 + (done as f32 / total as f32) * 0.015,
-                true,
-            );
-            if needs {
-                Ok(Some(JavaRuntimeDownloadTask {
-                    path: path.clone(),
-                    download: download.clone(),
-                    executable: entry.executable,
-                }))
-            } else {
-                let target = safe_join(root, path)?;
-                ensure_executable(&target, entry.executable)?;
-                Ok(None)
-            }
-        })
+        .map(
+            |&(path, entry, download)| -> Result<Option<JavaRuntimeDownloadTask>, String> {
+                let needs = java_file_needs_download(root, path, download)?;
+                let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                post_progress(
+                    app,
+                    "Проверяем Java",
+                    path,
+                    &format!("{}/{}", done, total),
+                    0.925 + (done as f32 / total as f32) * 0.015,
+                    true,
+                );
+                if needs {
+                    Ok(Some(JavaRuntimeDownloadTask {
+                        path: path.clone(),
+                        download: download.clone(),
+                        executable: entry.executable,
+                    }))
+                } else {
+                    let target = safe_join(root, path)?;
+                    ensure_executable(&target, entry.executable)?;
+                    Ok(None)
+                }
+            },
+        )
         .collect::<Result<Vec<_>, String>>()?;
 
     Ok(tasks.into_iter().flatten().collect())
@@ -2598,7 +2940,14 @@ fn download_java_files(
     tasks: &[JavaRuntimeDownloadTask],
 ) -> Result<(), String> {
     if tasks.is_empty() {
-        post_progress(app, "Проверяем Java", "Java runtime актуален", "94%", 0.94, true);
+        post_progress(
+            app,
+            "Проверяем Java",
+            "Java runtime актуален",
+            "94%",
+            0.94,
+            true,
+        );
         return Ok(());
     }
 
@@ -2704,24 +3053,27 @@ fn java_file_needs_download(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(_) => return Err(format!("Не удалось проверить Java файл {}", rel)),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != download.size as u64 {
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != download.size as u64
+    {
         return Ok(true);
     }
     let hash = hash_file_sha1(&target)?;
     Ok(hash != download.sha1.to_lowercase())
 }
 
-fn needs_download(
-    files_root: &Path,
-    file: &ManifestFile,
-) -> Result<bool, String> {
+fn needs_download(files_root: &Path, file: &ManifestFile) -> Result<bool, String> {
     let target = safe_join(files_root, &file.path)?;
     let metadata = match fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(_) => return Err(format!("Не удалось проверить {}", file.path)),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != file.size as u64 {
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != file.size as u64
+    {
         return Ok(true);
     }
 
@@ -2786,7 +3138,12 @@ fn cleanup_unmanaged_files(
     allowed_paths.extend(java_managed_paths.iter().cloned());
 
     let preserve_paths = normalize_preserve_paths(&manifest.preserve_paths);
-    cleanup_directory(&paths.files_root, &paths.files_root, &allowed_paths, &preserve_paths)
+    cleanup_directory(
+        &paths.files_root,
+        &paths.files_root,
+        &allowed_paths,
+        &preserve_paths,
+    )
 }
 
 fn cleanup_directory(
@@ -2809,8 +3166,8 @@ fn cleanup_directory(
             continue;
         }
 
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|_| format!("Не удалось проверить {}", rel))?;
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| format!("Не удалось проверить {}", rel))?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             cleanup_directory(root, &path, allowed_paths, preserve_paths)?;
             let _ = fs::remove_dir(&path);
@@ -2866,7 +3223,8 @@ fn launch_profile(
     }
 
     let settings = load_settings().unwrap_or_default();
-    let mut jvm_args = jvm_args_with_memory(&manifest.profile.jvm_args, effective_memory_gb(&settings))?;
+    let mut jvm_args =
+        jvm_args_with_memory(&manifest.profile.jvm_args, effective_memory_gb(&settings))?;
 
     // Подключаем authlib-injector как javaagent, указывая на наш Yggdrasil-сервер.
     // Jar — launcher-managed (качается с бэкенда), лежит вне files/, поэтому
@@ -3082,14 +3440,21 @@ fn append_error_log(path: &Path, unix_secs: u64, message: &str) -> std::io::Resu
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let oversized = fs::metadata(path).map(|m| m.len() > ERROR_LOG_MAX_BYTES).unwrap_or(false);
+    let oversized = fs::metadata(path)
+        .map(|m| m.len() > ERROR_LOG_MAX_BYTES)
+        .unwrap_or(false);
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(!oversized)
         .truncate(oversized)
         .write(true)
         .open(path)?;
-    writeln!(file, "[{} UTC] {}", format_log_timestamp(unix_secs), message)
+    writeln!(
+        file,
+        "[{} UTC] {}",
+        format_log_timestamp(unix_secs),
+        message
+    )
 }
 
 /// Best-effort запись ошибки синхронизации/запуска в постоянный лог
@@ -3106,7 +3471,7 @@ fn log_sync_error(message: &str) {
 
 fn post_game_started(app: &Weak<AppWindow>) {
     let app = app.clone();
-    let _ = slint::invoke_from_event_loop(move || {
+    let _ = invoke_from_ui(move || {
         if let Some(app) = app.upgrade() {
             app.set_download_phase("Готово".into());
             app.set_download_file("Minecraft запущен".into());
@@ -3171,7 +3536,10 @@ fn jvm_args_with_memory(input: &str, memory_gb: i32) -> Result<Vec<String>, Stri
     let mut result = Vec::with_capacity(args.len() + 1);
     // Абсолютные границы: системный максимум уже применён вызывающим
     // (effective_memory_gb), здесь только страховка от мусорных значений.
-    result.push(format!("-Xmx{}G", memory_gb.clamp(MIN_MEMORY_GB, MAX_MEMORY_GB)));
+    result.push(format!(
+        "-Xmx{}G",
+        memory_gb.clamp(MIN_MEMORY_GB, MAX_MEMORY_GB)
+    ));
     result.extend(args);
     Ok(result)
 }
@@ -3197,7 +3565,8 @@ fn remove_module_path_entries_from_classpath(command: &mut [String]) {
         match token {
             "-cp" | "-classpath" | "--class-path" => {
                 if index + 1 < command.len() {
-                    command[index + 1] = filter_classpath(&command[index + 1], separator, &module_entries);
+                    command[index + 1] =
+                        filter_classpath(&command[index + 1], separator, &module_entries);
                     index += 1;
                 }
             }
@@ -3255,7 +3624,11 @@ fn filter_classpath(classpath: &str, separator: char, excluded: &HashSet<String>
 }
 
 fn normalize_classpath_entry(entry: &str) -> String {
-    let mut normalized = entry.trim().trim_matches('"').trim_matches('\'').replace('\\', "/");
+    let mut normalized = entry
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .replace('\\', "/");
     while normalized.starts_with("./") {
         normalized = normalized.trim_start_matches("./").to_string();
     }
@@ -3361,8 +3734,8 @@ fn selected_profile(state: &RuntimeState) -> Option<ProfileSummary> {
 /// Фоновый пинг живую сессию не трогает: сессия и yggdrasil живут на том бэкенде, где
 /// начался вход. Восстановление сессии (`is_loading`) здесь НЕ учитывается: на медленном
 /// основном адресе оно висит до 30с, пинг финиширует раньше и выбор молча терялся.
-fn auto_switch_allowed(forced: bool, is_authenticated: bool) -> bool {
-    forced || !is_authenticated
+fn auto_switch_allowed(_forced: bool, is_authenticated: bool) -> bool {
+    !is_authenticated
 }
 
 /// Пинг серверов в фоне + авто-выбор самого быстрого. Подписи в списке обновляются
@@ -3381,24 +3754,8 @@ fn spawn_mirror_probe(
         return; // выбирать не из чего
     }
     thread::spawn(move || {
-        let pings: Vec<Option<u128>> = thread::scope(|scope| {
-            let handles: Vec<_> = mirrors
-                .iter()
-                .map(|(_, url)| scope.spawn(move || ping_mirror(url)))
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or(None))
-                .collect()
-        });
-
-        for (index, ((name, _), ms)) in mirrors.iter().zip(pings.iter()).enumerate() {
-            let label = mirror_label(name, *ms);
-            let _ = app_weak.upgrade_in_event_loop(move |app| {
-                // +1: нулевой пункт списка — «Авто».
-                app.get_server_names().set_row_data(index + 1, label.into());
-            });
-        }
+        let pings = probe_mirrors(&mirrors);
+        update_mirror_labels(&app_weak, &mirrors, &pings);
 
         // Ручной выбор игрока не перебиваем.
         if load_settings().unwrap_or_default().api_url.is_some() {
@@ -3422,8 +3779,7 @@ fn spawn_mirror_probe(
             }
             config.set_api_url(&url);
             app.set_api_url(url.into());
-            app.get_server_names()
-                .set_row_data(0, format!("{AUTO_SERVER_LABEL}: {name}").into());
+            app.set_server_name(0, format!("{AUTO_SERVER_LABEL}: {name}"));
             app.set_message(format!("Сервер выбран автоматически: {name} — {ms} мс").into());
         });
     });
@@ -3437,16 +3793,15 @@ fn register_mirror_handler(
     config: AppConfig,
     mirrors: Vec<(String, String)>,
     current: usize,
+    probe_on_start: bool,
 ) {
-    let items: Vec<SharedString> = server_items(&mirrors)
-        .iter()
-        .map(SharedString::from)
-        .collect();
-    app.set_server_names(ModelRc::new(VecModel::from(items)));
+    app.set_server_names(server_items(&mirrors));
     app.set_server_index(current as i32);
     // Селектор показываем, только когда есть из чего выбирать (зеркал больше одного).
     app.set_server_visible(mirrors.len() > 1);
-    spawn_mirror_probe(app.as_weak(), config.clone(), mirrors.clone(), false);
+    if probe_on_start {
+        spawn_mirror_probe(app.as_weak(), config.clone(), mirrors.clone(), false);
+    }
 
     let app_weak = app.as_weak();
     app.on_server_selected(move |index| {
@@ -3454,6 +3809,13 @@ fn register_mirror_handler(
         if idx == 0 {
             let _ = update_settings(|settings| settings.api_url = None);
             if let Some(app) = app_weak.upgrade() {
+                if app.get_is_authenticated() {
+                    app.set_message(
+                        "Автовыбор сервера применится после выхода из аккаунта.".into(),
+                    );
+                    return;
+                }
+                app.set_server_index(0);
                 app.set_message("Сервер выбирается автоматически…".into());
             }
             spawn_mirror_probe(app_weak.clone(), config.clone(), mirrors.clone(), true);
@@ -3462,10 +3824,17 @@ fn register_mirror_handler(
         let Some((name, url)) = mirrors.get(idx - 1) else {
             return;
         };
-        config.set_api_url(url);
         let saved_url = url.clone();
         let _ = update_settings(|settings| settings.api_url = Some(saved_url));
         if let Some(app) = app_weak.upgrade() {
+            if app.get_is_authenticated() {
+                app.set_message(
+                    format!("Сервер {name} будет использован после выхода из аккаунта.").into(),
+                );
+                return;
+            }
+            app.set_server_index(idx as i32);
+            config.set_api_url(url);
             app.set_api_url(url.into());
             app.set_message(format!("Сервер: {name}").into());
         }
@@ -3695,7 +4064,7 @@ fn post_progress(
     let file_name = file_name.to_string();
     let counter = counter.to_string();
     let progress = progress.clamp(0.0, 1.0);
-    let _ = slint::invoke_from_event_loop(move || {
+    let _ = invoke_from_ui(move || {
         if let Some(app) = app.upgrade() {
             app.set_download_phase(phase.into());
             app.set_download_file(file_name.into());
@@ -3903,9 +4272,10 @@ fn load_settings_unlocked() -> Result<LauncherSettings, String> {
             return Ok(LauncherSettings::default());
         }
     }
-    let data = fs::read_to_string(&path)
-        .map_err(|_| "Не удалось прочитать settings.json.".to_string())?;
-    let settings = serde_json::from_str(&data).map_err(|_| "settings.json повреждён.".to_string())?;
+    let data =
+        fs::read_to_string(&path).map_err(|_| "Не удалось прочитать settings.json.".to_string())?;
+    let settings =
+        serde_json::from_str(&data).map_err(|_| "settings.json повреждён.".to_string())?;
     let _ = fs::remove_file(pending);
     let _ = fs::remove_file(backup);
     Ok(settings)
@@ -3921,8 +4291,8 @@ fn save_settings_unlocked(settings: &LauncherSettings) -> Result<(), String> {
         .map_err(|_| "Не удалось сохранить настройки.".to_string())?;
     let pending = path.with_extension("json.new");
     let backup = path.with_extension("json.old");
-    let mut file = File::create(&pending)
-        .map_err(|_| "Не удалось подготовить settings.json.".to_string())?;
+    let mut file =
+        File::create(&pending).map_err(|_| "Не удалось подготовить settings.json.".to_string())?;
     file.write_all(data.as_bytes())
         .and_then(|_| file.flush())
         .and_then(|_| file.sync_all())
@@ -4096,7 +4466,8 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|_| "Не удалось открыть файл для проверки.".to_string())?;
+    let mut file =
+        File::open(path).map_err(|_| "Не удалось открыть файл для проверки.".to_string())?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -4171,7 +4542,10 @@ fn fetch_sha1_bytes(
     Ok(data)
 }
 
-fn ensure_executable(#[cfg_attr(not(unix), allow(unused_variables))] path: &Path, executable: bool) -> Result<(), String> {
+fn ensure_executable(
+    #[cfg_attr(not(unix), allow(unused_variables))] path: &Path,
+    executable: bool,
+) -> Result<(), String> {
     if !executable {
         return Ok(());
     }
@@ -4410,7 +4784,10 @@ fn is_reserved_preserve_path(path: &str) -> bool {
         .split('/')
         .next()
         .unwrap_or_default();
-    matches!(root, "mods" | "libraries" | "versions" | "assets" | "runtime")
+    matches!(
+        root,
+        "mods" | "libraries" | "versions" | "assets" | "runtime"
+    )
 }
 
 fn preserve_path_matches(rel: &str, preserve_paths: &[String]) -> bool {
@@ -4529,7 +4906,10 @@ mod tests {
             .timeout(Duration::from_secs(20))
             .build()
             .expect("build hardened client");
-        for host in ["https://launcher.likonchik.xyz", "https://mirror.likonchik.xyz"] {
+        for host in [
+            "https://launcher.likonchik.xyz",
+            "https://mirror.likonchik.xyz",
+        ] {
             let resp = client
                 .get(format!("{host}/api/policy"))
                 .send()
@@ -4544,12 +4924,21 @@ mod tests {
             api_url: Arc::new(RwLock::new("https://launcher.likonchik.xyz".to_string())),
         };
 
-        assert!(is_api_url(&config, "https://launcher.likonchik.xyz/api/profiles/1/files/mods/a.jar"));
+        assert!(is_api_url(
+            &config,
+            "https://launcher.likonchik.xyz/api/profiles/1/files/mods/a.jar"
+        ));
         assert!(is_api_url(&config, "https://launcher.likonchik.xyz"));
         // Файлы с бакета — без токена.
-        assert!(!is_api_url(&config, "https://pjm-files.s3.cloud.ru/vanilla/files/mods/a.jar"));
+        assert!(!is_api_url(
+            &config,
+            "https://pjm-files.s3.cloud.ru/vanilla/files/mods/a.jar"
+        ));
         // Префикс базы, но чужой хост — токен туда уйти не должен.
-        assert!(!is_api_url(&config, "https://launcher.likonchik.xyz.evil.tld/api/steal"));
+        assert!(!is_api_url(
+            &config,
+            "https://launcher.likonchik.xyz.evil.tld/api/steal"
+        ));
     }
 
     #[test]
@@ -4564,10 +4953,10 @@ mod tests {
     #[test]
     fn auto_switch_applies_unless_session_is_live() {
         assert!(auto_switch_allowed(false, false));
-        // Фон не перебивает живую сессию, но ручной выбор «Авто» (он только из настроек,
-        // т.е. всегда под входом) обязан срабатывать — иначе пункт мёртвый.
+        // Ни фон, ни ручной выбор из настроек не меняют backend живой сессии.
+        // Выбор сохраняется и применяется после logout.
         assert!(!auto_switch_allowed(false, true));
-        assert!(auto_switch_allowed(true, true));
+        assert!(!auto_switch_allowed(true, true));
     }
 
     #[test]
@@ -4587,7 +4976,10 @@ mod tests {
             ("Зеркало".to_string(), "https://mirror.example".to_string()),
         ];
         assert_eq!(server_item_index(&mirrors, Some("https://main.example")), 1);
-        assert_eq!(server_item_index(&mirrors, Some("https://mirror.example")), 2);
+        assert_eq!(
+            server_item_index(&mirrors, Some("https://mirror.example")),
+            2
+        );
         // start_url в main: индекс 0 («Авто») стартует с основного адреса.
         for (idx, want) in [(0usize, 0usize), (1, 0), (2, 1)] {
             assert_eq!(mirrors[idx.saturating_sub(1)].1, mirrors[want].1);
@@ -4632,6 +5024,19 @@ mod tests {
         assert_eq!(best_ping_index(&[]), None);
         // Равные пинги — берём первый (основной адрес приоритетнее зеркала).
         assert_eq!(best_ping_index(&[Some(50), Some(50)]), Some(0));
+        assert_eq!(
+            ranked_ping_indices(&[Some(120), None, Some(40), Some(40)]),
+            vec![2, 3, 0]
+        );
+    }
+
+    #[test]
+    fn jwt_expiry_is_restored_for_account_card() {
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":951782400}"#);
+        let token = format!("header.{payload}.signature");
+        assert_eq!(token_expiry_label(&token), "2000-02-29 00:00:00");
+        assert_eq!(token_expiry_label("broken"), "");
     }
 
     #[test]
@@ -4680,10 +5085,7 @@ mod tests {
 
     #[test]
     fn read_log_tail_missing_file_is_empty() {
-        assert_eq!(
-            read_log_tail(Path::new("/no/such/pjm_launch.log"), 10),
-            ""
-        );
+        assert_eq!(read_log_tail(Path::new("/no/such/pjm_launch.log"), 10), "");
     }
 
     #[test]
@@ -4995,7 +5397,8 @@ mod tests {
 
     #[test]
     fn strict_cleanup_removes_unknown_files_and_keeps_preserved_paths() {
-        let profile_root = test_root("strict_cleanup_removes_unknown_files_and_keeps_preserved_paths");
+        let profile_root =
+            test_root("strict_cleanup_removes_unknown_files_and_keeps_preserved_paths");
         let files_root = profile_root.join("files");
         write_test_file(&files_root.join("mods/official.jar"), "official");
         write_test_file(&files_root.join("mods/custom.jar"), "custom");
@@ -5004,7 +5407,11 @@ mod tests {
 
         let hash = hex_hash(Sha256::digest(b"official").as_slice());
         let manifest = test_manifest(
-            vec![test_manifest_file("mods/official.jar", &hash, "official".len() as i64)],
+            vec![test_manifest_file(
+                "mods/official.jar",
+                &hash,
+                "official".len() as i64,
+            )],
             vec!["saves/".to_string(), "options.txt".to_string()],
         );
         let paths = ProfilePaths {
@@ -5026,11 +5433,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlink_managed_file_forces_download_and_whitelist_symlink_is_kept() {
-        let profile_root = test_root("symlink_managed_file_forces_download_and_whitelist_symlink_is_kept");
+        let profile_root =
+            test_root("symlink_managed_file_forces_download_and_whitelist_symlink_is_kept");
         let files_root = profile_root.join("files");
         fs::create_dir_all(files_root.join("mods")).unwrap();
         fs::create_dir_all(files_root.join("saves")).unwrap();
-        std::os::unix::fs::symlink("/tmp/managed-target", files_root.join("mods/official.jar")).unwrap();
+        std::os::unix::fs::symlink("/tmp/managed-target", files_root.join("mods/official.jar"))
+            .unwrap();
         std::os::unix::fs::symlink("/tmp/save-target", files_root.join("saves/link")).unwrap();
 
         let hash = hex_hash(Sha256::digest(b"official").as_slice());

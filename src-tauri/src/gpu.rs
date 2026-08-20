@@ -145,8 +145,12 @@ mod tests {
             .expect("ожидался NVIDIA offload");
         assert_eq!(result.vendor_label, "NVIDIA");
         assert!(result.env.contains(&("__NV_PRIME_RENDER_OFFLOAD", "1")));
-        assert!(result.env.contains(&("__GLX_VENDOR_LIBRARY_NAME", "nvidia")));
-        assert!(result.env.contains(&("__VK_LAYER_NV_optimus", "NVIDIA_only")));
+        assert!(result
+            .env
+            .contains(&("__GLX_VENDOR_LIBRARY_NAME", "nvidia")));
+        assert!(result
+            .env
+            .contains(&("__VK_LAYER_NV_optimus", "NVIDIA_only")));
     }
 
     #[test]
@@ -176,15 +180,21 @@ mod tests {
     fn parses_vga_and_3d_controllers() {
         assert_eq!(
             gpu_from_sysfs("0x030000", "0x10de"),
-            Some(Gpu { vendor: GpuVendor::Nvidia })
+            Some(Gpu {
+                vendor: GpuVendor::Nvidia
+            })
         );
         assert_eq!(
             gpu_from_sysfs("0x030200", "0x1002"),
-            Some(Gpu { vendor: GpuVendor::Amd })
+            Some(Gpu {
+                vendor: GpuVendor::Amd
+            })
         );
         assert_eq!(
             gpu_from_sysfs("0x030000", "0x8086"),
-            Some(Gpu { vendor: GpuVendor::Intel })
+            Some(Gpu {
+                vendor: GpuVendor::Intel
+            })
         );
     }
 
