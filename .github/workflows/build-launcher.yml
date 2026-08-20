@@ -98,12 +98,13 @@ jobs:
           fi
 
       - name: Build release
-        working-directory: src-tauri
         env:
           LAUNCHER_DEFAULT_API_URL: ${{ inputs.api_url }}
           LAUNCHER_UPDATE_PUBKEY: ${{ steps.resolve.outputs.pubkey }}
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        # Только Tauri CLI встраивает frontendDist вместо devUrl. Голый cargo build
+        # оставляет WebView на 127.0.0.1:1420 и непригоден для player-релиза.
+        run: npm run tauri -- build --no-bundle --target ${{ matrix.target }}
 
       - name: Read version
         id: version

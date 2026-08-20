@@ -129,11 +129,15 @@ esac
 
 if (( BUILD == 1 )); then
   echo "[launcher] Building release with LAUNCHER_DEFAULT_API_URL=$API_URL"
-  (cd "$ROOT_DIR" && npm ci && npm run build:web)
+  # Важно собирать через Tauri CLI, а не через голый `cargo build`: CLI переключает
+  # WebView с devUrl (Vite на 127.0.0.1:1420) на встроенный frontendDist. Иначе Rust
+  # бинарник формально release, но у игроков открывает недоступный dev-сервер.
   (
-    cd "$ROOT_DIR/src-tauri"
-    # PUBKEY передаётся ЯВНО (не через export родителя) — иначе option_env! его не увидит.
-    LAUNCHER_DEFAULT_API_URL="$API_URL" LAUNCHER_UPDATE_PUBKEY="$PUBKEY" cargo build --release
+    cd "$ROOT_DIR"
+    npm ci
+    LAUNCHER_DEFAULT_API_URL="$API_URL" \
+      LAUNCHER_UPDATE_PUBKEY="$PUBKEY" \
+      npm run tauri -- build --no-bundle
   )
 fi
 
