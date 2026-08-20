@@ -61,9 +61,11 @@ jobs:
       # Java-агент ходит с нативкой в паре (общий файловый протокол) — проверяем и его.
       - name: Java-агент
         run: ./anticheat-agent/build.sh
-      # upload-artifact от GitHub отказывается работать против не-github сервера
-      # (GHESNotSupportedError) — берём форк Forgejo по полному URL.
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+      # Полный Forgejo URL ломает GitHub ещё на Set up job, а официальный action
+      # на Forgejo падает с GHESNotSupportedError. Загружаем диагностический
+      # артефакт только в GitHub; на Forgejo сами три build-step всё равно проходят.
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.server_url == 'https://github.com' }}
         with:
           name: anticheat-agents-ci
           path: |
