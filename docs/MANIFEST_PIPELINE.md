@@ -33,7 +33,7 @@ JWT не передаётся в query string:
 1. WEB с обычным `Authorization: Bearer ...` вызывает
    `POST /api/admin/profiles/events-ticket`.
 2. Backend выдаёт случайный одноразовый билет на 30 секунд.
-3. WEB открывает `wss://<backend>/api/profiles/events/ws?ticket=<ticket>`.
+3. WEB открывает `wss://<backend>/api/realtime/profiles/ws?ticket=<ticket>`.
 
 Сообщения всегда являются полными снимками состояния:
 

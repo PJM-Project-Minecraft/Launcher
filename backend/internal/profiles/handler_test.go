@@ -116,6 +116,10 @@ func TestAdminWebSocketUsesSingleUseTicketAndSendsSnapshot(t *testing.T) {
 	admin.Use(func(c fiber.Ctx) error {
 		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"message": "Требуется авторизация"})
 	})
+	publicProfiles := app.Group("/api/profiles")
+	publicProfiles.Use(func(c fiber.Ctx) error {
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"message": "Требуется авторизация"})
+	})
 	handler.RegisterRoutes(app, func(c fiber.Ctx) error { return c.Next() })
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -129,7 +133,7 @@ func TestAdminWebSocketUsesSingleUseTicketAndSendsSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	url := fmt.Sprintf("ws://%s/api/profiles/events/ws?ticket=%s", ln.Addr(), ticket)
+	url := fmt.Sprintf("ws://%s/api/realtime/profiles/ws?ticket=%s", ln.Addr(), ticket)
 	conn, _, err := fastws.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
