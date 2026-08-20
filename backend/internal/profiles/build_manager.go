@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,10 @@ func NewBuildManager(service Service, onPublished func()) *BuildManager {
 // Start ставит публикацию в очередь. Повторный вызов для уже активного профиля
 // идемпотентен и возвращает существующее задание.
 func (m *BuildManager) Start(ctx context.Context, profileID string) (BuildSnapshot, bool, error) {
+	// Fiber/fasthttp отдаёт Params как строку поверх переиспользуемого request-
+	// буфера. Публикация живёт дольше HTTP-handler, поэтому ID обязан владеть
+	// своими байтами до записи в map и запуска goroutine.
+	profileID = strings.Clone(profileID)
 	var profile models.Profile
 	if err := m.service.db.WithContext(ctx).Select("id").First(&profile, "id = ?", profileID).Error; err != nil {
 		return BuildSnapshot{}, false, err

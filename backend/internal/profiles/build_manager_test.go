@@ -3,9 +3,40 @@ package profiles
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
+
+func TestBuildManagerCopiesBorrowedProfileID(t *testing.T) {
+	service := newTestService(t)
+	profile, err := service.Create(context.Background(), ProfileRequest{
+		Name: "Fiber buffer", Slug: "fiber-buffer", Loader: "fabric", GameVersion: "1.21.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(service.storageRoot, profile.Slug, "files", "mods", "a.jar"), "data")
+
+	manager := NewBuildManager(service, nil)
+	manager.worker <- struct{}{}
+	defer func() { <-manager.worker }()
+	// Fiber/fasthttp возвращает Params как borrowed string из переиспользуемого
+	// request-буфера. После ответа следующий запрос меняет его backing bytes.
+	buffer := []byte(profile.ID)
+	borrowedID := unsafe.String(unsafe.SliceData(buffer), len(buffer))
+	started, created, err := manager.Start(context.Background(), borrowedID)
+	if err != nil || !created {
+		t.Fatalf("Start() created=%v err=%v", created, err)
+	}
+	copy(buffer, strings.Repeat("x", len(buffer)))
+
+	restored, ok := manager.Snapshot(profile.ID)
+	if !ok || restored.ID != started.ID || restored.ProfileID != profile.ID {
+		t.Fatalf("borrowed profile id escaped into background state: ok=%v snapshot=%+v", ok, restored)
+	}
+}
 
 func TestBuildManagerPublishesProgressAndDeduplicatesActiveJob(t *testing.T) {
 	service := newTestService(t)
