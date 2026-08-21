@@ -10,7 +10,7 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.0` (в `Cargo.toml`).
+- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.3` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
 - `src/` + React/Vite — production-интерфейс десктоп-лаунчера.
@@ -219,7 +219,9 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
   запрещена (авторитетен игровой сервер). UUID пути валидируется, мусор → 400.
 - `gameapi` — эндпоинты игрового сервера Minecraft (мод PJM BaseMod), общий секрет
   `GAME_API_SECRET` в заголовке `X-Game-Secret`: `POST /api/game/players/sync` (батч-upsert
-  прогресса, дедуп по uuid + нарезка по 500 строк) и `POST /api/game/adjustments/poll`
+  прогресса, дедуп по uuid + нарезка по 500 строк), `POST /api/game/kits/sync`
+  (атомарная полная замена публичных снимков роль-китов, которые магазин прикладывает
+  к товарам-ролям) и `POST /api/game/adjustments/poll`
   (ACK применённых + выдача неприменённых одним round-trip), а также
   `POST /api/game/deliveries/poll|ack` для автовыдачи покупок онлайн-игрокам.
   Замысел и инварианты —
@@ -305,7 +307,9 @@ Windows использует WebView2. Состояние Rust→React идёт 
   детект `unknown-mod` (severity 9, confidence hard) → kick. Отдельно ловится jar, чьи классы
   загрузились, а файл исчез (self-delete на Linux): трансформер собирает CodeSource-пути,
   пропавшие уходят как `missing:true`. Пустой список хешей = fail-open (не кикать всех).
-  Рычаг: `ANTICHEAT_UNKNOWN_MOD_ENFORCE` (дефолт `false` — репорт-онли: детект+алерт без кика).
+  Несовпадение сборки всегда закрывает игру, но **никогда не создаёт автоматический бан**
+  аккаунта или HWID. `ANTICHEAT_UNKNOWN_MOD_ENFORCE` оставлен как совместимый параметр
+  конфигурации и больше не меняет это поведение.
   ⚠️ Лаунчер НЕ трогали: agent.jar едет по SHA из `/api/anticheat/manifest`, релиз не нужен —
   достаточно `scp backend/data/anticheat-agent.jar` на прод.
 - **Скриншоты переехали в нативный агент** (29.07.2026) — раньше кадр снимал процесс
@@ -388,6 +392,10 @@ Windows использует WebView2. Состояние Rust→React идёт 
 ## Релизы лаунчера
 
 Текущие версии:
+- **0.5.3** (таймаут простоя сетевой загрузки: зависший backend/S3/Mojang больше не
+  оставляет кнопку «Обновить сборку» навсегда в состоянии синхронизации).
+- **0.5.2** (самодостаточная Windows-сборка со встроенным WebView2Loader; текущий
+  обязательный минимум до отдельного решения о повышении гейта).
 - **0.4.7** (сжатие большого JSON-manifest через zstd/gzip и переиспользование
   HTTP connection pool; не сжимаются bundle/object Range-загрузки).
 - **0.4.6** (быстрые immutable `tar.zst` bundle с Range-resume для массовых
