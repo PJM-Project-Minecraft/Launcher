@@ -3525,11 +3525,10 @@ fn launch_profile(
         return Err(reason.into_alert());
     }
 
-    // Мгновенный выход с ненулевым кодом — это не нормальное закрытие, а краш на
-    // старте. Возвращаем ошибку (панель остаётся видимой с путём к логу), иначе
-    // краш проглатывается как успех и кнопка «Играть» просто снова становится
-    // активной — игра будто «не запустилась».
-    if is_fast_launch_failure(elapsed, status.success()) {
+    // Любой ненулевой код — ошибка, даже если медленный диск или большая сборка
+    // добрались до неё позже порога FAST_LAUNCH_FAILURE. Иначе такой краш считался
+    // обычным закрытием: панель исчезала, и игрок молча возвращался на главную.
+    if is_launch_failure(status.success()) {
         let tail = read_log_tail(&log_path, 20);
         return Err(launch_failure_message(status.code(), &log_path, &tail));
     }
@@ -3548,6 +3547,11 @@ fn is_fast_launch_failure(elapsed: Duration, success: bool) -> bool {
     !success && elapsed < FAST_LAUNCH_FAILURE
 }
 
+/// Ненулевой код процесса никогда не является штатным закрытием Minecraft.
+fn is_launch_failure(success: bool) -> bool {
+    !success
+}
+
 /// Последние `max_lines` непустых строк лога запуска — для показа игроку прямо в
 /// сообщении об ошибке без открытия файла. Отсутствие/нечитаемость лога → пустая строка.
 fn read_log_tail(path: &Path, max_lines: usize) -> String {
@@ -3557,15 +3561,14 @@ fn read_log_tail(path: &Path, max_lines: usize) -> String {
     lines[start..].join("\n").trim().to_string()
 }
 
-/// Сообщение об ошибке мгновенного падения: код выхода, путь к полному логу и его хвост.
+/// Сообщение об аварийном завершении: код выхода, путь к полному логу и его хвост.
 fn launch_failure_message(code: Option<i32>, log_path: &Path, tail: &str) -> String {
     let code_part = match code {
         Some(c) => format!("код {}", c),
         None => "аварийно (сигнал)".to_string(),
     };
     let mut msg = format!(
-        "Minecraft не запустился — процесс завершился сразу ({}). Обычно причина \
-         в команде запуска профиля или несовместимом клиенте. Полный лог: {}",
+        "Minecraft завершился с ошибкой ({}). Полный лог: {}",
         code_part,
         log_path.display()
     );
@@ -5374,13 +5377,20 @@ mod tests {
     }
 
     #[test]
-    fn fast_failure_only_on_quick_nonzero_exit() {
+    fn fast_failure_is_only_for_playtime_accounting() {
         // Мгновенный краш: быстро + ошибка → распознаём.
         assert!(is_fast_launch_failure(Duration::from_secs(2), false));
         // Быстрый, но успешный выход (игрок сразу закрыл) — не ошибка.
         assert!(!is_fast_launch_failure(Duration::from_secs(2), true));
-        // Долгая сессия с ненулевым кодом — нормальное закрытие, не мгновенный краш.
+        // Долгую сессию можно учитывать в наигранном времени, даже если она
+        // завершилась крашем.
         assert!(!is_fast_launch_failure(Duration::from_secs(120), false));
+    }
+
+    #[test]
+    fn nonzero_exit_is_always_reported_as_launch_failure() {
+        assert!(is_launch_failure(false));
+        assert!(!is_launch_failure(true));
     }
 
     #[test]
@@ -5393,6 +5403,7 @@ mod tests {
         assert!(msg.contains("код 1"));
         assert!(msg.contains("/data/profile/launch.log"));
         assert!(msg.contains("Unable to access jarfile"));
+        assert!(!msg.contains("завершился сразу"));
     }
 
     #[test]
@@ -5400,6 +5411,32 @@ mod tests {
         let msg = launch_failure_message(None, Path::new("/x/launch.log"), "");
         assert!(msg.contains("аварийно (сигнал)"));
         assert!(!msg.contains("Последние строки"));
+    }
+
+    #[test]
+    fn launch_command_keeps_windows_paths_on_another_drive_as_single_arguments() {
+        let values = PlaceholderValues {
+            java: r#"D:\Project Minecraft\runtime\bin\javaw.exe"#.to_string(),
+            game_dir: r#"D:\Project Minecraft\profiles\main\files"#.to_string(),
+            profile_dir: r#"D:\Project Minecraft\profiles\main"#.to_string(),
+            login: "Player".to_string(),
+            uuid: "uuid".to_string(),
+            access_token: "token".to_string(),
+            jvm_args: vec![
+                r#"-javaagent:C:\Users\Player\AppData\Project Minecraft\agent.jar"#.to_string(),
+            ],
+        };
+
+        let command = render_command(
+            "{java} {jvm_args} --gameDir {game_dir} --profile {profile_dir}",
+            &values,
+        )
+        .unwrap();
+
+        assert_eq!(command[0], values.java);
+        assert_eq!(command[1], values.jvm_args[0]);
+        assert_eq!(command[3], values.game_dir);
+        assert_eq!(command[5], values.profile_dir);
     }
 
     #[test]
