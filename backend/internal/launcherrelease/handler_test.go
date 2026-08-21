@@ -124,12 +124,15 @@ func TestCreateRejectsBadVersion(t *testing.T) {
 
 func TestV2UploadReturnsDurableJobBeforeActivation(t *testing.T) {
 	service := newTestService(t)
+	broker := events.NewBroker()
+	subscriptionID, eventChannel := broker.Subscribe()
+	defer broker.Unsubscribe(subscriptionID)
 	app := fiber.New(fiber.Config{BodyLimit: 512 * 1024 * 1024})
 	auth := func(c fiber.Ctx) error {
 		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
 		return c.Next()
 	}
-	NewHandler(service, nil, queuedPublisher{}).RegisterRoutesWithV1Bridge(app, auth, false)
+	NewHandler(service, broker, queuedPublisher{}).RegisterRoutesWithV1Bridge(app, auth, false)
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	_ = writer.WriteField("version", "1.0.0")
@@ -156,6 +159,11 @@ func TestV2UploadReturnsDurableJobBeforeActivation(t *testing.T) {
 	}
 	if release.IsActive || release.PublishedAt != nil {
 		t.Fatalf("staged upload entered channel before worker: %+v", release)
+	}
+	select {
+	case event := <-eventChannel:
+		t.Fatalf("staged upload published client event before activation: %q", event)
+	default:
 	}
 }
 

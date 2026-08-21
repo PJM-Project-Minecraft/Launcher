@@ -358,7 +358,7 @@ func (s *Service) Blob(ctx context.Context, profileID, hash string) (string, int
 
 func (s *Service) Jobs(ctx context.Context) ([]models.DeliveryJob, error) {
 	var jobs []models.DeliveryJob
-	err := s.db.WithContext(ctx).Order("created_at desc").Limit(100).Find(&jobs).Error
+	err := s.db.WithContext(ctx).Order("created_at desc").Find(&jobs).Error
 	return jobs, err
 }
 

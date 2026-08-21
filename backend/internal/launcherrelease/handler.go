@@ -170,7 +170,6 @@ func (h Handler) create(c fiber.Ctx) error {
 			_ = h.service.PurgeStaged(c.Context(), release.ID)
 			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Delivery v2 не принял job: " + queueErr.Error()})
 		}
-		h.notifyReleaseChanged()
 		return c.Status(http.StatusAccepted).JSON(job)
 	}
 	h.notifyReleaseChanged()
@@ -189,7 +188,6 @@ func (h Handler) retry(c fiber.Ctx) error {
 	if err != nil {
 		return h.writeError(c, err)
 	}
-	h.notifyReleaseChanged()
 	return c.Status(http.StatusAccepted).JSON(job)
 }
 

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"launcher-backend/internal/events"
 	"launcher-backend/internal/models"
 
 	"gorm.io/driver/sqlite"
@@ -281,7 +282,10 @@ func TestLauncherJobResumesAndActivatesOutsideUploadRequest(t *testing.T) {
 	if err := db.Model(&job).Update("status", "running").Error; err != nil {
 		t.Fatal(err)
 	}
-	NewWatcher(service, nil).reconcileLauncherJobs()
+	broker := events.NewBroker()
+	subscriptionID, eventChannel := broker.Subscribe()
+	defer broker.Unsubscribe(subscriptionID)
+	NewWatcher(service, broker).reconcileLauncherJobs()
 	if err := db.First(&job, "id = ?", job.ID).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -293,6 +297,20 @@ func TestLauncherJobResumesAndActivatesOutsideUploadRequest(t *testing.T) {
 	}
 	if !release.IsActive || release.PublishedAt == nil {
 		t.Fatalf("launcher release was not atomically activated: %+v", release)
+	}
+	activationSeen := false
+	for {
+		select {
+		case event := <-eventChannel:
+			if event == launcherReleaseEvent {
+				activationSeen = true
+			}
+		default:
+			if !activationSeen {
+				t.Fatal("launcher activation event was not published after durable activation")
+			}
+			return
+		}
 	}
 }
 
@@ -416,5 +434,47 @@ func TestGarbageCollectRemovesTombstonedLauncherSourceAfterGrace(t *testing.T) {
 	}
 	if err := db.First(&models.LauncherRelease{}, "id = ?", release.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("launcher metadata survived GC: %v", err)
+	}
+}
+
+func TestGarbageCollectRecoversInterruptedQuarantine(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "client.jar"), []byte("current"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := service.manifestPath(releaseID)
+	if err := os.Rename(manifest, manifest+gcFileSuffix); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanID := newID()
+	orphan := filepath.Join(service.launcherRoot, "orphan"+gcLauncherMarker+orphanID)
+	if err := os.MkdirAll(orphan, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, "launcher"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.GarbageCollect(context.Background(), 1, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(manifest); err != nil {
+		t.Fatalf("manifest with existing metadata was not restored: %v", err)
+	}
+	if _, err := os.Stat(manifest + gcFileSuffix); !os.IsNotExist(err) {
+		t.Fatalf("manifest quarantine survived recovery: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("committed launcher quarantine was not finalized: %v", err)
 	}
 }

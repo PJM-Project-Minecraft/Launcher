@@ -20,6 +20,7 @@ import (
 )
 
 const deliveryEvent = "delivery-v2"
+const launcherReleaseEvent = "launcher-release"
 
 var defaultPreservePaths = []string{
 	"saves/", "resourcepacks/", "shaderpacks/", "screenshots/", "logs/",
@@ -136,7 +137,10 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 	})
 	ended := time.Now().UTC()
 	if publishErr != nil {
-		_ = w.updateJob(&job, map[string]any{"status": "failed", "phase": "failed", "message": "Публикация отклонена", "error": publishErr.Error(), "ended_at": &ended})
+		if err := w.updateJob(&job, map[string]any{"status": "failed", "phase": "failed", "message": "Публикация отклонена", "error": publishErr.Error(), "ended_at": &ended}); err != nil {
+			slog.Error("delivery v2 failed status persistence failed", "profile", profileID, "generation", generation, "error", err)
+			return
+		}
 		failed := filepath.Join(filepath.Dir(processing), generation+".failed")
 		_ = os.Rename(processing, failed)
 		slog.Error("delivery v2 publication failed", "profile", profileID, "generation", generation, "error", publishErr)
@@ -291,7 +295,7 @@ func (w *Watcher) reconcileLauncherJobs() {
 			w.launcherActivated()
 		}
 		if w.broker != nil {
-			w.broker.Publish(deliveryEvent)
+			w.broker.Publish(launcherReleaseEvent)
 		}
 	}
 }
