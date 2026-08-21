@@ -113,7 +113,7 @@ fn download_resumable(
     if offset > 0 {
         request = request.header(RANGE, format!("bytes={offset}-"));
     }
-    let mut response = request
+    let response = request
         .send()
         .map_err(|error| format!("Не удалось скачать bundle: {error}"))?;
 
@@ -132,20 +132,15 @@ fn download_resumable(
         .open(path)
         .map_err(|_| "Не удалось записать bundle.".to_string())?;
     let mut downloaded = if append { offset } else { 0 };
-    let mut buffer = [0_u8; 256 * 1024];
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|error| format!("Соединение при скачивании bundle оборвалось: {error}"))?;
-        if read == 0 {
-            break;
-        }
+    crate::read_response_chunks(response, |buffer| {
         output
-            .write_all(&buffer[..read])
+            .write_all(buffer)
             .map_err(|_| "Не удалось записать bundle.".to_string())?;
-        downloaded += read as u64;
+        downloaded += buffer.len() as u64;
         progress(downloaded.min(expected_size), expected_size);
-    }
+        Ok(())
+    })
+    .map_err(|error| format!("Соединение при скачивании bundle оборвалось: {error}"))?;
     output
         .flush()
         .map_err(|_| "Не удалось сохранить bundle.".to_string())?;

@@ -70,9 +70,15 @@ fn download_and_verify(
     if !response.status().is_success() {
         return Ok(false);
     }
-    let Ok(bytes) = response.bytes() else {
+    let mut bytes = Vec::new();
+    if crate::read_response_chunks(response, |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })
+    .is_err()
+    {
         return Ok(false);
-    };
+    }
     let tmp = path.with_extension("part");
     if fs::write(&tmp, &bytes).is_err() {
         return Ok(false);

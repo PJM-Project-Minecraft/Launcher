@@ -2746,7 +2746,7 @@ fn download_one_file(
     if is_backend {
         request = request.bearer_auth(token);
     }
-    let mut response = request
+    let response = request
         .send()
         .map_err(|_| format!("Не удалось скачать {}", file.path))?;
     if !response.status().is_success() {
@@ -2762,21 +2762,15 @@ fn download_one_file(
         File::create(&temp_path).map_err(|_| format!("Не удалось записать {}", file.path))?;
     let mut hasher = Sha256::new();
     let mut file_bytes = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|_| format!("Ошибка чтения {}", file.path))?;
-        if read == 0 {
-            break;
-        }
+    read_response_chunks(response, |buffer| {
         output
-            .write_all(&buffer[..read])
+            .write_all(buffer)
             .map_err(|_| format!("Ошибка записи {}", file.path))?;
-        hasher.update(&buffer[..read]);
-        file_bytes += read as u64;
-    }
+        hasher.update(buffer);
+        file_bytes += buffer.len() as u64;
+        Ok(())
+    })
+    .map_err(|error| format!("Ошибка чтения {}: {error}", file.path))?;
     output
         .flush()
         .map_err(|_| format!("Ошибка записи {}", file.path))?;
@@ -2826,8 +2820,20 @@ fn ensure_java_runtime(
         .get(JAVA_RUNTIME_INDEX_URL)
         .send()
         .map_err(|_| "Не удалось получить список Java runtime.".to_string())?;
-    let index: JavaRuntimeIndex =
-        parse_json_response(index_response, "Не удалось прочитать список Java runtime.")?;
+    if !index_response.status().is_success() {
+        return Err(format!(
+            "Не удалось получить список Java runtime: HTTP {}.",
+            index_response.status().as_u16()
+        ));
+    }
+    let mut index_data = Vec::new();
+    read_response_chunks(index_response, |chunk| {
+        index_data.extend_from_slice(chunk);
+        Ok(())
+    })
+    .map_err(|error| format!("Не удалось прочитать список Java runtime: {error}"))?;
+    let index: JavaRuntimeIndex = serde_json::from_slice(&index_data)
+        .map_err(|_| "Список Java runtime повреждён.".to_string())?;
     let release = index
         .get(platform_key)
         .and_then(|platform| platform.get(component))
@@ -2974,7 +2980,7 @@ fn download_java_files(
                 .map_err(|_| format!("Не удалось создать папку Java: {}", task.path))?;
         }
 
-        let mut response = client
+        let response = client
             .get(&task.download.url)
             .send()
             .map_err(|_| format!("Не удалось скачать Java файл {}", task.path))?;
@@ -2991,20 +2997,12 @@ fn download_java_files(
             File::create(&temp_path).map_err(|_| format!("Не удалось записать {}", task.path))?;
         let mut hasher = Sha1::new();
         let mut file_bytes = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-
-        loop {
-            let read = response
-                .read(&mut buffer)
-                .map_err(|_| format!("Ошибка чтения Java {}", task.path))?;
-            if read == 0 {
-                break;
-            }
+        read_response_chunks(response, |buffer| {
             output
-                .write_all(&buffer[..read])
+                .write_all(buffer)
                 .map_err(|_| format!("Ошибка записи Java {}", task.path))?;
-            hasher.update(&buffer[..read]);
-            file_bytes += read as u64;
+            hasher.update(buffer);
+            file_bytes += buffer.len() as u64;
 
             let progress_bytes = completed_bytes + file_bytes;
             let progress = 0.94 + (progress_bytes as f32 / total_bytes as f32) * 0.04;
@@ -3016,7 +3014,9 @@ fn download_java_files(
                 progress.min(0.98),
                 true,
             );
-        }
+            Ok(())
+        })
+        .map_err(|error| format!("Ошибка чтения Java {}: {error}", task.path))?;
         output
             .flush()
             .map_err(|_| format!("Ошибка записи Java {}", task.path))?;
@@ -4158,15 +4158,106 @@ fn hardened_client_negotiates_and_decodes_zstd() {
     server.join().expect("test server");
 }
 
+#[cfg(not(test))]
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Читает blocking-ответ в отдельном потоке и возвращает управление, если сервер
+/// перестал присылать данные. `reqwest::blocking::ClientBuilder` не экспортирует
+/// async `read_timeout`, а общий `timeout` оборвал бы большие, но исправно
+/// двигающиеся загрузки. После таймаута приёмник удаляется; сетевой поток завершится
+/// при следующем чтении/ошибке сокета, не удерживая состояние синхронизации UI.
+pub(crate) fn read_response_chunks(
+    mut response: reqwest::blocking::Response,
+    mut consume: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("launcher-download-reader".to_string())
+        .spawn(move || loop {
+            let mut buffer = vec![0_u8; 64 * 1024];
+            match response.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(None));
+                    break;
+                }
+                Ok(read) => {
+                    buffer.truncate(read);
+                    if sender.send(Ok(Some(buffer))).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        })
+        .map_err(|_| "Не удалось запустить чтение загрузки.".to_string())?;
+
+    loop {
+        match receiver.recv_timeout(DOWNLOAD_IDLE_TIMEOUT) {
+            Ok(Ok(Some(buffer))) => consume(&buffer)?,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(error)) => return Err(error),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err("Сервер перестал передавать данные (таймаут 30 секунд).".to_string());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Соединение загрузки неожиданно закрылось.".to_string());
+            }
+        }
+    }
+}
+
 /// Клиент для скачивания СТОРОННИХ файлов (Mojang java-runtime, S3-зеркало профилей):
 /// системное хранилище CA + системный прокси (их сертификаты могут быть вне webpki, а
-/// целостность и так гарантируется SHA-сверкой). Без общего таймаута (большие файлы).
+/// целостность и так гарантируется SHA-сверкой). Общего таймаута нет: большие файлы
+/// могут качаться долго. Ограничено только ожидание следующей порции данных, чтобы
+/// замерший ответ не оставлял кнопку запуска навсегда в состоянии синхронизации.
 fn download_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Duration::from_secs(20))
         .build()
         .map_err(|_| "Не удалось создать HTTP клиент.".to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn download_client_stops_when_response_body_stalls() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled response server");
+    let address = listener.local_addr().expect("stalled response address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept download client");
+        let mut request = [0_u8; 4_096];
+        let _ = stream.read(&mut request).expect("read download request");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\nx")
+            .expect("write partial response");
+        stream.flush().expect("flush partial response");
+        thread::sleep(Duration::from_millis(400));
+    });
+
+    let started = Instant::now();
+    let result = download_client()
+        .expect("build download client")
+        .get(format!("http://{address}/stalled-file"))
+        .send()
+        .map_err(|error| error.to_string())
+        .and_then(|response| read_response_chunks(response, |_| Ok(())));
+    let elapsed = started.elapsed();
+
+    server.join().expect("stalled response server");
+    assert!(result.is_err(), "truncated response must fail");
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "stalled body kept the launcher busy for {elapsed:?}"
+    );
 }
 
 /// Клиент для скачивания С БЭКЕНДА (манифест античита, agent.jar/native, authlib,
@@ -4517,7 +4608,7 @@ fn fetch_sha1_bytes(
     expected_size: i64,
     label: &str,
 ) -> Result<Vec<u8>, String> {
-    let mut response = client
+    let response = client
         .get(endpoint)
         .send()
         .map_err(|_| format!("Не удалось скачать {}.", label))?;
@@ -4530,18 +4621,13 @@ fn fetch_sha1_bytes(
     }
 
     let mut data = Vec::new();
-    let mut buffer = [0_u8; 64 * 1024];
     let mut hasher = Sha1::new();
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|_| format!("Ошибка чтения {}.", label))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        data.extend_from_slice(&buffer[..read]);
-    }
+    read_response_chunks(response, |buffer| {
+        hasher.update(buffer);
+        data.extend_from_slice(buffer);
+        Ok(())
+    })
+    .map_err(|error| format!("Ошибка чтения {}: {error}", label))?;
 
     let hash = hex_hash(hasher.finalize().as_slice());
     if !expected_sha1.is_empty() && hash != expected_sha1.to_lowercase() {
