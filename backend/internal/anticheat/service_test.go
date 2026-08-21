@@ -242,6 +242,50 @@ func TestAutoBanOnHighSeverity(t *testing.T) {
 	}
 }
 
+// Регрессия (13.08.2026): нативка матчит маркеры читов ПОДСТРОКОЙ в имени класса, и
+// подстрока встречается в легальном имени — com.fpvdrone.client.renderer.MunitionXrayRenderType
+// (мод сборки) содержит "xray". Java-агент слал такую находку типом "inject", а inject
+// кикает и авто-банит безусловно → 5 игроков забанено ни за что. Теперь маркер идёт типом
+// "class": виден оператору (status new, алерт), но severity 5/soft — не кикает и не банит,
+// пока в блэклисте нет точного правила kind=class.
+func TestClassMarkerDoesNotKickOrBan(t *testing.T) {
+	db := newTestDB(t)
+	svc := NewService(db, "secret", true, nil, "") // autoBan включён
+	ctx := context.Background()
+
+	res, _ := svc.InitHandshake(ctx, "uuid-marker", "Svo_bomb", "hwid-marker", nil)
+	claims, _ := svc.VerifyToken(res.LaunchToken)
+
+	sev, conf, err := svc.RecordDetection(ctx, claims, DetectionInput{
+		Type:      "class",
+		Signature: "xray",
+		Details:   map[string]any{"name": "native:com/fpvdrone/client/renderer/MunitionXrayRenderType"},
+	})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if conf != "soft" || sev >= autoBanSeverity {
+		t.Fatalf("маркер в имени класса обязан быть soft и ниже порога авто-бана: sev=%d conf=%s", sev, conf)
+	}
+	if kick, _ := svc.EvaluateKick(claims, sev, conf, "class"); kick {
+		t.Fatal("маркер в имени класса не должен кикать легального игрока")
+	}
+	var accBans, hwidBans int64
+	db.Model(&models.AccountBan{}).Where("user_uuid = ?", "uuid-marker").Count(&accBans)
+	db.Model(&models.HwidBan{}).Where("hwid_hash = ?", "hwid-marker").Count(&hwidBans)
+	if accBans != 0 || hwidBans != 0 {
+		t.Fatalf("авто-бана по маркеру быть не должно: acc=%d hwid=%d", accBans, hwidBans)
+	}
+	// …но находка обязана остаться видимой оператору, а не утонуть в unmatched.
+	var rec models.Detection
+	if err := db.Where("user_uuid = ?", "uuid-marker").First(&rec).Error; err != nil {
+		t.Fatalf("детект не сохранён: %v", err)
+	}
+	if rec.Status == detectionStatusUnmatched {
+		t.Fatal("маркер должен попадать в review-очередь (status new), а не в unmatched")
+	}
+}
+
 func TestAutoBanEscalatesToPermanent(t *testing.T) {
 	db := newTestDB(t)
 	svc := NewService(db, "secret", true, nil, "")
@@ -377,18 +421,24 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 	if err := svc.Confirm(res.LaunchToken, ConfirmProof{}); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
-	// Агента убили в живой игре: его последний heartbeat — на base (из Confirm), а лаунчер
-	// ПРОДОЛЖАЛ слать keepalive уже после этого (base+70s и base+110s, обе за grace 60s) —
-	// устойчивая связь без агента = лаунчер пережил агента.
-	v.launcherPrev[res.Nonce] = base.Add(70 * time.Second)
-	v.launcherSeen[res.Nonce] = base.Add(110 * time.Second)
 	// В пределах таймаута — тихо, без алертов.
 	svc.reapStale(base.Add(60 * time.Second))
 	if n.silentCount() != 0 {
 		t.Fatal("в пределах таймаута алерта быть не должно")
 	}
-	// Свыше таймаута — мягкий детект: алерт есть, но сессия ЖИВА (её держит keepalive лаунчера).
+	// Молчание свыше таймаута, но лаунчер ещё не доказал устойчивую связь после grace —
+	// ждём (это и есть обычный обрыв интернета у игрока, кикать за него нельзя).
 	svc.reapStale(base.Add(120 * time.Second))
+	if n.silentCount() != 0 {
+		t.Fatal("до истечения grace алерта быть не должно — сеть могла просто моргнуть")
+	}
+	// Агента убили в живой игре: его последний heartbeat — на base (из Confirm), а лаунчер
+	// ПРОДОЛЖАЛ слать keepalive уже после этого (base+190s и base+310s, обе за grace 180s) —
+	// устойчивая связь без агента = лаунчер пережил агента.
+	v.launcherPrev[res.Nonce] = base.Add(190 * time.Second)
+	v.launcherSeen[res.Nonce] = base.Add(310 * time.Second)
+	// Свыше таймаута — мягкий детект: алерт есть, но сессия ЖИВА (её держит keepalive лаунчера).
+	svc.reapStale(base.Add(320 * time.Second))
 	if !v.IsActiveByNonce(res.Nonce) {
 		t.Fatal("reaper больше НЕ должен гасить сессию — её держит keepalive лаунчера")
 	}
@@ -396,7 +446,7 @@ func TestHeartbeatSilentSoftDetect(t *testing.T) {
 		t.Fatalf("ожидался ровно один алерт о молчании агента, получено %d", n.silentCount())
 	}
 	// Повторный проход не должен слать дубль (nonce уже снят с трекинга живости).
-	svc.reapStale(base.Add(200 * time.Second))
+	svc.reapStale(base.Add(400 * time.Second))
 	if n.silentCount() != 1 {
 		t.Fatalf("дедуп: повторного алерта быть не должно, получено %d", n.silentCount())
 	}

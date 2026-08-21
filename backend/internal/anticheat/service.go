@@ -73,10 +73,9 @@ type Service struct {
 
 	shots shotStreakTracker // серии проваленных скриншотов (screenshot_streak.go)
 
-	enforceUnknownMods bool // true — kick за посторонний jar в mods/ (иначе репорт-онли)
-	allowedMu          sync.Mutex
-	allowedHashes      map[string]struct{} // SHA-256 всех файлов сборок (кэш, files.go)
-	allowedAt          time.Time
+	allowedMu     sync.Mutex
+	allowedHashes map[string]struct{} // SHA-256 всех файлов сборок (кэш, files.go)
+	allowedAt     time.Time
 }
 
 func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifier, agentPath string) *Service {
@@ -147,6 +146,15 @@ func (s *Service) EvaluateKick(claims LaunchClaims, severity int, confidence, dt
 	// которого читер мог прибить. Отзыв исполнит игровой сервер (P5-мод).
 	s.Revoke(claims.Login, "детект: "+dtype)
 	return true, dtype
+}
+
+// KickForLauncherUpdate закрывает текущую игровую сессию без бана. Агент получает
+// action=kick на heartbeat, а P5-мод подстраховывает кик через реестр отзывов.
+func (s *Service) KickForLauncherUpdate(claims LaunchClaims, minVersion string) {
+	if s.verifier != nil {
+		s.verifier.InvalidateByNonce(claims.Nonce)
+	}
+	s.Revoke(claims.Login, "обновите лаунчер до версии "+minVersion)
 }
 
 // AgentPath — путь к agent.jar на диске (раздаётся лаунчеру для инжекта в JVM).
@@ -282,10 +290,16 @@ func (s *Service) Heartbeat(ctx context.Context, claims LaunchClaims) (kick bool
 // launcherOutliveGrace — на сколько keepalive лаунчера должен опередить последний
 // heartbeat агента, чтобы счесть, что «лаунчер пережил агента» (агента убили в живой
 // игре). Агент пингует каждые ~30с, поэтому при ОДНОВРЕМЕННОЙ гибели лаунчера и игры
-// keepalive опережает последний heartbeat не более чем на один интервал (~30с); порог
-// 60с (2× интервала, с запасом на джиттер) уверенно отделяет этот случай от ситуации,
-// когда лаунчер реально продолжал слать keepalive уже после смерти агента.
-const launcherOutliveGrace = 60 * time.Second
+// keepalive опережает последний heartbeat не более чем на один интервал (~30с).
+//
+// 60с (2× интервала) оказалось мало: «лаунчер жив ⇒ сеть в порядке ⇒ агента убили» —
+// неверная посылка на слабом канале. Лаунчер настроен НАМНОГО терпимее агента
+// (keepalive раз в 120с с таймаутом 30с против heartbeat раз в 30с с таймаутом 10с),
+// поэтому на потерях агент замолкает, а лаунчер продолжает достукиваться — и честного
+// игрока кикал P5-отзыв. 180с (полтора интервала keepalive поверх пары промахов агента)
+// поднимают планку до ~5–6 мин молчания: убитый агент всё равно ловится, случайный
+// обрыв — нет.
+const launcherOutliveGrace = 180 * time.Second
 
 // silenceDropAfter — предел трекинга молчащей сессии. Пока лаунчер не доказал устойчивую
 // связь (две метки), молчащий nonce остаётся на трекинге: агент может вернуться из обрыва
@@ -450,7 +464,10 @@ var systemSeverity = map[string]int{
 // heuristicTypes — типы нативного агента, которым не с чем совпадать: сигнал в самом
 // факте находки (неизвестный модуль в процессе, LD_PRELOAD). Считаются сопоставленными
 // наравне с системными типами, иначе попали бы в unmatched вместе с мусором.
-var heuristicTypes = map[string]bool{"module-unknown": true, "ld-preload": true}
+// "class" здесь же: маркер в имени класса — находка сама по себе, но пустой блэклист
+// не должен прятать её в unmatched (без алерта и вне review-очереди). Severity/confidence
+// при этом остаются 5/soft, пока в блэклисте нет точного правила kind=class.
+var heuristicTypes = map[string]bool{"module-unknown": true, "ld-preload": true, "class": true}
 
 // normalizeSource валидирует источник детекта по whitelist (анти-спуф source).
 // Пустой источник трактуется как "launcher" (pre-launch скан лаунчера), невалидный —
@@ -712,6 +729,12 @@ func (s *Service) InitHandshake(ctx context.Context, userUUID, login, hwidHash s
 // InitHandshakeWithComponents проверяет баны (точный + fuzzy по компонентам), фиксирует
 // HWID и pre-launch детекты, и при успехе выдаёт launch-token + nonce. Блок = Allowed:false.
 func (s *Service) InitHandshakeWithComponents(ctx context.Context, userUUID, login, hwidHash string, comps HwidComponents, detections []DetectionInput) (InitResult, error) {
+	return s.InitHandshakeWithVersion(ctx, userUUID, login, hwidHash, comps, detections, "0.0.0")
+}
+
+// InitHandshakeWithVersion сохраняет версию лаунчера в подписанном launch-token.
+// Она нужна, чтобы heartbeat мог закрыть уже запущенную игру после обязательного релиза.
+func (s *Service) InitHandshakeWithVersion(ctx context.Context, userUUID, login, hwidHash string, comps HwidComponents, detections []DetectionInput, launcherVersion string) (InitResult, error) {
 	now := s.now()
 
 	if banned, reason := s.accountBanned(ctx, userUUID, now); banned {
@@ -736,13 +759,14 @@ func (s *Service) InitHandshakeWithComponents(ctx context.Context, userUUID, log
 	nonce := randomHex(16)
 	challenge := randomHex(16)
 	claims := LaunchClaims{
-		UUID:      userUUID,
-		Login:     login,
-		HwidHash:  hwidHash,
-		Nonce:     nonce,
-		Challenge: challenge,
-		IssuedAt:  now.Unix(),
-		Expires:   now.Add(launchTokenTTL).Unix(),
+		UUID:            userUUID,
+		Login:           login,
+		HwidHash:        hwidHash,
+		LauncherVersion: launcherVersion,
+		Nonce:           nonce,
+		Challenge:       challenge,
+		IssuedAt:        now.Unix(),
+		Expires:         now.Add(launchTokenTTL).Unix(),
 	}
 	token, err := s.signer.Sign(claims)
 	if err != nil {
@@ -870,7 +894,11 @@ func (s *Service) recordDetection(ctx context.Context, userUUID, login, hwidHash
 	// (sessionID = nonce из launch-token, т.е. post-init /detect). Pre-launch детекты из
 	// init (sessionID="") приходят с НЕаттестованным, клиентом-заданным hwidHash — авто-
 	// бан по ним = вектор подставы (framing). soft-эвристика тоже не банит.
-	autoBanned := s.autoBan && sessionID != "" && severity >= autoBanSeverity && confidence == "hard"
+	// Несовпадение состава сборки — повод немедленно закрыть игру, но не банить:
+	// это может быть ручная установка обычного мода или повреждённый файл после сбоя
+	// диска. Бан остаётся только за подтверждённые сигнатуры инъекции/чита.
+	autoBanned := s.autoBan && d.Type != unknownModType && sessionID != "" &&
+		severity >= autoBanSeverity && confidence == "hard"
 	if autoBanned {
 		s.autoBanEscalated(ctx, userUUID, login, hwidHash, d.Signature, now)
 	}

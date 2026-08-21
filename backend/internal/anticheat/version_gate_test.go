@@ -60,3 +60,18 @@ func TestVersionGateInactiveWithoutMandatory(t *testing.T) {
 		t.Fatalf("status = %d, want 401 (гейт неактивен)", status)
 	}
 }
+
+func TestHeartbeatVersionGateComparison(t *testing.T) {
+	if !launcherUpdateRequired("0.4.9", "0.5.0") {
+		t.Fatal("игра со старым лаунчером должна закрыться после обязательного релиза")
+	}
+	if launcherUpdateRequired("0.5.0", "0.5.0") || launcherUpdateRequired("0.6.0", "0.5.0") {
+		t.Fatal("актуальный или более новый лаунчер не должен кикаться")
+	}
+	if launcherUpdateRequired("0.1.0", "") {
+		t.Fatal("без обязательного релиза гейт выключен")
+	}
+	if !launcherUpdateRequired("", "0.5.0") {
+		t.Fatal("легаси-токен без версии считается устаревшим")
+	}
+}

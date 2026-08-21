@@ -30,10 +30,9 @@ const (
 	maxReportedFiles = 512
 )
 
-// SetEnforceUnknownMods включает kick за посторонний jar в mods/. По умолчанию false
-// (репорт-онли): детект пишется и алертит, но игрока не выкидывает — чтобы сначала
-// увидеть в проде, не шлёт ли легальный мод свои jar-ы в mods/ на рантайме.
-func (s *Service) SetEnforceUnknownMods(v bool) { s.enforceUnknownMods = v }
+// SetEnforceUnknownMods оставлен для совместимости конфигурации. Несовпадение сборки
+// теперь всегда закрывает игру, но никогда не выдаёт автоматический бан.
+func (s *Service) SetEnforceUnknownMods(_ bool) {}
 
 // CheckFiles сверяет инвентарь mods/ игрока с хешами файлов, опубликованных админом
 // в сборках, и возвращает решение о kick.
@@ -95,9 +94,6 @@ func (s *Service) CheckFiles(ctx context.Context, claims LaunchClaims, files []R
 	})
 	if err != nil {
 		return false, err
-	}
-	if !s.enforceUnknownMods {
-		return false, nil
 	}
 	kick, _ := s.EvaluateKick(claims, severity, confidence, unknownModType)
 	return kick, nil

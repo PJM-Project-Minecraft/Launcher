@@ -56,12 +56,29 @@ final class P5ServerHandler {
         String challenge = randomHex(16);
         PENDING.put(name, challenge);
         PacketDistributor.sendToPlayer(player, new P5Payloads.P5Challenge(challenge));
-        // Таймаут: нет ответа за окно → верифицируем с пустым proof (бэкенд отвергнет).
+        scheduleCheck(player, name, 1);
+    }
+
+    /** Нет ответа за окно — перевысылаем challenge (клиент мог быть занят загрузкой мира
+     *  на слабом канале). Кончились попытки → верифицируем с пустым proof (бэкенд отвергнет). */
+    private static void scheduleCheck(ServerPlayer player, String name, int attempt) {
         TIMER.schedule(() -> {
-            String pending = PENDING.remove(name);
-            if (pending != null && player.connection != null) {
-                verifyAndAct(player, name, pending, "");
+            String pending = PENDING.get(name);
+            if (pending == null || player.connection == null) {
+                return; // клиент уже ответил или вышел
             }
+            if (attempt < P5Config.CHALLENGE_ATTEMPTS) {
+                // Отправка — строго на серверном треде (мы в таймере).
+                player.server.execute(() -> {
+                    if (player.connection != null) {
+                        PacketDistributor.sendToPlayer(player, new P5Payloads.P5Challenge(pending));
+                    }
+                });
+                scheduleCheck(player, name, attempt + 1);
+                return;
+            }
+            PENDING.remove(name);
+            verifyAndAct(player, name, pending, "");
         }, P5Config.RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 

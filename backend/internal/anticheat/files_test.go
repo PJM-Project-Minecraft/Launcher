@@ -17,7 +17,10 @@ func newFilesTestDB(t *testing.T, dsn string) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Detection{}, &models.CheatSignature{}, &models.GameFile{}); err != nil {
+	if err := db.AutoMigrate(
+		&models.Detection{}, &models.CheatSignature{}, &models.GameFile{},
+		&models.AccountBan{}, &models.HwidBan{}, &models.Hwid{},
+	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -32,12 +35,12 @@ func TestCheckFilesDetectsUnknownJar(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	svc := NewService(db, "secret", false, nil, "")
+	svc := NewService(db, "secret", true, nil, "")
 	claims := LaunchClaims{UUID: "uuid-files", Login: "Liko", Nonce: "n-files"}
 	ctx := context.Background()
 
-	// Репорт-онли (дефолт): посторонний jar пишется детектом, но игрок не кикается.
-	// Хеш из сборки принимается в любом регистре.
+	// Посторонний jar закрывает игру. Хеш из сборки принимается в любом регистре.
+	// Даже при autoBan=true несовпадение сборки НЕ банит аккаунт или HWID.
 	kick, err := svc.CheckFiles(ctx, claims, []ReportedFile{
 		{Path: "mods/ok.jar", Sha256: strings.ToUpper(known)},
 		{Path: "mods/x.jar", Sha256: strings.Repeat("b", 64)},
@@ -45,8 +48,8 @@ func TestCheckFilesDetectsUnknownJar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
-	if kick {
-		t.Fatal("в репорт-онли kick не ожидается")
+	if !kick {
+		t.Fatal("посторонний jar должен закрыть игру")
 	}
 	var detections []models.Detection
 	if err := db.Where("user_uuid = ?", claims.UUID).Find(&detections).Error; err != nil {
@@ -58,15 +61,20 @@ func TestCheckFilesDetectsUnknownJar(t *testing.T) {
 	if detections[0].Confidence != "hard" || detections[0].Severity < 7 {
 		t.Fatalf("детект должен быть hard и кикабельным: %+v", detections[0])
 	}
+	var accountBans, hwidBans int64
+	db.Model(&models.AccountBan{}).Where("user_uuid = ?", claims.UUID).Count(&accountBans)
+	db.Model(&models.HwidBan{}).Count(&hwidBans)
+	if accountBans != 0 || hwidBans != 0 {
+		t.Fatalf("несовпадение сборки не должно банить: accounts=%d hwids=%d", accountBans, hwidBans)
+	}
 
-	// Enforce: посторонний jar → kick. Имя другое, иначе сработает дедуп детектов.
-	svc.SetEnforceUnknownMods(true)
+	// Имя другое, иначе сработает дедуп детектов.
 	kick, err = svc.CheckFiles(ctx, claims, []ReportedFile{{Path: "mods/y.jar", Sha256: strings.Repeat("c", 64)}})
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
 	if !kick {
-		t.Fatal("в enforce ожидался kick за посторонний jar")
+		t.Fatal("ожидалось закрытие игры за посторонний jar")
 	}
 
 	// Jar загрузился и исчез с диска (self-delete): хеша нет, но это тоже детект.

@@ -19,14 +19,17 @@ type LaunchClaims struct {
 	// Разделение закрывает impersonation: мод читает System.getProperty("ac.token") и
 	// раньше мог им опрашивать /screenshot/pending и заливать «чистый» кадр вместо
 	// реального захвата экрана.
-	Aud       string `json:"aud,omitempty"`
-	UUID      string `json:"uuid"`
-	Login     string `json:"login"`
-	HwidHash  string `json:"hwid"`
-	Nonce     string `json:"nonce"`
-	Challenge string `json:"chal"` // attestation: агент обязан вернуть его в confirm-proof
-	IssuedAt  int64  `json:"iat"`
-	Expires   int64  `json:"exp"`
+	Aud      string `json:"aud,omitempty"`
+	UUID     string `json:"uuid"`
+	Login    string `json:"login"`
+	HwidHash string `json:"hwid"`
+	// LauncherVersion фиксируется в момент handshake/init. Heartbeat сравнивает её с
+	// актуальным обязательным релизом и закрывает уже запущенную игру после выкладки.
+	LauncherVersion string `json:"lv,omitempty"`
+	Nonce           string `json:"nonce"`
+	Challenge       string `json:"chal"` // attestation: агент обязан вернуть его в confirm-proof
+	IssuedAt        int64  `json:"iat"`
+	Expires         int64  `json:"exp"`
 }
 
 // audScreenshot — область действия токена скриншот-эндпоинтов (только процесс лаунчера).

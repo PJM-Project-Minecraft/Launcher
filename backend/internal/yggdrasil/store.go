@@ -323,22 +323,29 @@ func (s *Store) SessionByNonce(nonce string) (Session, bool) {
 	return sess, true
 }
 
-// VerifiedSessionByName возвращает живую Verified-сессию игрока по нику. Для P5:
-// игровой сервер знает ник входящего игрока, а не nonce. Один аккаунт = одна активная
-// сессия, поэтому первая подходящая корректна.
-func (s *Store) VerifiedSessionByName(name string) (Session, bool) {
+// VerifiedSessionsByName возвращает ВСЕ живые Verified-сессии игрока по нику. Для P5:
+// игровой сервер знает ник входящего игрока, а не nonce.
+//
+// Почему все, а не первая: «один аккаунт = одна активная сессия» — неправда при обрыве.
+// Игра/лаунчер упали без cleanup → старая сессия живёт по TTL (15 мин), игрок заходит
+// снова с новым accessToken, и в map лежат ДВЕ. Итерация по map случайна, так что P5
+// сверял proof то с новой, то со старой сессией — честный игрок ловил bad_proof по
+// монетке (в enforce это кик на входе). Все сессии принадлежат этому же игроку и уже
+// Verified, поэтому совпадение с любой из них — валидный ответ.
+func (s *Store) VerifiedSessionsByName(name string) []Session {
 	if name == "" {
-		return Session{}, false
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
+	var out []Session
 	for _, sess := range s.sessions {
 		if sess.Name == name && sess.Verified && now.Before(sess.expiresAt) {
-			return sess, true
+			out = append(out, sess)
 		}
 	}
-	return Session{}, false
+	return out
 }
 
 // ActiveSessions возвращает все живые Verified-сессии (онлайн-игроки) для дашборда.

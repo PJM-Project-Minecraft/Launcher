@@ -71,6 +71,30 @@ func TestHeartbeatClearsSilenceRevocation(t *testing.T) {
 	}
 }
 
+func TestLauncherUpdateRevokesWithoutBan(t *testing.T) {
+	ygg := &fakeVerifier{verified: map[string]bool{}}
+	db := newTestDB(t)
+	svc := NewService(db, "secret", true, ygg, "")
+	res, _ := svc.InitHandshakeWithVersion(
+		context.Background(), "uuid-update", "PlayerUpdate", "hwid-update",
+		HwidComponents{}, nil, "0.4.9",
+	)
+	claims, _ := svc.VerifyToken(res.LaunchToken)
+	if claims.LauncherVersion != "0.4.9" {
+		t.Fatalf("версия лаунчера не попала в claims: %+v", claims)
+	}
+	ygg.MarkVerifiedByNonce(claims.Nonce)
+
+	svc.KickForLauncherUpdate(claims, "0.5.0")
+	if ygg.IsActiveByNonce(claims.Nonce) {
+		t.Fatal("обновление должно инвалидировать игровую сессию")
+	}
+	orders := svc.RevokedAmong([]string{"PlayerUpdate"})
+	if len(orders) != 1 || orders[0].Reason != "обновите лаунчер до версии 0.5.0" {
+		t.Fatalf("ожидался приказ на кик за обновление: %+v", orders)
+	}
+}
+
 // Кик исполняет игровой сервер, а не агент в JVM игрока: молчание heartbeat и
 // detect-kick обязаны попадать в список отзывов, а новый запуск игры (Confirm) —
 // его снимать. Иначе игрок, прибивший агента, продолжает играть (было до P-1).
@@ -101,8 +125,8 @@ func TestRevokeOnAgentSilentAndDetectKick(t *testing.T) {
 	// Агент замолчал дольше таймаута, а лаунчер всё это время устойчиво пингует
 	// (две метки после grace) → агента прибили в живой игре.
 	base := now
-	now = now.Add(5 * time.Minute)
-	ygg.launcherPrev[claims.Nonce] = base.Add(3 * time.Minute)
+	now = now.Add(8 * time.Minute)
+	ygg.launcherPrev[claims.Nonce] = base.Add(4 * time.Minute) // > grace (3 мин)
 	ygg.launcherSeen[claims.Nonce] = now
 	svc.reapStale(now)
 	orders := svc.RevokedAmong([]string{"Liko", "ДругойИгрок"})

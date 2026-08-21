@@ -46,17 +46,19 @@ type Handler struct {
 type OnlineSessionsProvider interface {
 	ActiveSessions() []yggdrasil.OnlineSession
 	SessionByNonce(nonce string) (yggdrasil.Session, bool)
-	// VerifiedSessionByName — живая Verified-сессия игрока по нику (для P5-verify).
-	VerifiedSessionByName(name string) (yggdrasil.Session, bool)
+	// VerifiedSessionsByName — живые Verified-сессии игрока по нику (для P5-verify).
+	VerifiedSessionsByName(name string) []yggdrasil.Session
 }
 
 func NewHandler(service *Service) Handler {
 	return Handler{
-		service:           service,
-		initLimiter:       newRateLimiter(10, time.Minute),
-		confirmLimiter:    newRateLimiter(6, time.Minute),
-		detectLimiter:     newRateLimiter(40, time.Minute),
-		hbLimiter:         newRateLimiter(6, time.Minute),
+		service:        service,
+		initLimiter:    newRateLimiter(10, time.Minute),
+		confirmLimiter: newRateLimiter(6, time.Minute),
+		detectLimiter:  newRateLimiter(40, time.Minute),
+		// 12, а не 6: heartbeat теперь делает до 2 попыток за цикл (промах на слабом
+		// канале не должен стоить 30с тишины), плюс редкий diag с того же ключа.
+		hbLimiter:         newRateLimiter(12, time.Minute),
 		screenshotLimiter: newRateLimiter(10, time.Minute),
 	}
 }
@@ -175,7 +177,7 @@ const (
 	// maxHwidMacs — потолок хешей MAC-адресов в компонентах HWID.
 	maxHwidMacs = 16
 	// hwidHashLen — длина солёного SHA-256 в hex (формат всех хешей HWID лаунчера,
-	// launcher-slint/src/anticheat/hwid.rs).
+	// src-tauri/src/anticheat/hwid.rs).
 	hwidHashLen = 64
 )
 
@@ -214,6 +216,10 @@ func validHwidComponents(comps HwidComponents) bool {
 }
 
 func (h Handler) init(c fiber.Ctx) error {
+	clientVersion := c.Get("X-Launcher-Version")
+	if clientVersion == "" {
+		clientVersion = "0.0.0"
+	}
 	// Форс-апдейт: старый лаунчер не получает launch-token, пока не обновится.
 	// Запрос без заголовка — легаси-версия (≤0.1.0), считается "0.0.0".
 	if h.versionGate != nil {
@@ -223,11 +229,7 @@ func (h Handler) init(c fiber.Ctx) error {
 			slog.Warn("anticheat: version gate degraded (fail-open)", "error", err)
 		}
 		if err == nil && minVersion != "" {
-			clientVersion := c.Get("X-Launcher-Version")
-			if clientVersion == "" {
-				clientVersion = "0.0.0"
-			}
-			if launcherrelease.CompareVersions(clientVersion, minVersion) < 0 {
+			if launcherUpdateRequired(clientVersion, minVersion) {
 				return c.Status(http.StatusUpgradeRequired).JSON(ErrorResponse{
 					Message: "Требуется обновление лаунчера до версии " + minVersion,
 				})
@@ -263,7 +265,10 @@ func (h Handler) init(c fiber.Ctx) error {
 		req.Detections = req.Detections[:maxInitDetections]
 	}
 	userUUID := yggdrasil.NormalizeUUID(user.ProviderUUID, user.Login)
-	result, err := h.service.InitHandshakeWithComponents(c.Context(), userUUID, user.Login, req.HwidHash, req.HwidComponents, req.Detections)
+	result, err := h.service.InitHandshakeWithVersion(
+		c.Context(), userUUID, user.Login, req.HwidHash, req.HwidComponents,
+		req.Detections, clientVersion,
+	)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Ошибка инициализации"})
 	}
@@ -388,11 +393,35 @@ func (h Handler) heartbeat(c fiber.Ctx) error {
 	}
 	// kick=true, если сессию погасил detect; blacklistVersion — для ре-фетча правил агентом.
 	kick, version := h.service.Heartbeat(c.Context(), claims)
+	reason := ""
+	// Обязательный релиз мог появиться уже после запуска Minecraft. Проверяем его на
+	// каждом heartbeat: старый лаунчер получает action=kick, сессия инвалидируется,
+	// а P5-мод кикнет игрока даже если Java-агент был остановлен.
+	if !kick && h.versionGate != nil {
+		minVersion, gateErr := h.versionGate.MinMandatoryVersion(c.Context())
+		if gateErr != nil {
+			slog.Warn("anticheat: heartbeat version gate degraded (fail-open)", "error", gateErr)
+		} else if launcherUpdateRequired(claims.LauncherVersion, minVersion) {
+			h.service.KickForLauncherUpdate(claims, minVersion)
+			kick = true
+			reason = "launcher_update"
+		}
+	}
 	action := "none"
 	if kick {
 		action = "kick"
 	}
-	return c.JSON(fiber.Map{"action": action, "blacklistVersion": version})
+	return c.JSON(fiber.Map{"action": action, "reason": reason, "blacklistVersion": version})
+}
+
+func launcherUpdateRequired(clientVersion, minVersion string) bool {
+	if minVersion == "" {
+		return false
+	}
+	if clientVersion == "" {
+		clientVersion = "0.0.0"
+	}
+	return launcherrelease.CompareVersions(clientVersion, minVersion) < 0
 }
 
 // diag принимает телеметрию самовосстановления тредов агента. Назначение —

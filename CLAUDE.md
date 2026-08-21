@@ -331,18 +331,24 @@ Windows использует WebView2. Состояние Rust→React идёт 
   RDP), решение по такому детекту принимает админ.
 
 **Осталось:**
-- **P5** — серверно-авторитетный in-game handshake. **Бэкенд ГОТОВ и оттестирован**
-  (`POST /api/anticheat/p5/verify`, `internal/anticheat/p5.go`; конфиг `ANTICHEAT_P5_SECRET`
-  + `ANTICHEAT_P5_ENFORCE`, репорт-онли по дефолту; секрет уже в прод `.env`, enforce=false).
-  **NeoForge-мод в `anticheat-neoforge/` СОБИРАЕТСЯ чисто против NeoForge 21.1.233 / MC 1.21.1**
-  (`gradle build` → валидный jar, 0 предупреждений; network-API проверен), но **в игре НЕ
-  протестирован** (нет игрового рантайма здесь): обкатать на dev-сервере в репорт-онли,
-  разложить (серверный jar → на игровой сервер + `ANTICHEAT_P5_SECRET` в его env; клиентский
-  → в профиль mods/ + «Сканировать файлы»), дать игрокам обновиться, потом
-  `ANTICHEAT_P5_ENFORCE=true`. Сборка: `cd anticheat-neoforge && gradle build` (Gradle 8.10+,
-  JDK 21; версия NeoForge в `gradle.properties`). Rollout и протокол — `anticheat-neoforge/README.md`.
+- **P5** — серверно-авторитетный in-game handshake. **Раскатан и ENFORCE=true на проде
+  с 30.07.2026** (`POST /api/anticheat/p5/verify` + `/p5/revoked`, `internal/anticheat/p5.go`;
+  конфиг `ANTICHEAT_P5_SECRET` + `ANTICHEAT_P5_ENFORCE`). Мод — `anticheat-neoforge/`
+  (NeoForge 21.1.233 / MC 1.21.1): серверный jar на игровом сервере + `ANTICHEAT_P5_SECRET`
+  в его env, клиентский — в профиль mods/. Сборка: `cd anticheat-neoforge && gradle build`
+  (Gradle 8.10+, JDK 21). Rollout и протокол — `anticheat-neoforge/README.md`.
   ⚠️ Честный потолок: accessToken есть и у читера → P5 это ПРИНУЖДЕНИЕ ПРИСУТСТВИЯ (клиент
   без мода кикается), не крипто-невозможность против полностью переписанного клиента.
+  ⚠️ **Ложные кики на слабом канале (найдено 31.07.2026, фиксы в этом же коммите).** Два пути:
+  (1) `bad_proof` на входе — мод давал клиенту 8с на ответ, а challenge уходит на
+  `PlayerLoggedInEvent`, когда клиент ещё грузит мир; теперь 3 попытки × 15с с перевысылкой,
+  а «клиент промолчал» отделено от «ответил неверно» причиной `no_response`. Плюс бэкенд
+  сверяет proof со ВСЕМИ живыми Verified-сессиями ника (после обрыва их две, итерация по
+  map выбирала случайную → кик по монетке).
+  (2) кик по отзыву «агент перестал отвечать» — посылка «лаунчер жив ⇒ агента убили» неверна:
+  лаунчер терпимее агента (keepalive 120с/таймаут 30с против heartbeat 30с/10с). Подняли
+  `launcherOutliveGrace` 60с→180с, у агента таймаут 10→20с, 2 попытки за цикл и пересоздание
+  HttpClient после серии промахов (залипший пул после потери TCP-состояния на NAT/Wi-Fi).
 - ~~Включить attestation~~ — сделано, `ANTICHEAT_REQUIRE_ATTESTATION=true` на проде (см. P3 выше).
 
 **Ключевая архитектурная гоча:**

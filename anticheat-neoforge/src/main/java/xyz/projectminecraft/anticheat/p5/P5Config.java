@@ -13,8 +13,14 @@ final class P5Config {
     static final String SECRET = System.getenv().getOrDefault("ANTICHEAT_P5_SECRET", "");
     static final String API = trimSlash(System.getenv().getOrDefault("LAUNCHER_API", "https://launcher.likonchik.xyz"));
 
-    /** Сколько ждать ответ клиента, прежде чем считать proof пустым (мс). */
-    static final long RESPONSE_TIMEOUT_MS = 8_000L;
+    /** Сколько ждать ответ клиента на одну попытку, прежде чем перевыслать challenge (мс). */
+    static final long RESPONSE_TIMEOUT_MS = 15_000L;
+    /** Сколько попыток всего. Окно ответа = RESPONSE_TIMEOUT_MS × CHALLENGE_ATTEMPTS.
+     *  8с на входе не хватало: challenge приходит на PlayerLoggedInEvent, когда клиент
+     *  ещё грузит мир и качает чанки — на слабом канале ответ опаздывал, мод верифицировал
+     *  пустой proof и в enforce кикал честного игрока. Читер, не реализующий канал, не
+     *  ответит и за 45с, а отзыв доступа опрашивается каждые 25с. */
+    static final int CHALLENGE_ATTEMPTS = 3;
     /** Таймаут HTTP-запроса к бэкенду (мс). */
     static final int HTTP_TIMEOUT_MS = 5_000;
 

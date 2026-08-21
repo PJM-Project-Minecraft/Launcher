@@ -26,8 +26,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class Agent {
 
-    private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    // 20с, а не 10: лаунчер держит свой keepalive с таймаутом 30с, и на слабом канале
+    // агент замолкал раньше него — сервер считал агента убитым и кикал честного игрока.
+    private static final Duration TIMEOUT = Duration.ofSeconds(20);
     private static final long HEARTBEAT_PERIOD_MS = 30_000L;
+    // Промах heartbeat не должен стоить целого периода тишины: окно молчания на сервере
+    // 90с, т.е. двух промахов подряд хватало на отзыв доступа.
+    private static final int HEARTBEAT_ATTEMPTS = 2;
+    private static final long HEARTBEAT_RETRY_MS = 3_000L;
 
     // Дефолтный seed маркеров известных чит-клиентов/модов (на случай недоступности
     // бэкенда). Актуальный набор тянется с сервера через /rules и атомарно заменяет
@@ -68,7 +74,8 @@ public final class Agent {
     private static volatile String token = "";
     private static volatile String baseUrl = "";
     private static volatile String kickFile = "";
-    private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+    // Не final: при серии молчаний пул соединений пересоздаётся (см. heartbeatOnce).
+    private static volatile HttpClient HTTP = newHttpClient();
     private static final List<String> reported = new CopyOnWriteArrayList<>();
     // Ограничитель потока детектов нелегальных имён (защита от флуда / FP-шторма).
     private static final java.util.concurrent.atomic.AtomicInteger illegalReports =
@@ -922,10 +929,10 @@ public final class Agent {
                 int tab = line.indexOf('\t');
                 String type = tab > 0 ? line.substring(0, tab) : "inject";
                 String name = tab > 0 ? line.substring(tab + 1) : line;
-                // Точные сигналы (нелегальные имена, маркеры классов) → kick;
-                // эвристики guard-потока (новый модуль, ld-preload, late-debug) —
-                // report-only (обкатка против ложных срабатываний). Severity всё равно
-                // назначает сервер по detect-type: inject=9(kick), debugger=6, прочее=5.
+                // Точные сигналы (нелегальные имена) → kick; эвристики guard-потока
+                // (новый модуль, ld-preload, late-debug) и маркеры в именах классов —
+                // report-only. Severity всё равно назначает сервер по detect-type:
+                // inject=9(kick), debugger=6, прочее=5.
                 switch (type) {
                     case "illegal-class-name" -> reportIllegalName(name, "native");
                     case "debugger-runtime" -> detect("debugger", "debugger-runtime", "native:" + name);
@@ -942,7 +949,12 @@ public final class Agent {
                         String cls = t > 0 ? name.substring(t + 1) : "";
                         matchHash(h, cls);
                     }
-                    default -> detect("inject", type, "native:" + name); // маркеры читов в именах классов
+                    // Маркеры читов в именах классов. НЕ "inject": матч подстрокой, а
+                    // подстрока живёт и в легальном имени (com.fpvdrone…MunitionXrayRenderType
+                    // содержит "xray") — а inject кикает и авто-банит безусловно. Уходит тем
+                    // же типом "class", что и матчи блэклиста Java-трансформера: severity и
+                    // confidence решает блэклист сервера, а не хардкод-список в нативке.
+                    default -> detect("class", type, "native:" + name);
                 }
             }
         } catch (Exception ignored) {
@@ -954,16 +966,47 @@ public final class Agent {
         runResilient("anticheat-heartbeat", HEARTBEAT_PERIOD_MS, Agent::heartbeatOnce);
     }
 
+    private static HttpClient newHttpClient() {
+        return HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+    }
+
+    /** Сколько циклов heartbeat подряд не достучались до сервера. */
+    private static int hbMisses;
+
     /** Один цикл heartbeat: пингует сервер, реагирует на kick и смену версии блэклиста. */
     private static void heartbeatOnce() {
-        String resp = postRead("/api/anticheat/heartbeat",
-            "{\"launchToken\":\"" + escape(token) + "\"}");
+        String resp = null;
+        for (int i = 0; i < HEARTBEAT_ATTEMPTS && resp == null; i++) {
+            if (i > 0) {
+                try {
+                    Thread.sleep(HEARTBEAT_RETRY_MS);
+                } catch (InterruptedException ignored) {
+                    // прерывание не должно отменять вторую попытку
+                }
+            }
+            resp = postRead("/api/anticheat/heartbeat",
+                "{\"launchToken\":\"" + escape(token) + "\"}");
+        }
         if (resp == null) {
-            return; // сеть нестабильна — не убиваем игру (enforcement даёт сервер)
+            // Сеть нестабильна — игру не убиваем (enforcement даёт сервер). Но пул
+            // соединений мог «залипнуть»: NAT/Wi-Fi потерял TCP-состояние без RST, и все
+            // запросы уходят в мёртвое соединение минутами. Второй промах подряд →
+            // пересоздаём клиент, чтобы следующий запрос пошёл по свежему соединению.
+            if (++hbMisses >= 2) {
+                HTTP = newHttpClient();
+                hbMisses = 1; // не сбрасываем в 0: серия продолжается, пока нет ответа
+            }
+            return;
+        }
+        if (hbMisses > 0) {
+            postDiag("heartbeat-recovered", "misses:" + hbMisses); // видно в логах прода
+            hbMisses = 0;
         }
         // Сервер погасил сессию (detect в другой сессии) → закрываем игру.
         if (resp.contains("\"action\":\"kick\"")) {
-            kickGame("session-revoked");
+            kickGame(resp.contains("\"reason\":\"launcher_update\"")
+                ? "launcher-update-required"
+                : "session-revoked");
             return;
         }
         // Версия блэклиста изменилась → подтягиваем свежие правила.

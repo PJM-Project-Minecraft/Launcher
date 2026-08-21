@@ -70,21 +70,29 @@ func (h Handler) p5Verify(c fiber.Ctx) error {
 }
 
 // p5Check возвращает (reason, ok). ok=true только при валидном proof активной
-// Verified-сессии игрока.
+// Verified-сессии игрока. Сверяем со ВСЕМИ живыми сессиями ника: после обрыва у игрока
+// какое-то время живут две (см. VerifiedSessionsByName), и выбор случайной кикал честных.
 func (h Handler) p5Check(name, challenge, proof string) (string, bool) {
 	if h.sessions == nil {
 		return "no_provider", false
 	}
-	sess, found := h.sessions.VerifiedSessionByName(name)
-	if !found {
+	sessions := h.sessions.VerifiedSessionsByName(name)
+	if len(sessions) == 0 {
 		return "no_verified_session", false
 	}
-	expected := p5Proof(challenge, sess.AccessToken)
 	got := strings.ToLower(strings.TrimSpace(proof))
-	if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
-		return "bad_proof", false
+	if got == "" {
+		// Мод шлёт пустой proof, когда клиент не ответил на challenge за отведённое окно.
+		// Отдельная причина, а не bad_proof: «не успел» (слабый канал, загрузка мира) и
+		// «ответил неверно» (клиент без мода) требуют разных решений оператора.
+		return "no_response", false
 	}
-	return "", true
+	for _, sess := range sessions {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(p5Proof(challenge, sess.AccessToken))) == 1 {
+			return "", true
+		}
+	}
+	return "bad_proof", false
 }
 
 // p5Proof — HMAC-SHA256(challenge) на ключе accessToken, hex. Одинаково считают мод и бэкенд.
