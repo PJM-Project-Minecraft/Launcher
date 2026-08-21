@@ -1258,6 +1258,10 @@ fn register_settings_handler(
         let Some(app) = retry_migration_app.upgrade() else {
             return;
         };
+        if app.get_is_syncing() {
+            app.set_message("Дождитесь завершения игры или установки.".into());
+            return;
+        }
         let Some(migration) = load_settings()
             .ok()
             .and_then(|settings| settings.install_migration)
@@ -1404,9 +1408,13 @@ fn register_play_handler(
 ) {
     let play_app = app.as_weak();
     app.on_play_requested(move || {
-        if migration_active.load(Ordering::SeqCst) {
+        let unresolved_migration = load_settings()
+            .ok()
+            .and_then(|settings| settings.install_migration)
+            .is_some();
+        if migration_active.load(Ordering::SeqCst) || unresolved_migration {
             if let Some(app) = play_app.upgrade() {
-                app.set_message("Дождитесь завершения переноса файлов.".into());
+                app.set_message("Завершите или повторите перенос папки перед запуском игры.".into());
             }
             return;
         }

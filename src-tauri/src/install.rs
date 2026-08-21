@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -63,11 +63,14 @@ pub(crate) fn migrate_users(
     // Маркер делает перенос повторяемым. При повторе данные копируются заново:
     // после неудачной записи settings.json игрок мог ещё запускать старую копию,
     // поэтому уже подготовленный destination/users мог успеть устареть.
-    fs::write(
-        destination.join(MIGRATION_MARKER),
-        source.to_string_lossy().as_bytes(),
-    )
-    .map_err(|err| format!("Не удалось подготовить перенос: {err}"))?;
+    let marker_path = destination.join(MIGRATION_MARKER);
+    let mut marker = File::create(&marker_path)
+        .map_err(|err| format!("Не удалось подготовить перенос: {err}"))?;
+    marker
+        .write_all(source.to_string_lossy().as_bytes())
+        .and_then(|_| marker.sync_all())
+        .map_err(|err| format!("Не удалось сохранить маркер переноса: {err}"))?;
+    sync_directory(&destination)?;
     let destination_users = destination.join(USERS_DIR);
     let staging = destination.join(MIGRATION_DIR);
     let backup_users = destination.join(MIGRATION_BACKUP_DIR);
@@ -111,6 +114,7 @@ pub(crate) fn migrate_users(
             fs::remove_dir_all(&backup_users)
                 .map_err(|err| format!("Не удалось очистить предыдущую копию: {err}"))?;
         }
+        sync_directory(&destination)?;
         Ok(())
     })();
 
@@ -205,6 +209,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
         if metadata.is_dir() {
             copy_tree(&source_path, &destination_path)?;
             let _ = fs::set_permissions(&destination_path, metadata.permissions());
+            sync_directory(&destination_path)?;
             continue;
         }
         if !metadata.is_file() {
@@ -228,8 +233,40 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
                 source_path.display()
             ));
         }
+        File::open(&destination_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|err| {
+                format!(
+                    "Не удалось сбросить {} на диск: {err}",
+                    destination_path.display()
+                )
+            })?;
     }
+    sync_directory(destination)?;
     Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[cfg(windows)]
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+        .open(path);
+    #[cfg(not(windows))]
+    let directory = File::open(path);
+
+    directory
+        .and_then(|directory| directory.sync_all())
+        .map_err(|err| {
+            format!(
+                "Не удалось сбросить каталог {} на диск: {err}",
+                path.display()
+            )
+        })
 }
 
 fn sha256_file(path: &Path) -> Result<[u8; 32], String> {

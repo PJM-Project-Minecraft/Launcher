@@ -601,6 +601,29 @@ func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 	if audit.ProfileReleases != 1 || audit.ProfileFiles != 1 || audit.LauncherReleases != 2 || audit.LauncherFiles != 4 || audit.VerifiedBytes == 0 {
 		t.Fatalf("migration audit = %+v", audit)
 	}
+	missingPlatformTx := db.Begin()
+	if missingPlatformTx.Error != nil {
+		t.Fatal(missingPlatformTx.Error)
+	}
+	if err := missingPlatformTx.Exec("DELETE FROM launcher_delivery_artifact_chunks WHERE artifact_id IN (SELECT id FROM launcher_delivery_artifacts WHERE release_id = ? AND platform = ?)", release.ID, "windows-x64").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := missingPlatformTx.Exec("DELETE FROM launcher_delivery_artifacts WHERE release_id = ? AND platform = ?", release.ID, "windows-x64").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := missingPlatformTx.Exec("DELETE FROM launcher_release_files WHERE release_id = ? AND platform = ?", release.ID, "windows-x64").Error; err != nil {
+		t.Fatal(err)
+	}
+	transactionalService := &Service{
+		db: missingPlatformTx, root: service.root, profileRoot: service.profileRoot,
+		launcherRoot: service.launcherRoot, signingKey: service.signingKey, stop: make(chan struct{}),
+	}
+	if _, err := transactionalService.AuditMigration(context.Background(), updatePublicKey); err == nil {
+		t.Fatal("missing current launcher platform source and artifact passed migration audit")
+	}
+	if err := missingPlatformTx.Rollback().Error; err != nil {
+		t.Fatal(err)
+	}
 	var profileChunk models.ProfileReleaseFileChunk
 	if err := db.First(&profileChunk).Error; err != nil {
 		t.Fatal(err)

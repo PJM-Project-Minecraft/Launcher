@@ -94,10 +94,11 @@ DELIVERY_V1_BRIDGE_UNTIL=<UTC RFC3339 cutoff, например 2026-09-21T00:00:
 Локальный generic script нужен только для development-проверок:
 
 ```bash
-DELIVERY_MANIFEST_PUBKEY=<public-key> \
+LAUNCHER_UPDATE_PUBKEY=<test-public-key> \
+DELIVERY_MANIFEST_PUBKEY=<test-public-key> \
 scripts/prod/build-player-launcher.sh \
   --api-url https://launcher.example.com \
-  --signing-key /secure/launcher-update.key
+  --build-only
 ```
 
 Production-артефакты собираются обоими pinned wrappers и проходят

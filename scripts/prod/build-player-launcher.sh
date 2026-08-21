@@ -18,6 +18,7 @@ BUILD_ONLY=0
 TARGET_TRIPLE=""
 # Ключ подписи и публичный ключ можно задать флагом или переменной окружения.
 SIGNING_KEY="${LAUNCHER_SIGNING_KEY:-}"
+SIGNATURE_FILE=""
 PUBKEY="${LAUNCHER_UPDATE_PUBKEY:-}"
 MANIFEST_PUBKEY="${DELIVERY_MANIFEST_PUBKEY:-}"
 
@@ -30,6 +31,7 @@ Options:
   --signing-key PATH  Приватный Ed25519-ключ (updatesign keygen). Публичный ключ
                       выводится из него, вшивается в бинарник и им же подписывается сборка.
                       Можно вместо флага задать переменную LAUNCHER_SIGNING_KEY.
+  --signature-file PATH  Precomputed signature from an isolated signer
   --manifest-pubkey HEX  Публичный Ed25519-ключ подписи delivery manifest.
                          Можно задать DELIVERY_MANIFEST_PUBKEY.
   --out-dir DIR       Output directory (default: release-artifacts, outside Vite dist)
@@ -52,6 +54,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --signing-key)
       SIGNING_KEY="${2:-}"
+      shift
+      ;;
+    --signature-file)
+      SIGNATURE_FILE="${2:-}"
       shift
       ;;
     --manifest-pubkey)
@@ -98,6 +104,14 @@ fi
 
 if [[ ! "$MANIFEST_PUBKEY" =~ ^[0-9a-f]{64}$ ]]; then
   echo "ERROR: --manifest-pubkey / DELIVERY_MANIFEST_PUBKEY должен содержать 64 lowercase hex-символа." >&2
+  exit 2
+fi
+if [[ -n "$SIGNING_KEY" && -n "$SIGNATURE_FILE" ]]; then
+  echo "ERROR: --signing-key and --signature-file are mutually exclusive." >&2
+  exit 2
+fi
+if [[ -n "$SIGNATURE_FILE" && ! -f "$SIGNATURE_FILE" ]]; then
+  echo "ERROR: precomputed signature file is missing: $SIGNATURE_FILE" >&2
   exit 2
 fi
 
@@ -302,6 +316,13 @@ PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
 
 if [[ -n "$SIGNING_KEY" ]]; then
   SIG="$(run_updatesign sign -key "$SIGNING_KEY" "$PLAYER_BIN")" || exit 1
+elif [[ -n "$SIGNATURE_FILE" ]]; then
+  SIG="$(tr -d '\r\n' <"$SIGNATURE_FILE")"
+  run_updatesign verify -pub "$PUBKEY" -sig "$SIG" "$PLAYER_BIN" || {
+    echo "[launcher] ОШИБКА: isolated signature does not match the packaged binary." >&2; exit 1; }
+fi
+
+if [[ -n "${SIG:-}" ]]; then
   echo "$SIG" > "$PACKAGE_DIR/signature.txt"
   # Сразу проверяем подпись тем же публичным ключом — ровно как это сделает лаунчер.
   run_updatesign verify -pub "$PUBKEY" -sig "$SIG" "$PLAYER_BIN" || {

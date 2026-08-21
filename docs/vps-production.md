@@ -279,7 +279,7 @@ gunzip -c /root/backups/launcher/launcher-XXXX.sql.gz | docker compose exec -T p
 `/root/backups/launcher` за его пределы (rclone в облако или scp на домашнюю машину):
 
 ```bash
-scp root@13.140.17.105:/root/backups/launcher/$(ssh root@13.140.17.105 'ls -1t /root/backups/launcher | head -1') ~/backups/
+scp root@176.108.254.89:/root/backups/launcher/$(ssh root@176.108.254.89 'ls -1t /root/backups/launcher | head -1') ~/backups/
 ```
 
 Важно: с введением fail-fast проверки секретов в `/root/Launcher/.env` должны быть

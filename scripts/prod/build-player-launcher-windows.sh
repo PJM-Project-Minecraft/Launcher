@@ -46,26 +46,40 @@ SOURCE_DATE_EPOCH="$(git -C "$ROOT_DIR" log -1 --format=%ct)"
   echo "ERROR: production artifacts require a clean tracked worktree" >&2
   exit 1
 }
-mkdir -p "$CACHE_DIR/home" "$CACHE_DIR/cargo"
+mkdir -p "$CACHE_DIR/home/.npm/_cacache" "$CACHE_DIR/home/.cache/cargo-xwin" "$CACHE_DIR/cargo/registry" "$CACHE_DIR/cargo/git"
+mkdir -p "$ROOT_DIR/node_modules" "$ROOT_DIR/dist" "$ROOT_DIR/src-tauri/target"
+RELEASE_TEMP="$(mktemp -d)"
+trap 'rm -rf -- "$RELEASE_TEMP"' EXIT
+mkdir -p "$RELEASE_TEMP/home" "$RELEASE_TEMP/cargo-home"
 
 docker build -q -f "$ROOT_DIR/scripts/prod/windows-xwin.Dockerfile" -t "$IMAGE" "$ROOT_DIR" >/dev/null
-UPDATE_PUBKEY="$(docker run --rm --network none \
+UPDATE_PUBKEY="$(docker run --rm --network none --read-only \
+  --user "$(id -u):$(id -g)" \
+  --entrypoint /usr/local/bin/updatesign \
   -v "$SIGNING_KEY:/run/secrets/update-signing.key:ro" \
-  "$IMAGE" updatesign pubkey -key /run/secrets/update-signing.key)"
+  "$IMAGE" pubkey -key /run/secrets/update-signing.key)"
 [[ "$UPDATE_PUBKEY" =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: cannot derive update public key" >&2; exit 1; }
 
 # Networked dependency/build phase receives only public material.
 docker run --rm \
   --user "$(id -u):$(id -g)" \
-  -e HOME=/cache/home \
-  -e CARGO_HOME=/cache/cargo \
+  -e HOME=/tmp/release-home \
+  -e CARGO_HOME=/tmp/cargo-home \
   -e RUSTUP_HOME=/opt/rustup \
   -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
   -e SOURCE_COMMIT="$SOURCE_COMMIT" \
   -e LAUNCHER_UPDATE_PUBKEY="$UPDATE_PUBKEY" \
-  -e PATH=/cache/cargo/bin:/opt/cargo/bin:/usr/lib/llvm-18/bin:/usr/local/bin:/usr/bin:/bin \
-  -v "$ROOT_DIR:/work" \
-  -v "$CACHE_DIR:/cache" \
+  -e PATH=/opt/cargo/bin:/usr/lib/llvm-18/bin:/usr/local/bin:/usr/bin:/bin \
+  -v "$ROOT_DIR:/work:ro" \
+  -v "$ROOT_DIR/node_modules:/work/node_modules" \
+  -v "$ROOT_DIR/dist:/work/dist" \
+  -v "$ROOT_DIR/src-tauri/target:/work/src-tauri/target" \
+  -v "$RELEASE_TEMP/home:/tmp/release-home" \
+  -v "$RELEASE_TEMP/cargo-home:/tmp/cargo-home" \
+  -v "$CACHE_DIR/home/.npm/_cacache:/tmp/release-home/.npm/_cacache" \
+  -v "$CACHE_DIR/home/.cache/cargo-xwin:/tmp/release-home/.cache/cargo-xwin" \
+  -v "$CACHE_DIR/cargo/registry:/tmp/cargo-home/registry" \
+  -v "$CACHE_DIR/cargo/git:/tmp/cargo-home/git" \
   -w /work \
   "$IMAGE" \
   scripts/prod/build-player-launcher.sh \
@@ -75,24 +89,42 @@ docker run --rm \
     --out-dir "/work/$OUT_DIR" \
     --build-only
 
-# The private key exists only in this network-isolated packaging/signing phase.
+# Sign only the fixed read-only binary with immutable tooling. The private key
+# never shares a mount with the repository, build output directory or cache.
+SOURCE_BIN="$ROOT_DIR/src-tauri/target/x86_64-pc-windows-msvc/release/project-minecraft-launcher.exe"
+[[ -f "$SOURCE_BIN" ]] || { echo "ERROR: Windows release binary is missing" >&2; exit 1; }
+BINARY_SHA_BEFORE="$(sha256sum "$SOURCE_BIN" | awk '{print $1}')"
+SIGNATURE_DIR="$RELEASE_TEMP/signature"
+mkdir -p "$SIGNATURE_DIR"
+docker run --rm --network none --read-only \
+  --user "$(id -u):$(id -g)" \
+  --entrypoint /usr/local/bin/updatesign \
+  -v "$SIGNING_KEY:/run/secrets/update-signing.key:ro" \
+  -v "$SOURCE_BIN:/artifact:ro" \
+  "$IMAGE" sign -key /run/secrets/update-signing.key /artifact \
+  >"$SIGNATURE_DIR/signature.txt"
+[[ "$BINARY_SHA_BEFORE" == "$(sha256sum "$SOURCE_BIN" | awk '{print $1}')" ]] || {
+  echo "ERROR: binary changed during isolated signing" >&2
+  exit 1
+}
+
+# Packaging receives the public signature, never the private key or build cache.
 docker run --rm --network none \
   --user "$(id -u):$(id -g)" \
-  -e HOME=/cache/home \
-  -e CARGO_HOME=/cache/cargo \
+  -e HOME=/tmp \
+  -e CARGO_HOME=/opt/cargo \
   -e RUSTUP_HOME=/opt/rustup \
   -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
   -e SOURCE_COMMIT="$SOURCE_COMMIT" \
   -e LAUNCHER_UPDATE_PUBKEY="$UPDATE_PUBKEY" \
-  -e PATH=/cache/cargo/bin:/opt/cargo/bin:/usr/lib/llvm-18/bin:/usr/local/bin:/usr/bin:/bin \
+  -e PATH=/opt/cargo/bin:/usr/lib/llvm-18/bin:/usr/local/bin:/usr/bin:/bin \
   -v "$ROOT_DIR:/work" \
-  -v "$CACHE_DIR:/cache" \
-  -v "$SIGNING_KEY:/run/secrets/update-signing.key:ro" \
+  -v "$SIGNATURE_DIR/signature.txt:/run/signature.txt:ro" \
   -w /work \
   "$IMAGE" \
   scripts/prod/build-player-launcher.sh \
     --api-url "$API_URL" \
-    --signing-key /run/secrets/update-signing.key \
+    --signature-file /run/signature.txt \
     --manifest-pubkey "$MANIFEST_PUBKEY" \
     --target x86_64-pc-windows-msvc \
     --out-dir "/work/$OUT_DIR" \

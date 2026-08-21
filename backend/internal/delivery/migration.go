@@ -377,45 +377,70 @@ func (s *Service) AuditMigration(ctx context.Context, updatePublicKey ed25519.Pu
 		return compareVersion(releases[left].Version, releases[right].Version) > 0
 	})
 	for releaseIndex, release := range releases {
+		sourceByPlatform := make(map[string]models.LauncherReleaseFile, 2)
 		for _, sourceFile := range release.Files {
-			var artifact models.LauncherDeliveryArtifact
-			if err := s.db.WithContext(ctx).Preload("Chunks").Where("release_id = ? AND platform = ?", release.ID, sourceFile.Platform).First(&artifact).Error; err != nil {
-				return audit, fmt.Errorf("launcher %s %s has no v2 artifact: %w", release.Version, sourceFile.Platform, err)
+			if sourceFile.Platform != "linux-x64" && sourceFile.Platform != "windows-x64" {
+				return audit, fmt.Errorf("launcher %s has unsupported source platform %s", release.Version, sourceFile.Platform)
+			}
+			if _, duplicate := sourceByPlatform[sourceFile.Platform]; duplicate {
+				return audit, fmt.Errorf("launcher %s has duplicate source platform %s", release.Version, sourceFile.Platform)
+			}
+			sourceByPlatform[sourceFile.Platform] = sourceFile
+		}
+		var artifacts []models.LauncherDeliveryArtifact
+		if err := s.db.WithContext(ctx).Preload("Chunks").Where("release_id = ?", release.ID).Find(&artifacts).Error; err != nil {
+			return audit, err
+		}
+		artifactByPlatform := make(map[string]models.LauncherDeliveryArtifact, 2)
+		for _, artifact := range artifacts {
+			if artifact.Platform != "linux-x64" && artifact.Platform != "windows-x64" {
+				return audit, fmt.Errorf("launcher %s has unsupported artifact platform %s", release.Version, artifact.Platform)
+			}
+			if _, duplicate := artifactByPlatform[artifact.Platform]; duplicate {
+				return audit, fmt.Errorf("launcher %s has duplicate artifact platform %s", release.Version, artifact.Platform)
+			}
+			artifactByPlatform[artifact.Platform] = artifact
+		}
+		for _, platform := range []string{"linux-x64", "windows-x64"} {
+			sourceFile, sourceExists := sourceByPlatform[platform]
+			artifact, artifactExists := artifactByPlatform[platform]
+			if !sourceExists || !artifactExists || len(sourceByPlatform) != 2 || len(artifactByPlatform) != 2 {
+				return audit, fmt.Errorf("launcher %s must have exact source and artifact rows for linux-x64 and windows-x64", release.Version)
 			}
 			body := []byte(artifact.DescriptorJSON)
 			if err := s.verifySignedDocument(body, artifact.DescriptorSHA256, artifact.DescriptorSignature); err != nil {
-				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, sourceFile.Platform, err)
+				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, platform, err)
 			}
 			var descriptor LauncherManifest
 			if err := json.Unmarshal(body, &descriptor); err != nil {
 				return audit, err
 			}
-			if descriptor.SchemaVersion != SchemaVersion || descriptor.ReleaseID != release.ID || descriptor.Version != release.Version || descriptor.Platform != sourceFile.Platform || descriptor.ArtifactSignature != sourceFile.SignatureEd25519 {
-				return audit, fmt.Errorf("launcher %s %s descriptor metadata mismatch", release.Version, sourceFile.Platform)
+			if descriptor.SchemaVersion != SchemaVersion || descriptor.ReleaseID != release.ID || descriptor.Version != release.Version || descriptor.Platform != platform || descriptor.ArtifactSignature != sourceFile.SignatureEd25519 {
+				return audit, fmt.Errorf("launcher %s %s descriptor metadata mismatch", release.Version, platform)
 			}
 			if artifact.HashSHA256 != descriptor.Artifact.SHA256 || artifact.Size != descriptor.Artifact.Size || sourceFile.HashSHA256 != descriptor.Artifact.SHA256 || sourceFile.Size != descriptor.Artifact.Size {
-				return audit, fmt.Errorf("launcher %s %s artifact metadata mismatch", release.Version, sourceFile.Platform)
+				return audit, fmt.Errorf("launcher %s %s artifact metadata mismatch", release.Version, platform)
 			}
 			if err := compareLauncherChunkRows(descriptor.Artifact, artifact); err != nil {
-				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, sourceFile.Platform, err)
+				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, platform, err)
 			}
 			for _, chunk := range descriptor.Artifact.Chunks {
 				if _, _, err := s.LauncherBlob(ctx, release.ID, chunk.SHA256); err != nil {
-					return audit, fmt.Errorf("launcher %s %s chunk %s is not deliverable: %w", release.Version, sourceFile.Platform, chunk.SHA256, err)
+					return audit, fmt.Errorf("launcher %s %s chunk %s is not deliverable: %w", release.Version, platform, chunk.SHA256, err)
 				}
 			}
 			var binary bytes.Buffer
 			if err := s.auditReleaseFile(ctx, descriptor.Artifact, &binary); err != nil {
-				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, sourceFile.Platform, err)
+				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, platform, err)
 			}
 			if descriptor.ArtifactSignature == "" {
 				if releaseIndex == 0 {
-					return audit, fmt.Errorf("current launcher %s %s is unsigned", release.Version, sourceFile.Platform)
+					return audit, fmt.Errorf("current launcher %s %s is unsigned", release.Version, platform)
 				}
 			} else {
 				artifactSignature, err := hex.DecodeString(descriptor.ArtifactSignature)
 				if err != nil || len(artifactSignature) != ed25519.SignatureSize || !ed25519.Verify(updatePublicKey, binary.Bytes(), artifactSignature) {
-					return audit, fmt.Errorf("launcher %s %s has invalid update signature", release.Version, sourceFile.Platform)
+					return audit, fmt.Errorf("launcher %s %s has invalid update signature", release.Version, platform)
 				}
 			}
 			audit.LauncherFiles++

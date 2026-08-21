@@ -3,7 +3,7 @@
 Документ про усиление античита 2026-06 (фазы **P0–P6**): что сделано, что НЕ
 реализовано, и как безопасно выкатить на прод. Полный план — `~/.claude/plans/senior-dynamic-island.md`.
 
-Прод: `root@13.140.17.105`, `/root/Launcher`, docker compose, backend за nginx на `:8082`,
+Прод: `root@176.108.254.89`, `/root/Launcher`, docker compose, backend за nginx на `:8082`,
 домен `launcher.likonchik.xyz`. Деплой — `./deploy.sh` (push `origin/main` → на VPS
 `git reset --hard origin/main` → `docker compose up -d --build`). **`backend/data/` в git
 НЕ входит** — бинарники едут отдельно через `scp`.
@@ -133,7 +133,7 @@ docker run --rm -v "$PWD/backend":/src -w /src golang:1.26-bookworm go test ./..
 На VPS добавить в `/root/Launcher/.env` (если ещё нет):
 
 ```bash
-ssh root@13.140.17.105
+ssh root@176.108.254.89
 cd /root/Launcher
 # проверить наличие; если нет — сгенерировать и дописать:
 grep -q '^ANTICHEAT_SECRET=' .env || echo "ANTICHEAT_SECRET=$(openssl rand -hex 32)" >> .env
@@ -147,7 +147,7 @@ grep -q '^ANTICHEAT_REQUIRE_ATTESTATION=' .env || echo "ANTICHEAT_REQUIRE_ATTEST
 
 ```bash
 scp backend/data/anticheat-agent.jar backend/data/libanticheat.so backend/data/anticheat.dll \
-    root@13.140.17.105:/root/Launcher/backend/data/
+    root@176.108.254.89:/root/Launcher/backend/data/
 ```
 
 ### 5.3. Деплой backend
@@ -159,7 +159,7 @@ scp backend/data/anticheat-agent.jar backend/data/libanticheat.so backend/data/a
 Проверить, что backend поднялся (если `ANTICHEAT_SECRET` не задан — будет краш-луп):
 
 ```bash
-ssh root@13.140.17.105 "cd /root/Launcher && docker compose logs --tail=50 backend"
+ssh root@176.108.254.89 "cd /root/Launcher && docker compose logs --tail=50 backend"
 ```
 
 ### 5.4. Новый релиз лаунчера (для P1-сверки и P3-proof у игроков)
@@ -195,7 +195,7 @@ scripts/prod/verify-player-launcher-artifacts.sh \
 Когда все (или mandatory-гейт) на новом лаунчере:
 
 ```bash
-ssh root@13.140.17.105
+ssh root@176.108.254.89
 cd /root/Launcher
 sed -i 's/^ANTICHEAT_REQUIRE_ATTESTATION=.*/ANTICHEAT_REQUIRE_ATTESTATION=true/' .env
 docker compose up -d backend
@@ -238,7 +238,7 @@ curl -s https://launcher.likonchik.xyz/api/anticheat/manifest | jq
 
 ```bash
 # backend (код)
-ssh root@13.140.17.105 "cd /root/Launcher && git reset --hard <старый-commit> && docker compose up -d --build"
+ssh root@176.108.254.89 "cd /root/Launcher && git reset --hard <старый-commit> && docker compose up -d --build"
 
 # attestation назад в transition
 sed -i 's/^ANTICHEAT_REQUIRE_ATTESTATION=.*/ANTICHEAT_REQUIRE_ATTESTATION=false/' /root/Launcher/.env && docker compose up -d backend
