@@ -23,7 +23,8 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 
 use ui_bridge::{
-    invoke_from_ui, AppWindow, DeliveryViewState, NewsItem, SharedString, UiState, Weak,
+    invoke_from_ui, AppWindow, DeliveryViewState, InstallMigrationViewState, NewsItem,
+    SharedString, UiState, Weak,
 };
 
 mod anticheat;
@@ -209,10 +210,7 @@ enum ProfileInstallState {
 
 enum InitialInstallLocation {
     Current,
-    Selected {
-        source: PathBuf,
-        destination: PathBuf,
-    },
+    Selected(InstallRootMigration),
 }
 
 static SETTINGS_IO_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -651,6 +649,10 @@ struct LauncherSettings {
     /// совместимость со старым системным data-dir.
     #[serde(default)]
     install_root: Option<String>,
+    /// Durable state for a selected destination that is not active until every
+    /// expected source file has been copied and verified.
+    #[serde(default)]
+    install_migration: Option<InstallRootMigration>,
     /// Выбранное зеркало бэкенда. None → «Авто».
     #[serde(default)]
     api_url: Option<String>,
@@ -670,10 +672,40 @@ impl Default for LauncherSettings {
             use_discrete_gpu: true,
             discord_rpc_enabled: true,
             install_root: None,
+            install_migration: None,
             api_url: None,
             played_seconds: 0,
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum InstallMigrationPhase {
+    Pending,
+    Running,
+    Failed,
+}
+
+impl Default for InstallMigrationPhase {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct InstallRootMigration {
+    source_root: String,
+    destination_root: String,
+    #[serde(default)]
+    allow_missing_source: bool,
+    #[serde(default)]
+    source_users_expected: bool,
+    #[serde(default)]
+    phase: InstallMigrationPhase,
+    #[serde(default)]
+    error: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -825,6 +857,7 @@ fn initialize_launcher(app: &AppWindow) {
         mirrors.clone(),
     );
     register_settings_handler(app, state.clone(), migration_active.clone());
+    resume_pending_install_root_migration(app, migration_active.clone());
     register_play_handler(app, config.clone(), state.clone(), migration_active);
     register_update_restart_handler(app);
     register_update_retry_handler(app, config.clone());
@@ -1158,7 +1191,10 @@ fn register_settings_handler(
                         app.set_message(message.into());
                         return;
                     }
-                    app.set_install_folder(path.to_string_lossy().to_string().into());
+                    // A durable pending migration owns the label until it is
+                    // committed. Opening the old active root must not make the
+                    // user's selected destination disappear from Settings.
+                    apply_install_folder_label(&app);
                     app.set_message("Папка установки открыта.".into());
                 }
                 Err(message) => app.set_message(message.into()),
@@ -1200,45 +1236,52 @@ fn register_settings_handler(
             change_folder_active.store(false, Ordering::SeqCst);
             return;
         };
+        let migration = new_install_root_migration(&source_root, &destination, false);
+        if let Err(message) = update_settings(|settings| {
+            settings.install_migration = Some(migration.clone());
+        }) {
+            change_folder_active.store(false, Ordering::SeqCst);
+            app.set_message(message.into());
+            return;
+        }
+        spawn_install_root_migration(
+            change_folder_app.clone(),
+            change_folder_active.clone(),
+            migration,
+            false,
+        );
+    });
 
-        app.set_is_syncing(true);
-        app.set_message("Переносим профили на новый диск. Не закрывайте лаунчер…".into());
-        begin_profile_sync();
-        let app_weak = change_folder_app.clone();
-        let active = change_folder_active.clone();
-        thread::spawn(move || {
-            let result = install::migrate_users(&source_root, &destination).and_then(|migration| {
-                update_settings(|settings| {
-                    settings.install_root =
-                        Some(migration.destination.to_string_lossy().to_string());
-                })?;
-                install::finalize_migration(&migration);
-                Ok(migration)
-            });
-            end_profile_sync();
-            active.store(false, Ordering::SeqCst);
-
-            let _ = invoke_from_ui(move || {
-                if let Some(app) = app_weak.upgrade() {
-                    app.set_is_syncing(false);
-                    match result {
-                        Ok(migration) => {
-                            apply_install_folder_label(&app);
-                            let message = if migration.copied_existing_data {
-                                format!(
-                                    "Установка перенесена в {}. Старая папка оставлена как резервная копия.",
-                                    migration.destination.display()
-                                )
-                            } else {
-                                format!("Новая папка установки: {}", migration.destination.display())
-                            };
-                            app.set_message(message.into());
-                        }
-                        Err(message) => app.set_message(message.into()),
-                    }
-                }
-            });
-        });
+    let retry_migration_app = app.as_weak();
+    let retry_migration_active = migration_active.clone();
+    app.on_install_migration_retry_requested(move || {
+        let Some(app) = retry_migration_app.upgrade() else {
+            return;
+        };
+        let Some(migration) = load_settings()
+            .ok()
+            .and_then(|settings| settings.install_migration)
+        else {
+            app.set_message("Незавершённый перенос не найден.".into());
+            return;
+        };
+        if migration.phase != InstallMigrationPhase::Failed {
+            app.set_message("Перенос уже ожидает выполнения или выполняется.".into());
+            return;
+        }
+        if retry_migration_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            app.set_message("Перенос файлов уже выполняется.".into());
+            return;
+        }
+        spawn_install_root_migration(
+            retry_migration_app.clone(),
+            retry_migration_active.clone(),
+            migration,
+            true,
+        );
     });
 
     app.on_open_url(|url| {
@@ -1272,6 +1315,87 @@ fn register_settings_handler(
     });
 }
 
+fn spawn_install_root_migration(
+    app_weak: Weak<AppWindow>,
+    active: Arc<AtomicBool>,
+    mut migration: InstallRootMigration,
+    resumed: bool,
+) {
+    migration.phase = InstallMigrationPhase::Running;
+    migration.error.clear();
+    if let Err(message) = update_settings(|settings| {
+        settings.install_migration = Some(migration.clone());
+    }) {
+        active.store(false, Ordering::SeqCst);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_message(message.into());
+        }
+        return;
+    }
+    if let Some(app) = app_weak.upgrade() {
+        app.set_is_syncing(true);
+        apply_install_migration_state(&app, Some(&migration));
+        app.set_message(
+            if resumed {
+                "Возобновляем незавершённый перенос профилей…"
+            } else {
+                "Переносим профили на новый диск. Выбор уже сохранён; перенос возобновится после перезапуска."
+            }
+            .into(),
+        );
+    }
+    begin_profile_sync();
+    thread::spawn(move || {
+        let result = perform_install_root_migration(&migration);
+        end_profile_sync();
+        active.store(false, Ordering::SeqCst);
+
+        let _ = invoke_from_ui(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_is_syncing(false);
+                match result {
+                    Ok(migration) => {
+                        apply_install_folder_label(&app);
+                        let message = if migration.copied_existing_data {
+                            format!(
+                                "Установка перенесена в {}. Старая папка оставлена как резервная копия.",
+                                migration.destination.display()
+                            )
+                        } else {
+                            format!("Новая папка установки: {}", migration.destination.display())
+                        };
+                        app.set_message(message.into());
+                    }
+                    Err(message) => {
+                        apply_install_folder_label(&app);
+                        app.set_message(format!("Перенос не завершён: {message}").into());
+                    }
+                }
+            }
+        });
+    });
+}
+
+fn resume_pending_install_root_migration(app: &AppWindow, active: Arc<AtomicBool>) {
+    let Some(migration) = load_settings()
+        .ok()
+        .and_then(|settings| settings.install_migration)
+    else {
+        return;
+    };
+    apply_install_migration_state(app, Some(&migration));
+    if migration.phase == InstallMigrationPhase::Failed {
+        return;
+    }
+    if active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    spawn_install_root_migration(app.as_weak(), active, migration, true);
+}
+
 fn register_play_handler(
     app: &AppWindow,
     config: AppConfig,
@@ -1280,6 +1404,12 @@ fn register_play_handler(
 ) {
     let play_app = app.as_weak();
     app.on_play_requested(move || {
+        if migration_active.load(Ordering::SeqCst) {
+            if let Some(app) = play_app.upgrade() {
+                app.set_message("Дождитесь завершения переноса файлов.".into());
+            }
+            return;
+        }
         let snapshot = match state.lock() {
             Ok(state) => state.clone(),
             Err(_) => {
@@ -1325,7 +1455,7 @@ fn register_play_handler(
                 return;
             }
         };
-        let is_initial_migration = matches!(initial_location, InitialInstallLocation::Selected { .. });
+        let is_initial_migration = matches!(initial_location, InitialInstallLocation::Selected(_));
         if is_initial_migration
             && migration_active
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1335,6 +1465,19 @@ fn register_play_handler(
                 app.set_message("Перенос файлов уже выполняется.".into());
             }
             return;
+        }
+        if let InitialInstallLocation::Selected(migration) = &initial_location {
+            let mut running = migration.clone();
+            running.phase = InstallMigrationPhase::Running;
+            if let Err(message) = update_settings(|settings| {
+                settings.install_migration = Some(running.clone());
+            }) {
+                migration_active.store(false, Ordering::SeqCst);
+                if let Some(app) = play_app.upgrade() {
+                    app.set_message(message.into());
+                }
+                return;
+            }
         }
 
         if let Some(app) = play_app.upgrade() {
@@ -1362,15 +1505,8 @@ fn register_play_handler(
         thread::spawn(move || {
             let preparation = match initial_location {
                 InitialInstallLocation::Current => Ok(()),
-                InitialInstallLocation::Selected { source, destination } => {
-                    install::migrate_users(&source, &destination).and_then(|migration| {
-                        update_settings(|settings| {
-                            settings.install_root =
-                                Some(migration.destination.to_string_lossy().to_string());
-                        })?;
-                        install::finalize_migration(&migration);
-                        Ok(())
-                    })
+                InitialInstallLocation::Selected(migration) => {
+                    perform_install_root_migration(&migration).map(|_| ())
                 }
             };
             if is_initial_migration {
@@ -1512,6 +1648,7 @@ fn choose_initial_install_root(
         return Ok(Some(InitialInstallLocation::Current));
     }
 
+    let allow_missing_source = configured_root.is_none() && !default_root.exists();
     let source = configured_root.unwrap_or(default_root);
 
     let selected = rfd::FileDialog::new()
@@ -1521,10 +1658,9 @@ fn choose_initial_install_root(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    Ok(Some(InitialInstallLocation::Selected {
-        source,
-        destination: selected,
-    }))
+    Ok(Some(InitialInstallLocation::Selected(
+        new_install_root_migration(&source, &selected, allow_missing_source),
+    )))
 }
 
 fn restore_saved_session(
@@ -3922,12 +4058,40 @@ fn format_session_expiry(raw: &str) -> String {
 }
 
 fn apply_install_folder_label(app: &AppWindow) {
+    if let Some(migration) = load_settings()
+        .ok()
+        .and_then(|settings| settings.install_migration)
+    {
+        apply_install_migration_state(app, Some(&migration));
+        return;
+    }
+    apply_install_migration_state(app, None);
     let folder = current_install_root()
         .or_else(|_| project_dirs().map(|dirs| dirs.data_dir().to_path_buf()));
 
     if let Ok(folder) = folder {
         app.set_install_folder(folder.to_string_lossy().to_string().into());
     }
+}
+
+fn apply_install_migration_state(app: &AppWindow, migration: Option<&InstallRootMigration>) {
+    let Some(migration) = migration else {
+        app.set_install_migration(InstallMigrationViewState::default());
+        return;
+    };
+    let phase = match migration.phase {
+        InstallMigrationPhase::Pending => "pending",
+        InstallMigrationPhase::Running => "running",
+        InstallMigrationPhase::Failed => "failed",
+    };
+    app.set_install_folder(format!("{} (перенос…)", migration.destination_root.trim()).into());
+    app.set_install_migration(InstallMigrationViewState {
+        phase: phase.to_string(),
+        source: migration.source_root.clone(),
+        destination: migration.destination_root.clone(),
+        error: migration.error.clone(),
+        retryable: migration.phase == InstallMigrationPhase::Failed,
+    });
 }
 
 fn update_memory_settings<F>(app: &Weak<AppWindow>, update: F)
@@ -4542,6 +4706,82 @@ where
     Ok(settings)
 }
 
+fn new_install_root_migration(
+    source: &Path,
+    destination: &Path,
+    allow_missing_source: bool,
+) -> InstallRootMigration {
+    InstallRootMigration {
+        source_root: source.to_string_lossy().to_string(),
+        destination_root: destination.to_string_lossy().to_string(),
+        allow_missing_source,
+        source_users_expected: source.join("users").is_dir(),
+        phase: InstallMigrationPhase::Pending,
+        error: String::new(),
+    }
+}
+
+fn validate_install_migration_source(migration: &InstallRootMigration) -> Result<(), String> {
+    let source = Path::new(&migration.source_root);
+    if !source.exists() {
+        if migration.allow_missing_source && !migration.source_users_expected {
+            return Ok(());
+        }
+        return Err(format!(
+            "Старая папка {} недоступна. Подключите диск и нажмите «Повторить».",
+            source.display()
+        ));
+    }
+    if !source.is_dir() {
+        return Err(format!(
+            "Старая папка {} больше не является каталогом.",
+            source.display()
+        ));
+    }
+    if migration.source_users_expected && !source.join("users").is_dir() {
+        return Err(format!(
+            "В старой папке {} не найдены ожидаемые профили. Подключите исходный диск и повторите перенос.",
+            source.display()
+        ));
+    }
+    Ok(())
+}
+
+fn perform_install_root_migration(
+    migration: &InstallRootMigration,
+) -> Result<install::MigrationResult, String> {
+    let source = PathBuf::from(&migration.source_root);
+    let destination = PathBuf::from(&migration.destination_root);
+    let result = validate_install_migration_source(migration)
+        .and_then(|_| install::migrate_users(&source, &destination))
+        .and_then(|result| {
+            update_settings(|settings| commit_install_root_change(settings, &result.destination))?;
+            install::finalize_migration(&result);
+            Ok(result)
+        });
+    if let Err(message) = &result {
+        let failure = message.clone();
+        let source_root = migration.source_root.clone();
+        let destination_root = migration.destination_root.clone();
+        let _ = update_settings(|settings| {
+            if let Some(pending) = settings.install_migration.as_mut() {
+                if pending.source_root == source_root
+                    && pending.destination_root == destination_root
+                {
+                    pending.phase = InstallMigrationPhase::Failed;
+                    pending.error = failure.clone();
+                }
+            }
+        });
+    }
+    result
+}
+
+fn commit_install_root_change(settings: &mut LauncherSettings, destination: &Path) {
+    settings.install_root = Some(destination.to_string_lossy().to_string());
+    settings.install_migration = None;
+}
+
 fn save_local_manifest(path: &Path, files_root: &Path, manifest: &Manifest) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|_| "Не удалось создать папку manifest.".to_string())?;
@@ -4744,8 +4984,7 @@ fn fetch_sha1_bytes(
 
 fn ensure_executable(
     #[cfg_attr(not(unix), allow(unused_variables))] path: &Path,
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    executable: bool,
+    #[cfg_attr(not(unix), allow(unused_variables))] executable: bool,
 ) -> Result<(), String> {
     if !executable {
         return Ok(());
@@ -4766,8 +5005,7 @@ fn ensure_executable(
 
 fn set_manifest_executable(
     #[cfg_attr(not(unix), allow(unused_variables))] path: &Path,
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    executable: bool,
+    #[cfg_attr(not(unix), allow(unused_variables))] executable: bool,
 ) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -5331,6 +5569,49 @@ mod tests {
             root.join("users/user-uuid/profiles/profile-id/files")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn selected_install_root_survives_restart_until_migration_commits() {
+        let source = Path::new("/mnt/old-game-disk/project-minecraft");
+        let destination = Path::new("/mnt/game-disk/project-minecraft");
+        let mut settings = LauncherSettings::default();
+        settings.install_migration = Some(new_install_root_migration(source, destination, false));
+
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let mut restored: LauncherSettings = serde_json::from_str(&serialized).unwrap();
+        let pending = restored.install_migration.as_ref().unwrap();
+        assert_eq!(pending.source_root, "/mnt/old-game-disk/project-minecraft");
+        assert_eq!(pending.destination_root, "/mnt/game-disk/project-minecraft");
+        assert_eq!(pending.phase, InstallMigrationPhase::Pending);
+        assert!(restored.install_root.is_none());
+
+        commit_install_root_change(&mut restored, destination);
+        assert_eq!(
+            restored.install_root.as_deref(),
+            Some("/mnt/game-disk/project-minecraft")
+        );
+        assert!(restored.install_migration.is_none());
+    }
+
+    #[test]
+    fn resumed_move_rejects_missing_expected_source_disk() {
+        let root = test_root("missing_migration_source");
+        let source = root.join("detached-source");
+        let destination = root.join("destination");
+        let migration = InstallRootMigration {
+            source_root: source.to_string_lossy().to_string(),
+            destination_root: destination.to_string_lossy().to_string(),
+            allow_missing_source: false,
+            source_users_expected: true,
+            phase: InstallMigrationPhase::Running,
+            error: String::new(),
+        };
+
+        let error = validate_install_migration_source(&migration).unwrap_err();
+
+        assert!(error.contains("Подключите диск"));
+        assert!(!destination.exists());
     }
 
     #[test]

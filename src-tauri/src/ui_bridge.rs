@@ -27,6 +27,16 @@ pub struct DeliveryViewState {
     pub retryable: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallMigrationViewState {
+    pub phase: String,
+    pub source: String,
+    pub destination: String,
+    pub error: String,
+    pub retryable: bool,
+}
+
 impl Default for DeliveryViewState {
     fn default() -> Self {
         Self {
@@ -82,6 +92,7 @@ pub struct UiState {
     pub use_discrete_gpu: bool,
     pub discord_rpc_enabled: bool,
     pub install_folder: String,
+    pub install_migration: InstallMigrationViewState,
     pub news_items: Vec<NewsItem>,
     pub anticheat_alert: String,
     pub policy_visible: bool,
@@ -133,6 +144,7 @@ impl Default for UiState {
             use_discrete_gpu: true,
             discord_rpc_enabled: true,
             install_folder: String::new(),
+            install_migration: InstallMigrationViewState::default(),
             news_items: Vec::new(),
             anticheat_alert: String::new(),
             policy_visible: false,
@@ -336,6 +348,10 @@ impl AppWindow {
         self.update(|current| current.profile_delivery = state);
     }
 
+    pub fn set_install_migration(&self, state: InstallMigrationViewState) {
+        self.update(|current| current.install_migration = state);
+    }
+
     pub fn get_policy_accepting(&self) -> bool {
         self.snapshot().policy_accepting
     }
@@ -456,6 +472,10 @@ macro_rules! no_arg_callback {
 
 no_arg_callback!(on_anticheat_alert_dismiss, "dismissAnticheatAlert");
 no_arg_callback!(on_change_install_folder_requested, "changeInstallFolder");
+no_arg_callback!(
+    on_install_migration_retry_requested,
+    "retryInstallMigration"
+);
 no_arg_callback!(on_logout_requested, "logout");
 no_arg_callback!(on_memory_auto_requested, "memoryAuto");
 no_arg_callback!(on_memory_decrease_requested, "memoryDecrease");
