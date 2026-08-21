@@ -75,7 +75,7 @@ pub(crate) fn migrate_users(
     let staging = destination.join(MIGRATION_DIR);
     let backup_users = destination.join(MIGRATION_BACKUP_DIR);
     if retry && backup_users.is_dir() && !destination_users.exists() {
-        fs::rename(&backup_users, &destination_users)
+        durable_rename(&backup_users, &destination_users)
             .map_err(|err| format!("Не удалось восстановить прерванный перенос: {err}"))?;
     }
     if retry && staging.exists() {
@@ -101,12 +101,12 @@ pub(crate) fn migrate_users(
     let result: Result<(), String> = (|| {
         copy_tree(&source_users, &staged_users)?;
         if destination_users.exists() {
-            fs::rename(&destination_users, &backup_users)
+            durable_rename(&destination_users, &backup_users)
                 .map_err(|err| format!("Не удалось обновить подготовленную копию: {err}"))?;
         }
-        if let Err(err) = fs::rename(&staged_users, &destination_users) {
+        if let Err(err) = durable_rename(&staged_users, &destination_users) {
             if backup_users.exists() && !destination_users.exists() {
-                let _ = fs::rename(&backup_users, &destination_users);
+                let _ = durable_rename(&backup_users, &destination_users);
             }
             return Err(format!("Не удалось завершить перенос профилей: {err}"));
         }
@@ -233,7 +233,9 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
                 source_path.display()
             ));
         }
-        File::open(&destination_path)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&destination_path)
             .and_then(|file| file.sync_all())
             .map_err(|err| {
                 format!(
@@ -246,20 +248,9 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> Result<(), String> {
-    #[cfg(windows)]
-    use std::os::windows::fs::OpenOptionsExt;
-
-    #[cfg(windows)]
-    let directory = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
-        .open(path);
-    #[cfg(not(windows))]
-    let directory = File::open(path);
-
-    directory
+    File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|err| {
             format!(
@@ -267,6 +258,42 @@ fn sync_directory(path: &Path) -> Result<(), String> {
                 path.display()
             )
         })
+}
+
+// FlushFileBuffers does not support directory handles on Windows. Copied files
+// are flushed individually and directory swaps use MOVEFILE_WRITE_THROUGH.
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(std::io::Error::other)
 }
 
 fn sha256_file(path: &Path) -> Result<[u8; 32], String> {

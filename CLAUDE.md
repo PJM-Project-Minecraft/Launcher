@@ -69,7 +69,11 @@ docker run --rm \
 
 Локальная development-сборка плеер-лаунчера с зашитым URL бэкенда:
 ```bash
-scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
+LAUNCHER_UPDATE_PUBKEY=b241c3efdc832ac81a3f61b1347a241644e66e268fa6efe2bfcd578f43e24e6d \
+DELIVERY_MANIFEST_PUBKEY=efb831b7209efd9034c93ab89d93e9e6d00830eb9ef5b0d68d55a65bcfa45eca \
+scripts/prod/build-player-launcher.sh \
+  --api-url https://launcher.likonchik.xyz \
+  --build-only
 # либо переменная LAUNCHER_API_URL при cargo build/run
 ```
 Release-сборка также требует `LAUNCHER_UPDATE_PUBKEY` (либо `--signing-key`) и

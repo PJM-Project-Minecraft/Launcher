@@ -48,7 +48,11 @@ For VPS production release flow, use [docs/vps-production.md](docs/vps-productio
 For local development, the player launcher can be built with a baked-in backend URL via:
 
 ```bash
-scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com
+LAUNCHER_UPDATE_PUBKEY=b241c3efdc832ac81a3f61b1347a241644e66e268fa6efe2bfcd578f43e24e6d \
+DELIVERY_MANIFEST_PUBKEY=efb831b7209efd9034c93ab89d93e9e6d00830eb9ef5b0d68d55a65bcfa45eca \
+scripts/prod/build-player-launcher.sh \
+  --api-url https://launcher.example.com \
+  --build-only
 ```
 
 Do not publish the generic build above. Production release требует update signing key и публичный delivery manifest

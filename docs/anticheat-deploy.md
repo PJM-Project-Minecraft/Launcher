@@ -159,7 +159,7 @@ scp backend/data/anticheat-agent.jar backend/data/libanticheat.so backend/data/a
 Проверить, что backend поднялся (если `ANTICHEAT_SECRET` не задан — будет краш-луп):
 
 ```bash
-ssh root@176.108.254.89 "cd /root/Launcher && docker compose logs --tail=50 backend"
+ssh root@176.108.254.89 "cd /root/Launcher && docker compose logs --tail=50 server"
 ```
 
 ### 5.4. Новый релиз лаунчера (для P1-сверки и P3-proof у игроков)
@@ -198,7 +198,7 @@ scripts/prod/verify-player-launcher-artifacts.sh \
 ssh root@176.108.254.89
 cd /root/Launcher
 sed -i 's/^ANTICHEAT_REQUIRE_ATTESTATION=.*/ANTICHEAT_REQUIRE_ATTESTATION=true/' .env
-docker compose up -d backend
+docker compose up -d server
 ```
 
 До включения смотри логи `attestation would fail (transition mode)` — это будущие отказы;
@@ -241,7 +241,7 @@ curl -s https://launcher.likonchik.xyz/api/anticheat/manifest | jq
 ssh root@176.108.254.89 "cd /root/Launcher && git reset --hard <старый-commit> && docker compose up -d --build"
 
 # attestation назад в transition
-sed -i 's/^ANTICHEAT_REQUIRE_ATTESTATION=.*/ANTICHEAT_REQUIRE_ATTESTATION=false/' /root/Launcher/.env && docker compose up -d backend
+sed -i 's/^ANTICHEAT_REQUIRE_ATTESTATION=.*/ANTICHEAT_REQUIRE_ATTESTATION=false/' /root/Launcher/.env && docker compose up -d server
 
 # бинарники: вернуть прежние .so/.dll/.jar в backend/data/ через scp
 ```

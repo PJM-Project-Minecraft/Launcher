@@ -62,6 +62,8 @@ UPDATE_PUBKEY="$(docker run --rm --network none --read-only \
 # Networked dependency/build phase receives only public material.
 docker run --rm \
   --user "$(id -u):$(id -g)" \
+  --tmpfs "/tmp/release-home:rw,uid=$(id -u),gid=$(id -g),mode=0700" \
+  --tmpfs "/tmp/cargo-home:rw,uid=$(id -u),gid=$(id -g),mode=0700" \
   -e HOME=/tmp/release-home \
   -e CARGO_HOME=/tmp/cargo-home \
   -e RUSTUP_HOME=/opt/rustup \
