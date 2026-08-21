@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /home/liko/Разработка/Qdrant/qdrant.sh check launcher "$@"
