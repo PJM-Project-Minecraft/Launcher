@@ -184,7 +184,10 @@ if (( BUILD == 1 )); then
       exit 1
     fi
     build_args=(build --no-bundle --runner cargo-xwin --target "$TARGET_TRIPLE")
-    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=/Brepro"
+    # Rust/LLD otherwise leaves a CodeView/PDB GUID in the stripped PE. The
+    # GUID changes on every link and also changes /Brepro's content hash.
+    # Production packages do not ship PDBs, so suppress the debug directory.
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=/Brepro -C link-arg=/DEBUG:NONE"
   fi
   (
     cd "$ROOT_DIR"

@@ -108,6 +108,10 @@ if grep -Eiq 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$imports
   echo "ERROR: Windows artifact imports a forbidden external runtime DLL" >&2
   exit 1
 fi
+if grep -Eq 'CodeView|format RSDS' <<<"$imports"; then
+  echo "ERROR: Windows artifact contains a non-reproducible CodeView/PDB identifier" >&2
+  exit 1
+fi
 
 tar -tzf "$linux_archive" >/dev/null
 tar -tzf "$windows_archive" >/dev/null
