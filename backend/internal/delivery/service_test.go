@@ -201,6 +201,50 @@ func TestReadyRenameIsTheOnlyPublicationSignal(t *testing.T) {
 	}
 }
 
+func TestProcessingRecoveryFinalizesCommittedGenerationWithoutRepublish(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	generation, upload, err := service.CreateDraft(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upload, "client.jar"), []byte("complete"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	processing := filepath.Join(filepath.Dir(upload), generation+".processing")
+	if err := os.Rename(upload, processing); err != nil {
+		t.Fatal(err)
+	}
+	var job models.DeliveryJob
+	if err := db.Where("profile_id = ? AND generation = ?", profile.ID, generation).First(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.publishProfileForJob(context.Background(), profile.ID, processing, job.ID, generation, func(_, _ int) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crash after the release transaction committed but before the
+	// watcher marked the job succeeded and renamed .processing.
+	NewWatcher(service, nil).reconcile()
+	var releases int64
+	db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases)
+	if releases != 1 {
+		t.Fatalf("release count = %d, want one idempotent publication", releases)
+	}
+	if err := db.First(&job, "id = ?", job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "succeeded" || job.ReleaseID == "" {
+		t.Fatalf("recovered job = %+v", job)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(upload), generation+".published")); err != nil {
+		t.Fatalf("published generation missing: %v", err)
+	}
+}
+
 func TestGarbageCollectRetainsNewestReleaseAndReferencedBlobs(t *testing.T) {
 	service, db := testService(t)
 	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "neoforge", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}

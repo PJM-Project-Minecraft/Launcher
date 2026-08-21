@@ -440,6 +440,23 @@ fn register_update_restart_handler(app: &AppWindow) {
     });
 }
 
+fn register_update_retry_handler(app: &AppWindow, config: AppConfig) {
+    let app_weak = app.as_weak();
+    app.on_update_retry_requested(move || {
+        if let Some(app) = app_weak.upgrade() {
+            app.set_launcher_delivery(DeliveryViewState {
+                phase: "checking".into(),
+                message: "Повторно проверяем обновление".into(),
+                version: String::new(),
+                progress: 0.0,
+                mandatory: false,
+                retryable: false,
+            });
+        }
+        spawn_update_check(app_weak.clone(), config.clone());
+    });
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginRequest {
@@ -810,6 +827,7 @@ fn initialize_launcher(app: &AppWindow) {
     register_settings_handler(app, state.clone(), migration_active.clone());
     register_play_handler(app, config.clone(), state.clone(), migration_active);
     register_update_restart_handler(app);
+    register_update_retry_handler(app, config.clone());
     spawn_update_check(app.as_weak(), config.clone());
     restore_saved_session(
         app,

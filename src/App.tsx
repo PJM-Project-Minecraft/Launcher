@@ -438,8 +438,9 @@ function UpdateBanner({ state }: { state: LauncherState }) {
   return (
     <aside className={`update-banner${update.mandatory ? " mandatory" : ""}`}>
       <PixelIcon name="reload" className={update.phase === "downloading" || update.phase === "applying" ? "spin" : ""} />
-      <div><b>{ready ? `Версия ${update.version} готова` : update.message || "Проверяем обновление"}</b><span>{update.mandatory ? "Обновление обязательно для запуска игры." : ready ? update.message || "Перезапустите лаунчер, когда будете готовы." : update.phase === "failed" ? "Повторим проверку после reconnect." : `Загрузка ${Math.round(update.progress * 100)}%`}</span></div>
+      <div><b>{ready ? `Версия ${update.version} готова` : update.message || "Проверяем обновление"}</b><span>{update.mandatory ? "Обновление обязательно для запуска игры." : ready ? update.message || "Перезапустите лаунчер, когда будете готовы." : update.phase === "failed" ? "Можно повторить без перезапуска лаунчера." : `Загрузка ${Math.round(update.progress * 100)}%`}</span></div>
       {ready && <button onClick={() => void action("restartForUpdate")}>Перезапустить</button>}
+      {update.phase === "failed" && update.retryable && <button onClick={() => void action("retryUpdate")}>Повторить</button>}
     </aside>
   );
 }

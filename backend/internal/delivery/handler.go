@@ -1,9 +1,6 @@
 package delivery
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -70,25 +67,19 @@ func (h Handler) profileChunk(c fiber.Ctx) error {
 }
 
 func (h Handler) launcherCurrent(c fiber.Ctx) error {
-	manifest, err := h.service.LauncherCurrent(c.Context(), c.Query("platform"), c.Query("from", "0.0.0"))
+	snapshot, err := h.service.LauncherCurrent(c.Context(), c.Query("platform"), c.Query("from", "0.0.0"))
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return c.SendStatus(http.StatusNoContent)
 	}
 	if err != nil {
 		return h.writeError(c, err)
 	}
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return h.writeError(c, err)
-	}
-	digest := sha256.Sum256(data)
 	c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	c.Set(fiber.HeaderCacheControl, "no-cache")
-	c.Set("X-Manifest-SHA256", hex.EncodeToString(digest[:]))
-	if signature := h.service.SignManifest(data); signature != "" {
-		c.Set("X-Manifest-Signature", signature)
-	}
-	return c.Send(data)
+	c.Set("X-Manifest-SHA256", snapshot.SHA256)
+	c.Set("X-Manifest-Signature", snapshot.Signature)
+	c.Set("X-Update-Mandatory", strconv.FormatBool(snapshot.Mandatory))
+	return c.Send(snapshot.Descriptor)
 }
 
 func (h Handler) launcherChunk(c fiber.Ctx) error {

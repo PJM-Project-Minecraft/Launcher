@@ -19,6 +19,8 @@ Delivery v2 — единый контур доставки профилей Mine
   журналируемый swap. При падении процесса предыдущая сборка восстанавливается.
 - WebSocket/SSE является только сигналом изменения. Долговечное состояние
   читается из HTTP snapshot; после reconnect snapshot перечитывается заново.
+- Launcher descriptor фиксируется один раз при CAS-import. Изменяемая
+  channel policy (`active`, `mandatory`) не переписывает подписанный descriptor.
 
 ## Публикация профиля
 
@@ -39,6 +41,8 @@ Delivery v2 — единый контур доставки профилей Mine
 Статус находится в `delivery_jobs`, а WEB читает его через
 `GET /api/v2/admin/delivery/jobs`. Ошибка публикации сохраняется и generation
 переименовывается в `.failed`; успешная — в `.published`.
+Привязка generation к release пименяется в той же DB-транзакции, поэтому
+restart между commit и rename лишь завершает job, а не создаёт второй release.
 
 ## API v2
 
@@ -54,6 +58,11 @@ Delivery v2 — единый контур доставки профилей Mine
 - `GET /api/v2/launcher/releases/:release/chunks/:sha256`
 - `GET /api/v2/launcher/releases/:release/artifact?platform=linux-x64` — полный
   файл только для браузерной витрины.
+
+`current` возвращает immutable signed descriptor; рассчитанная для
+текущей версии channel policy приходит отдельно в `X-Update-Mandatory`.
+Деактивация/удаление в admin лишь снимает release с канала: уже
+выданные release-ID chunks и artifact доступны до явного GC после grace.
 
 Admin:
 

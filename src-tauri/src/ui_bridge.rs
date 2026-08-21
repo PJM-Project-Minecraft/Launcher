@@ -467,6 +467,7 @@ no_arg_callback!(on_policy_accept_requested, "acceptPolicy");
 no_arg_callback!(on_settings_close_requested, "closeSettings");
 no_arg_callback!(on_settings_requested, "openSettings");
 no_arg_callback!(on_update_restart_requested, "restartForUpdate");
+no_arg_callback!(on_update_retry_requested, "retryUpdate");
 
 pub fn invoke_from_ui(callback: impl FnOnce() + Send + 'static) -> Result<(), ()> {
     callback();

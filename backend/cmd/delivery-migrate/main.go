@@ -15,6 +15,9 @@ import (
 // This expensive backfill is never run by server startup or deploy scripts.
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
+	}
 	db, err := database.Open(cfg)
 	if err != nil {
 		log.Fatal(err)

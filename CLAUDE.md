@@ -276,15 +276,18 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 `src/` — React-интерфейс. `src-tauri/src/anticheat/` — HWID и локальное сканирование.
 URL бэкенда: env `LAUNCHER_API_URL` или зашитый при сборке `LAUNCHER_DEFAULT_API_URL`.
 
-Автообновление: `src/updater.rs` — проверка при старте / по SSE / раз в 30 мин,
-скачивание в `<exe>.update.partial`, SHA-256, самозамена (Linux: rename поверх;
-Windows: exe→.old + rename) и перезапуск по кнопке. Версия = `CARGO_PKG_VERSION`.
+Автообновление: `src/updater.rs` + `src/delivery.rs` — HTTP snapshot при
+старте и после reconnect SSE; SSE только сигнализирует повторную проверку.
+Периодического polling нет. Подписанный descriptor v2 собирается из SHA-256 CAS-chunks
+в `<exe>.update.partial`, после чего бинарник ещё раз проверяется и самозаменяется
+(Linux: rename поверх; Windows: exe→.old + rename). Версия = `CARGO_PKG_VERSION`.
 
 **Гоча команды запуска профиля:** для модовых загрузчиков (NeoForge/Forge) команда
-должна быть СГЕНЕРИРОВАНА `buildAndSaveLaunchCommands` (вызывается в `PrepareClient`).
+должна быть сгенерирована до публикации v2 generation и попасть в immutable profile config.
 Ручной шаблон `-jar client.jar` — это ванильный паттерн → `Unable to access jarfile client.jar`,
-MC мгновенно выходит. Профили НЕ мигрируются в прод-БД — при пересоздании профиля нужно
-запустить «Подготовить клиент» через дашборд.
+MC мгновенно выходит. Админ создаёт draft, загружает полную managed-сборку в
+`<generation>.upload` и атомарно переименовывает её в `<generation>.ready`; quiet-time и
+автоподготовки по неполному дереву нет.
 
 **В backend-образе есть Temurin 21 JRE** (нужен для `PrepareClient` — headless-установщик
 NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Java 8 (старый Forge 1.12) не добавлена.

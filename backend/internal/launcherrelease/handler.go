@@ -136,7 +136,12 @@ func (h Handler) create(c fiber.Ctx) error {
 		})
 	}
 
-	release, err := h.service.Create(c.Context(), req, files)
+	var release models.LauncherRelease
+	if h.v2 != nil {
+		release, err = h.service.CreateStaged(c.Context(), req, files)
+	} else {
+		release, err = h.service.Create(c.Context(), req, files)
+	}
 	if err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: err.Error()})
 	}
@@ -144,6 +149,11 @@ func (h Handler) create(c fiber.Ctx) error {
 		if err := h.v2.ImportLauncherRelease(c.Context(), release); err != nil {
 			_ = h.service.Delete(c.Context(), release.ID)
 			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Delivery v2 отклонил релиз: " + err.Error()})
+		}
+		active := true
+		release, err = h.service.Update(c.Context(), release.ID, PatchRequest{IsActive: &active})
+		if err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Delivery v2 готов, но channel activation не удалась"})
 		}
 	}
 	h.notifyReleaseChanged()

@@ -80,6 +80,7 @@ pub struct LauncherManifest {
     pub release_id: String,
     pub version: String,
     pub platform: String,
+    #[serde(default)]
     pub mandatory: bool,
     #[serde(default)]
     pub changelog: String,
@@ -191,12 +192,18 @@ pub fn fetch_launcher_manifest(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    let mandatory = response
+        .headers()
+        .get("X-Update-Mandatory")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let body = response
         .bytes()
         .map_err(|error| format!("Ответ обновлений v2 оборван: {error}"))?;
     verify_bytes(&body, &expected_sha256, "launcher manifest")?;
     verify_manifest_signature(&body, &signature)?;
-    let manifest: LauncherManifest = serde_json::from_slice(&body)
+    let mut manifest: LauncherManifest = serde_json::from_slice(&body)
         .map_err(|error| format!("Ответ обновлений v2 повреждён: {error}"))?;
     if manifest.schema_version != SCHEMA_VERSION
         || manifest.kind != "launcher"
@@ -205,6 +212,7 @@ pub fn fetch_launcher_manifest(
         return Err("Backend вернул несовместимый launcher manifest v2.".to_string());
     }
     validate_release_files(std::slice::from_ref(&manifest.artifact))?;
+    manifest.mandatory = mandatory;
     Ok(Some(manifest))
 }
 
@@ -219,9 +227,17 @@ pub fn reconstruct_file(
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<u64, String> {
     fs::create_dir_all(cache_root).map_err(|_| "Не удалось создать chunk-cache.".to_string())?;
+    // One file can reference the same content chunk more than once. Download each
+    // hash once: parallel workers must never truncate/rename the same cache entry.
+    let mut seen = std::collections::HashSet::new();
+    let unique_chunks = spec
+        .chunks
+        .iter()
+        .filter(|chunk| seen.insert(chunk.sha256.as_str()))
+        .collect::<Vec<_>>();
     let completed = AtomicUsize::new(0);
-    let total = spec.chunks.len();
-    spec.chunks.par_iter().try_for_each(|chunk| {
+    let total = unique_chunks.len();
+    unique_chunks.par_iter().try_for_each(|chunk| {
         ensure_chunk(client, api_url, token, scope, cache_root, chunk)?;
         progress(completed.fetch_add(1, Ordering::Relaxed) + 1, total);
         Ok::<(), String>(())

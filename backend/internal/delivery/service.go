@@ -392,7 +392,7 @@ func compareVersion(left, right string) int {
 	return 0
 }
 
-func (s *Service) LauncherCurrent(ctx context.Context, platform, from string) (*LauncherManifest, error) {
+func (s *Service) LauncherCurrent(ctx context.Context, platform, from string) (*LauncherSnapshot, error) {
 	if platform != "linux-x64" && platform != "windows-x64" {
 		return nil, errors.New("unknown platform")
 	}
@@ -405,11 +405,10 @@ func (s *Service) LauncherCurrent(ctx context.Context, platform, from string) (*
 	}
 	sort.Slice(releases, func(i, j int) bool { return compareVersion(releases[i].Version, releases[j].Version) > 0 })
 	var selected *models.LauncherRelease
-	var selectedFile *models.LauncherReleaseFile
 	for index := range releases {
 		for fileIndex := range releases[index].Files {
 			if releases[index].Files[fileIndex].Platform == platform {
-				selected, selectedFile = &releases[index], &releases[index].Files[fileIndex]
+				selected = &releases[index]
 				break
 			}
 		}
@@ -421,7 +420,7 @@ func (s *Service) LauncherCurrent(ctx context.Context, platform, from string) (*
 		return nil, gorm.ErrRecordNotFound
 	}
 	var artifact models.LauncherDeliveryArtifact
-	if err := s.db.WithContext(ctx).Preload("Chunks", func(db *gorm.DB) *gorm.DB { return db.Order("ordinal asc") }).Where("release_id = ? AND platform = ?", selected.ID, platform).First(&artifact).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("release_id = ? AND platform = ?", selected.ID, platform).First(&artifact).Error; err != nil {
 		return nil, err
 	}
 	mandatory := false
@@ -430,18 +429,10 @@ func (s *Service) LauncherCurrent(ctx context.Context, platform, from string) (*
 			mandatory = true
 		}
 	}
-	chunks := make([]ChunkRef, 0, len(artifact.Chunks))
-	for _, chunk := range artifact.Chunks {
-		chunks = append(chunks, ChunkRef{SHA256: chunk.HashSHA256, Size: chunk.Size})
+	if artifact.DescriptorJSON == "" || artifact.DescriptorSHA256 == "" || (len(s.signingKey) != 0 && artifact.DescriptorSignature == "") {
+		return nil, errors.New("launcher release has no immutable signed descriptor")
 	}
-	return &LauncherManifest{
-		SchemaVersion: SchemaVersion, Kind: "launcher", ReleaseID: selected.ID,
-		Version: selected.Version, Platform: platform, Mandatory: mandatory,
-		Changelog: selected.Changelog, ArtifactSignature: selectedFile.SignatureEd25519,
-		Artifact:    ReleaseFile{Path: selectedFile.FileName, Size: artifact.Size, SHA256: artifact.HashSHA256, Executable: true, Chunks: chunks},
-		CreatedAt:   selected.CreatedAt,
-		DownloadURL: "/api/v2/launcher/releases/" + selected.ID + "/artifact?platform=" + platform,
-	}, nil
+	return &LauncherSnapshot{Descriptor: []byte(artifact.DescriptorJSON), SHA256: artifact.DescriptorSHA256, Signature: artifact.DescriptorSignature, Mandatory: mandatory}, nil
 }
 
 func (s *Service) LauncherArtifact(ctx context.Context, releaseID, platform string) (string, models.LauncherReleaseFile, error) {
@@ -449,7 +440,11 @@ func (s *Service) LauncherArtifact(ctx context.Context, releaseID, platform stri
 		return "", models.LauncherReleaseFile{}, gorm.ErrRecordNotFound
 	}
 	var release models.LauncherRelease
-	if err := s.db.WithContext(ctx).Where("id = ? AND is_active = ?", releaseID, true).First(&release).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("id = ?", releaseID).First(&release).Error; err != nil {
+		return "", models.LauncherReleaseFile{}, err
+	}
+	var artifact models.LauncherDeliveryArtifact
+	if err := s.db.WithContext(ctx).Select("id").Where("release_id = ? AND platform = ?", releaseID, platform).First(&artifact).Error; err != nil {
 		return "", models.LauncherReleaseFile{}, err
 	}
 	var file models.LauncherReleaseFile
@@ -467,7 +462,7 @@ func (s *Service) LauncherBlob(ctx context.Context, releaseID, hash string) (str
 	err := s.db.WithContext(ctx).Table("launcher_delivery_artifact_chunks AS chunks").
 		Joins("JOIN launcher_delivery_artifacts AS artifacts ON artifacts.id = chunks.artifact_id").
 		Joins("JOIN launcher_releases AS releases ON releases.id = artifacts.release_id").
-		Where("releases.id = ? AND releases.is_active = ? AND chunks.hash_sha256 = ?", releaseID, true, hash).Count(&count).Error
+		Where("releases.id = ? AND chunks.hash_sha256 = ?", releaseID, hash).Count(&count).Error
 	if err != nil || count == 0 {
 		if err == nil {
 			err = gorm.ErrRecordNotFound
@@ -482,6 +477,15 @@ func (s *Service) LauncherBlob(ctx context.Context, releaseID, hash string) (str
 }
 
 func encodeManifest(manifest ProfileManifest) ([]byte, string, error) {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.Sum256(data)
+	return data, hex.EncodeToString(digest[:]), nil
+}
+
+func encodeLauncherDescriptor(manifest LauncherManifest) ([]byte, string, error) {
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		return nil, "", err

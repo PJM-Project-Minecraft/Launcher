@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -59,5 +60,36 @@ func TestLauncherDescriptorIsSigned(t *testing.T) {
 	}
 	if !ed25519.Verify(service.signingKey.Public().(ed25519.PublicKey), body, signature) {
 		t.Fatal("launcher descriptor signature is invalid")
+	}
+	var descriptor LauncherManifest
+	if err := json.Unmarshal(body, &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.LauncherRelease{}).Where("id = ?", release.ID).Update("mandatory", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	updated, err := app.Test(httptest.NewRequest("GET", "/api/v2/launcher/releases/current?platform=linux-x64&from=1.0.0", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedBody, _ := io.ReadAll(updated.Body)
+	if string(updatedBody) != string(body) || updated.Header.Get("X-Update-Mandatory") != "true" {
+		t.Fatal("channel policy mutated the immutable launcher descriptor")
+	}
+
+	// Removing a release from the channel must not break a client which already
+	// received its signed descriptor. Release-ID content lives until explicit GC.
+	if err := db.Model(&models.LauncherRelease{}).Where("id = ?", release.ID).Update("is_active", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	chunkURL := "/api/v2/launcher/releases/" + release.ID + "/chunks/" + descriptor.Artifact.Chunks[0].SHA256
+	chunkResponse, err := app.Test(httptest.NewRequest("GET", chunkURL, nil))
+	if err != nil || chunkResponse.StatusCode != 200 {
+		t.Fatalf("immutable chunk after deactivation: status=%d err=%v", chunkResponse.StatusCode, err)
+	}
+	artifactURL := "/api/v2/launcher/releases/" + release.ID + "/artifact?platform=linux-x64"
+	artifactResponse, err := app.Test(httptest.NewRequest("GET", artifactURL, nil))
+	if err != nil || artifactResponse.StatusCode != 200 {
+		t.Fatalf("immutable artifact after deactivation: status=%d err=%v", artifactResponse.StatusCode, err)
 	}
 }

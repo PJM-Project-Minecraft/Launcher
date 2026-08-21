@@ -36,14 +36,17 @@ type ProfileReleaseFileChunk struct {
 	Size       int64  `gorm:"not null" json:"size"`
 }
 type LauncherDeliveryArtifact struct {
-	ID         string                          `gorm:"type:uuid;primaryKey" json:"id"`
-	ReleaseID  string                          `gorm:"type:uuid;index;not null;uniqueIndex:ux_launcher_delivery_platform" json:"releaseId"`
-	Platform   string                          `gorm:"size:32;index;not null;uniqueIndex:ux_launcher_delivery_platform" json:"platform"`
-	HashSHA256 string                          `gorm:"size:64;not null" json:"sha256"`
-	Size       int64                           `gorm:"not null" json:"size"`
-	Executable bool                            `gorm:"not null;default:true" json:"executable"`
-	Chunks     []LauncherDeliveryArtifactChunk `gorm:"foreignKey:ArtifactID;constraint:OnDelete:CASCADE" json:"chunks"`
-	CreatedAt  time.Time                       `json:"createdAt"`
+	ID                  string                          `gorm:"type:uuid;primaryKey" json:"id"`
+	ReleaseID           string                          `gorm:"type:uuid;index;not null;uniqueIndex:ux_launcher_delivery_platform" json:"releaseId"`
+	Platform            string                          `gorm:"size:32;index;not null;uniqueIndex:ux_launcher_delivery_platform" json:"platform"`
+	HashSHA256          string                          `gorm:"size:64;not null" json:"sha256"`
+	Size                int64                           `gorm:"not null" json:"size"`
+	Executable          bool                            `gorm:"not null;default:true" json:"executable"`
+	DescriptorJSON      string                          `gorm:"type:text" json:"-"`
+	DescriptorSHA256    string                          `gorm:"size:64" json:"descriptorSha256"`
+	DescriptorSignature string                          `gorm:"size:128" json:"descriptorSignature"`
+	Chunks              []LauncherDeliveryArtifactChunk `gorm:"foreignKey:ArtifactID;constraint:OnDelete:CASCADE" json:"chunks"`
+	CreatedAt           time.Time                       `json:"createdAt"`
 }
 type LauncherDeliveryArtifactChunk struct {
 	ID         string `gorm:"type:uuid;primaryKey" json:"-"`
@@ -54,9 +57,9 @@ type LauncherDeliveryArtifactChunk struct {
 }
 type DeliveryJob struct {
 	ID         string     `gorm:"type:uuid;primaryKey" json:"id"`
-	Kind       string     `gorm:"size:24;index;not null" json:"kind"`
-	ProfileID  string     `gorm:"type:uuid;index" json:"profileId,omitempty"`
-	Generation string     `gorm:"size:160;index" json:"generation,omitempty"`
+	Kind       string     `gorm:"size:24;index;not null;uniqueIndex:ux_delivery_job_generation" json:"kind"`
+	ProfileID  string     `gorm:"type:uuid;index;uniqueIndex:ux_delivery_job_generation" json:"profileId,omitempty"`
+	Generation string     `gorm:"size:160;index;uniqueIndex:ux_delivery_job_generation" json:"generation,omitempty"`
 	Status     string     `gorm:"size:24;index;not null" json:"status"`
 	Phase      string     `gorm:"size:48;not null" json:"phase"`
 	Message    string     `json:"message"`

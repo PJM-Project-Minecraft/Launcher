@@ -83,27 +83,37 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 	w.service.publishMu.Lock()
 	defer w.service.publishMu.Unlock()
 
+	var job models.DeliveryJob
+	err := w.service.db.Where("kind = ? AND profile_id = ? AND generation = ?", "profile", profileID, generation).First(&job).Error
+	if err != nil {
+		// Only a draft issued by the authenticated admin API can be claimed.
+		// In particular, a manually created .processing directory is not a
+		// completion signal and cannot bypass .upload -> .ready.
+		return
+	}
 	processing := filepath.Join(filepath.Dir(source), generation+".processing")
 	if strings.HasSuffix(source, ".ready") {
 		if err := os.Rename(source, processing); err != nil {
 			return
 		}
 	}
-	var existing models.DeliveryJob
-	err := w.service.db.Where("kind = ? AND profile_id = ? AND generation = ?", "profile", profileID, generation).First(&existing).Error
-	if err == nil && (existing.Status == "succeeded" || existing.Status == "failed") {
+	if job.Status == "succeeded" {
+		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))
 		return
 	}
-	job := existing
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		job = models.DeliveryJob{ID: newID(), Kind: "profile", ProfileID: profileID, Generation: generation, Status: "queued", Phase: "claimed", Message: "SFTP generation принята"}
-		if w.service.db.Create(&job).Error != nil {
-			return
-		}
+	if job.Status == "failed" {
+		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".failed"))
+		return
+	}
+	if job.ReleaseID != "" {
+		ended := time.Now().UTC()
+		w.updateJob(&job, map[string]any{"status": "succeeded", "phase": "done", "message": "Immutable release активирован", "progress": 1.0, "ended_at": &ended})
+		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))
+		return
 	}
 	started := time.Now().UTC()
 	w.updateJob(&job, map[string]any{"status": "running", "phase": "scan", "message": "Проверяем и чанкуем файлы", "started_at": &started, "error": ""})
-	releaseID, publishErr := w.service.publishProfile(context.Background(), profileID, processing, func(current, total int) {
+	releaseID, publishErr := w.service.publishProfileForJob(context.Background(), profileID, processing, job.ID, generation, func(current, total int) {
 		progress := 0.05
 		if total > 0 {
 			progress = 0.05 + 0.80*float64(current)/float64(total)
@@ -147,10 +157,22 @@ func (s *Service) CreateDraft(ctx context.Context, profileID string) (string, st
 	if err := os.Mkdir(path, 0755); err != nil {
 		return "", "", err
 	}
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "profile", ProfileID: profileID, Generation: generation,
+		Status: "waiting", Phase: "upload", Message: "Ожидаем atomic rename .upload -> .ready",
+	}
+	if err := s.db.WithContext(ctx).Create(&job).Error; err != nil {
+		_ = os.Remove(path)
+		return "", "", err
+	}
 	return generation, path, nil
 }
 
 func (s *Service) publishProfile(ctx context.Context, profileID, source string, progress func(int, int)) (string, error) {
+	return s.publishProfileForJob(ctx, profileID, source, "", "", progress)
+}
+
+func (s *Service) publishProfileForJob(ctx context.Context, profileID, source, jobID, generation string, progress func(int, int)) (string, error) {
 	var profile models.Profile
 	if err := s.db.WithContext(ctx).First(&profile, "id = ?", profileID).Error; err != nil {
 		return "", err
@@ -205,7 +227,21 @@ func (s *Service) publishProfile(ctx context.Context, profileID, source string, 
 				}
 			}
 		}
-		return tx.Model(&models.Profile{}).Where("id = ?", profileID).Updates(map[string]any{"manifest_version": manifest.Sequence, "manifest_updated_at": createdAt}).Error
+		if err := tx.Model(&models.Profile{}).Where("id = ?", profileID).Updates(map[string]any{"manifest_version": manifest.Sequence, "manifest_updated_at": createdAt}).Error; err != nil {
+			return err
+		}
+		if jobID != "" {
+			result := tx.Model(&models.DeliveryJob{}).
+				Where("id = ? AND kind = ? AND profile_id = ? AND generation = ?", jobID, "profile", profileID, generation).
+				Updates(map[string]any{"release_id": releaseID, "phase": "committed", "message": "Release зафиксирован", "progress": 0.95})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("delivery job disappeared during publication")
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		_ = os.Remove(s.manifestPath(releaseID))
@@ -214,12 +250,46 @@ func (s *Service) publishProfile(ctx context.Context, profileID, source string, 
 	return releaseID, nil
 }
 
-// ImportLauncherRelease chunks an already validated legacy release artifact.
-// The old release row remains the version/mandatory source during the bridge.
-func (s *Service) ImportLauncherRelease(ctx context.Context, release models.LauncherRelease) error {
+// ImportLauncherRelease publishes already validated upload sources into CAS and
+// persists one immutable signed descriptor per platform.
+func (s *Service) ImportLauncherRelease(ctx context.Context, release models.LauncherRelease) (resultErr error) {
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
-	for _, file := range release.Files {
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "launcher", Generation: release.ID,
+		Status: "queued", Phase: "queued", Message: "Launcher release принят",
+	}
+	if err := s.db.WithContext(ctx).Where("kind = ? AND profile_id = ? AND generation = ?", "launcher", "", release.ID).FirstOrCreate(&job).Error; err != nil {
+		return err
+	}
+	var readyArtifacts int64
+	if job.Status == "succeeded" {
+		if err := s.db.WithContext(ctx).Model(&models.LauncherDeliveryArtifact{}).
+			Where("release_id = ? AND descriptor_json <> ''", release.ID).Count(&readyArtifacts).Error; err != nil {
+			return err
+		}
+		if readyArtifacts == int64(len(release.Files)) {
+			return nil
+		}
+	}
+	started := time.Now().UTC()
+	if err := s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
+		"status": "running", "phase": "chunks", "message": "Чанкуем launcher artifacts",
+		"progress": 0.0, "error": "", "started_at": &started, "ended_at": nil,
+	}).Error; err != nil {
+		return err
+	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		ended := time.Now().UTC()
+		_ = s.db.WithContext(context.Background()).Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(map[string]any{
+			"status": "failed", "phase": "failed", "message": "Launcher publication отклонена",
+			"error": resultErr.Error(), "ended_at": &ended,
+		}).Error
+	}()
+	for index, file := range release.Files {
 		path := filepath.Join(s.launcherRoot, release.Version, file.Platform, file.FileName)
 		artifact, err := s.chunkFile(ctx, path)
 		if err != nil {
@@ -228,7 +298,35 @@ func (s *Service) ImportLauncherRelease(ctx context.Context, release models.Laun
 		if artifact.SHA256 != strings.ToLower(file.HashSHA256) || artifact.Size != file.Size {
 			return errors.New("launcher artifact differs from uploaded release metadata")
 		}
-		row := models.LauncherDeliveryArtifact{ID: newID(), ReleaseID: release.ID, Platform: file.Platform, HashSHA256: artifact.SHA256, Size: artifact.Size, Executable: true, CreatedAt: time.Now().UTC()}
+		chunks := make([]models.LauncherDeliveryArtifactChunk, 0, len(artifact.Chunks))
+		manifestChunks := make([]ChunkRef, 0, len(artifact.Chunks))
+		rowID := newID()
+		for ordinal, chunk := range artifact.Chunks {
+			chunks = append(chunks, models.LauncherDeliveryArtifactChunk{ID: newID(), ArtifactID: rowID, Ordinal: ordinal, HashSHA256: chunk.SHA256, Size: chunk.Size})
+			manifestChunks = append(manifestChunks, chunk)
+		}
+		descriptor := LauncherManifest{
+			SchemaVersion: SchemaVersion, Kind: "launcher", ReleaseID: release.ID,
+			Version: release.Version, Platform: file.Platform, Changelog: release.Changelog,
+			ArtifactSignature: file.SignatureEd25519,
+			Artifact:          ReleaseFile{Path: file.FileName, Size: artifact.Size, SHA256: artifact.SHA256, Executable: true, Chunks: manifestChunks},
+			CreatedAt:         release.CreatedAt,
+			DownloadURL:       "/api/v2/launcher/releases/" + release.ID + "/artifact?platform=" + file.Platform,
+		}
+		descriptorJSON, descriptorHash, err := encodeLauncherDescriptor(descriptor)
+		if err != nil {
+			return err
+		}
+		descriptorSignature := s.SignManifest(descriptorJSON)
+		if len(s.signingKey) != 0 && descriptorSignature == "" {
+			return errors.New("launcher descriptor signing failed")
+		}
+		row := models.LauncherDeliveryArtifact{
+			ID: rowID, ReleaseID: release.ID, Platform: file.Platform,
+			HashSHA256: artifact.SHA256, Size: artifact.Size, Executable: true,
+			DescriptorJSON: string(descriptorJSON), DescriptorSHA256: descriptorHash,
+			DescriptorSignature: descriptorSignature, CreatedAt: time.Now().UTC(),
+		}
 		err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			var existing []models.LauncherDeliveryArtifact
 			if err := tx.Select("id").Where("release_id = ? AND platform = ?", release.ID, file.Platform).Find(&existing).Error; err != nil {
@@ -245,15 +343,21 @@ func (s *Service) ImportLauncherRelease(ctx context.Context, release models.Laun
 			if err := tx.Create(&row).Error; err != nil {
 				return err
 			}
-			chunks := make([]models.LauncherDeliveryArtifactChunk, 0, len(artifact.Chunks))
-			for ordinal, chunk := range artifact.Chunks {
-				chunks = append(chunks, models.LauncherDeliveryArtifactChunk{ID: newID(), ArtifactID: row.ID, Ordinal: ordinal, HashSHA256: chunk.SHA256, Size: chunk.Size})
-			}
 			return tx.CreateInBatches(&chunks, 100).Error
 		})
 		if err != nil {
 			return err
 		}
+		progress := float64(index+1) / float64(len(release.Files))
+		if err := s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
+			"phase": "descriptor", "message": fmt.Sprintf("Опубликован %s", file.Platform), "progress": progress,
+		}).Error; err != nil {
+			return err
+		}
 	}
-	return nil
+	ended := time.Now().UTC()
+	return s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
+		"status": "succeeded", "phase": "done", "message": "Immutable launcher descriptors активированы",
+		"progress": 1.0, "release_id": release.ID, "ended_at": &ended,
+	}).Error
 }

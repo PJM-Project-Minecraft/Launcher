@@ -68,10 +68,16 @@ type LauncherManifest struct {
 	ReleaseID         string      `json:"releaseId"`
 	Version           string      `json:"version"`
 	Platform          string      `json:"platform"`
-	Mandatory         bool        `json:"mandatory"`
 	Changelog         string      `json:"changelog"`
 	ArtifactSignature string      `json:"artifactSignature"`
 	Artifact          ReleaseFile `json:"artifact"`
 	CreatedAt         time.Time   `json:"createdAt"`
 	DownloadURL       string      `json:"downloadUrl"`
+}
+
+type LauncherSnapshot struct {
+	Descriptor []byte
+	SHA256     string
+	Signature  string
+	Mandatory  bool
 }

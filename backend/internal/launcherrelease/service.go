@@ -127,6 +127,16 @@ func isAllowedPlatform(platform string) bool {
 }
 
 func (s Service) Create(ctx context.Context, req CreateRequest, files []UploadedFile) (models.LauncherRelease, error) {
+	return s.create(ctx, req, files, true)
+}
+
+// CreateStaged persists uploaded source artifacts outside the active update
+// channel. Delivery v2 activates the row only after CAS + descriptors commit.
+func (s Service) CreateStaged(ctx context.Context, req CreateRequest, files []UploadedFile) (models.LauncherRelease, error) {
+	return s.create(ctx, req, files, false)
+}
+
+func (s Service) create(ctx context.Context, req CreateRequest, files []UploadedFile, active bool) (models.LauncherRelease, error) {
 	version := strings.TrimSpace(req.Version)
 	if !ValidVersion(version) {
 		return models.LauncherRelease{}, errors.New("версия должна быть в формате X.Y.Z")
@@ -149,7 +159,7 @@ func (s Service) Create(ctx context.Context, req CreateRequest, files []Uploaded
 		Version:   version,
 		Changelog: strings.TrimSpace(req.Changelog),
 		Mandatory: req.Mandatory,
-		IsActive:  true,
+		IsActive:  active,
 	}
 
 	seen := map[string]bool{}
@@ -276,15 +286,13 @@ func (s Service) Delete(ctx context.Context, id string) error {
 	if err := s.db.WithContext(ctx).First(&release, "id = ?", id).Error; err != nil {
 		return err
 	}
-	if err := s.db.WithContext(ctx).
-		Where("release_id = ?", release.ID).Delete(&models.LauncherReleaseFile{}).Error; err != nil {
-		return err
-	}
-	if err := s.db.WithContext(ctx).Delete(&release).Error; err != nil {
+	// Admin DELETE is a channel tombstone. Immutable artifacts already handed to
+	// clients remain readable by release ID until explicit delivery-gc + grace.
+	if err := s.db.WithContext(ctx).Model(&release).Update("is_active", false).Error; err != nil {
 		return err
 	}
 	s.invalidateReleaseCache()
-	return os.RemoveAll(filepath.Join(s.storageRoot, release.Version))
+	return nil
 }
 
 // CheckUpdate — есть ли обновление для клиента version на платформе platform.
