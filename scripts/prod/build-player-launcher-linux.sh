@@ -50,7 +50,6 @@ mkdir -p "$CACHE_DIR/home/.npm/_cacache" "$CACHE_DIR/cargo/registry" "$CACHE_DIR
 mkdir -p "$ROOT_DIR/node_modules" "$ROOT_DIR/dist" "$ROOT_DIR/src-tauri/target"
 RELEASE_TEMP="$(mktemp -d)"
 trap 'rm -rf -- "$RELEASE_TEMP"' EXIT
-mkdir -p "$RELEASE_TEMP/home" "$RELEASE_TEMP/cargo-home"
 
 docker build -q -f "$ROOT_DIR/scripts/prod/linux-release.Dockerfile" -t "$IMAGE" "$ROOT_DIR" >/dev/null
 UPDATE_PUBKEY="$(docker run --rm --network none --read-only \
@@ -74,8 +73,6 @@ docker run --rm \
   -v "$ROOT_DIR/node_modules:/work/node_modules" \
   -v "$ROOT_DIR/dist:/work/dist" \
   -v "$ROOT_DIR/src-tauri/target:/work/src-tauri/target" \
-  -v "$RELEASE_TEMP/home:/tmp/release-home" \
-  -v "$RELEASE_TEMP/cargo-home:/tmp/cargo-home" \
   -v "$CACHE_DIR/home/.npm/_cacache:/tmp/release-home/.npm/_cacache" \
   -v "$CACHE_DIR/cargo/registry:/tmp/cargo-home/registry" \
   -v "$CACHE_DIR/cargo/git:/tmp/cargo-home/git" \
