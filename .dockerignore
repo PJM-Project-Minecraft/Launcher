@@ -14,3 +14,4 @@ backend/storage
 backend/tmp
 backend/bin
 *.log
+*.key

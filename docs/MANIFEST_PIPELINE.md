@@ -91,7 +91,7 @@ DELIVERY_V1_BRIDGE_UNTIL=<UTC RFC3339 cutoff, например 2026-09-21T00:00:
 вшивается в launcher release как `DELIVERY_MANIFEST_PUBKEY`. Отдельный
 `LAUNCHER_UPDATE_PUBKEY` проверяет бинарник самообновления.
 
-Пример локальной release-сборки:
+Локальный generic script нужен только для development-проверок:
 
 ```bash
 DELIVERY_MANIFEST_PUBKEY=<public-key> \
@@ -100,13 +100,16 @@ scripts/prod/build-player-launcher.sh \
   --signing-key /secure/launcher-update.key
 ```
 
+Production-артефакты собираются обоими pinned wrappers и проходят
+offline verifier из `docs/DELIVERY_V2_ROLLOUT.md`; generic script не публикуется.
+
 ## Миграция и отключение v1
 
 Backfill никогда не запускается при старте backend или deploy:
 
 ```bash
 cd backend
-go run ./cmd/delivery-migrate
+LAUNCHER_UPDATE_PUBKEY=<public-update-key> go run ./cmd/delivery-migrate --apply
 ```
 
 Команда идемпотентно создаёт v2 releases для активных профилей и launcher

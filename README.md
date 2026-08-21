@@ -45,16 +45,21 @@ npm run dev:web
 For a deployed backend, set `LAUNCHER_API_URL` before starting/building the Tauri launcher.
 
 For VPS production release flow, use [docs/vps-production.md](docs/vps-production.md).
-The player launcher can be built with a baked-in backend URL via:
+For local development, the player launcher can be built with a baked-in backend URL via:
 
 ```bash
 scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com
 ```
 
-Production release требует update signing key и публичный delivery manifest
-key. Для Windows используйте воспроизводимый MSVC wrapper:
+Do not publish the generic build above. Production release требует update signing key и публичный delivery manifest
+key. Оба артефакта собираются controlled Docker wrappers с закреплёнными
+Ubuntu snapshot и Rust toolchain:
 
 ```bash
+scripts/prod/build-player-launcher-linux.sh \
+  --api-url https://launcher.example.com \
+  --signing-key /secure/update-signing.key \
+  --manifest-pubkey <64-lowercase-hex>
 scripts/prod/build-player-launcher-windows.sh \
   --api-url https://launcher.example.com \
   --signing-key /secure/update-signing.key \

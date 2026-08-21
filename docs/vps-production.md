@@ -151,8 +151,23 @@ scripts/prod/configure-mc-server-authlib.sh \
 На машине, где собираешь релизы:
 
 ```bash
-scripts/prod/build-player-launcher.sh \
-  --api-url https://launcher.example.com
+scripts/prod/build-player-launcher-linux.sh \
+  --api-url https://launcher.example.com \
+  --signing-key /secure/launcher-update.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-X.Y.Z
+scripts/prod/build-player-launcher-windows.sh \
+  --api-url https://launcher.example.com \
+  --signing-key /secure/launcher-update.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-X.Y.Z
+scripts/prod/verify-player-launcher-artifacts.sh \
+  --dir release-artifacts/production-candidate-X.Y.Z \
+  --version X.Y.Z \
+  --api-url https://launcher.example.com \
+  --commit "$(git rev-parse HEAD)" \
+  --update-pubkey <public-update-key> \
+  --manifest-pubkey <public-delivery-key>
 ```
 
 Скрипт соберёт release-бинарник с продовым URL внутри и положит пакет в:
@@ -168,13 +183,9 @@ release-artifacts/
 ./run.sh
 ```
 
-Для Windows собирай тот же crate на Windows или в CI с тем же env:
-
-```powershell
-$env:LAUNCHER_DEFAULT_API_URL="https://launcher.example.com"
-npm ci && npm run build:web
-cargo build --release --manifest-path src-tauri/Cargo.toml
-```
+Оба артефакта должны происходить из одного clean commit. Production-ключ
+монтируется только в отключённую от сети фазу подписи; CI production-релизы
+не собирает.
 
 `LAUNCHER_API_URL` всё ещё можно выставить вручную для отладки, но обычным
 игрокам это не нужно.
@@ -197,7 +208,8 @@ scripts/prod/health-check.sh \
 - backend service активен;
 - Minecraft-сервер запущен с `online-mode=true`;
 - в логах Minecraft есть URL твоего backend;
-- лаунчер собран через `build-player-launcher.sh`;
+- Linux и Windows собраны pinned wrappers и прошли
+  `verify-player-launcher-artifacts.sh` с SHA текущего commit;
 - аккаунт администратора указан в `ADMIN_LOGINS`.
 
 ## 7. Обновление версии
@@ -223,8 +235,23 @@ scripts/prod/vps-install-dashboard.sh \
 Если менялся desktop launcher:
 
 ```bash
-scripts/prod/build-player-launcher.sh \
-  --api-url https://launcher.example.com
+scripts/prod/build-player-launcher-linux.sh \
+  --api-url https://launcher.example.com \
+  --signing-key /secure/launcher-update.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-X.Y.Z
+scripts/prod/build-player-launcher-windows.sh \
+  --api-url https://launcher.example.com \
+  --signing-key /secure/launcher-update.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-X.Y.Z
+scripts/prod/verify-player-launcher-artifacts.sh \
+  --dir release-artifacts/production-candidate-X.Y.Z \
+  --version X.Y.Z \
+  --api-url https://launcher.example.com \
+  --commit "$(git rev-parse HEAD)" \
+  --update-pubkey <public-update-key> \
+  --manifest-pubkey <public-delivery-key>
 ```
 
 ## 8. Бэкапы БД

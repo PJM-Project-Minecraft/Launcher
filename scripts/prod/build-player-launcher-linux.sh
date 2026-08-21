@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Reproducible self-contained Windows MSVC build through cargo-xwin + LLVM 18.
+# Controlled Linux x86-64 production build with a pinned OS snapshot and Rust.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="launcher-windows-xwin:rust-1.96-cargo-xwin-0.23.1"
+IMAGE="launcher-linux-release:ubuntu-20260801-rust-1.96"
 API_URL="${LAUNCHER_DEFAULT_API_URL:-}"
 SIGNING_KEY="${LAUNCHER_SIGNING_KEY:-}"
 MANIFEST_PUBKEY="${DELIVERY_MANIFEST_PUBKEY:-}"
@@ -12,7 +12,7 @@ OUT_DIR="release-artifacts"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/prod/build-player-launcher-windows.sh --api-url URL \
+Usage: scripts/prod/build-player-launcher-linux.sh --api-url URL \
   --signing-key PATH --manifest-pubkey HEX [--out-dir RELATIVE_DIR]
 
 The output directory must be inside the repository. No artifact is uploaded.
@@ -37,7 +37,7 @@ SIGNING_KEY="$(realpath "$SIGNING_KEY")"
 [[ "$MANIFEST_PUBKEY" =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: manifest public key must be 64 lowercase hex" >&2; exit 2; }
 [[ "$OUT_DIR" != /* && "$OUT_DIR" != *".."* ]] || { echo "ERROR: --out-dir must be a safe repository-relative path" >&2; exit 2; }
 
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/project-minecraft-launcher/xwin-0.23.1"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/project-minecraft-launcher/linux-release-1.96"
 SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 SOURCE_DATE_EPOCH="$(git -C "$ROOT_DIR" log -1 --format=%ct)"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "ERROR: cannot resolve source commit" >&2; exit 1; }
@@ -48,7 +48,7 @@ SOURCE_DATE_EPOCH="$(git -C "$ROOT_DIR" log -1 --format=%ct)"
 }
 mkdir -p "$CACHE_DIR/home" "$CACHE_DIR/cargo"
 
-docker build -q -f "$ROOT_DIR/scripts/prod/windows-xwin.Dockerfile" -t "$IMAGE" "$ROOT_DIR" >/dev/null
+docker build -q -f "$ROOT_DIR/scripts/prod/linux-release.Dockerfile" -t "$IMAGE" "$ROOT_DIR" >/dev/null
 UPDATE_PUBKEY="$(docker run --rm --network none \
   -v "$SIGNING_KEY:/run/secrets/update-signing.key:ro" \
   "$IMAGE" updatesign pubkey -key /run/secrets/update-signing.key)"
@@ -63,7 +63,7 @@ docker run --rm \
   -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
   -e SOURCE_COMMIT="$SOURCE_COMMIT" \
   -e LAUNCHER_UPDATE_PUBKEY="$UPDATE_PUBKEY" \
-  -e PATH=/cache/cargo/bin:/opt/cargo/bin:/usr/lib/llvm-18/bin:/usr/local/bin:/usr/bin:/bin \
+  -e PATH=/cache/cargo/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin \
   -v "$ROOT_DIR:/work" \
   -v "$CACHE_DIR:/cache" \
   -w /work \
@@ -71,7 +71,7 @@ docker run --rm \
   scripts/prod/build-player-launcher.sh \
     --api-url "$API_URL" \
     --manifest-pubkey "$MANIFEST_PUBKEY" \
-    --target x86_64-pc-windows-msvc \
+    --target x86_64-unknown-linux-gnu \
     --out-dir "/work/$OUT_DIR" \
     --build-only
 
@@ -84,7 +84,7 @@ docker run --rm --network none \
   -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
   -e SOURCE_COMMIT="$SOURCE_COMMIT" \
   -e LAUNCHER_UPDATE_PUBKEY="$UPDATE_PUBKEY" \
-  -e PATH=/cache/cargo/bin:/opt/cargo/bin:/usr/lib/llvm-18/bin:/usr/local/bin:/usr/bin:/bin \
+  -e PATH=/cache/cargo/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin \
   -v "$ROOT_DIR:/work" \
   -v "$CACHE_DIR:/cache" \
   -v "$SIGNING_KEY:/run/secrets/update-signing.key:ro" \
@@ -94,6 +94,6 @@ docker run --rm --network none \
     --api-url "$API_URL" \
     --signing-key /run/secrets/update-signing.key \
     --manifest-pubkey "$MANIFEST_PUBKEY" \
-    --target x86_64-pc-windows-msvc \
+    --target x86_64-unknown-linux-gnu \
     --out-dir "/work/$OUT_DIR" \
     --no-build

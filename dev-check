@@ -42,6 +42,7 @@ if (( FULL == 1 )); then
   (cd "$ROOT_DIR" && docker compose config -q)
   bash -n "$ROOT_DIR/deploy.sh" "$ROOT_DIR/scripts/prod/backup-db.sh" \
     "$ROOT_DIR/scripts/prod/build-player-launcher.sh" \
+    "$ROOT_DIR/scripts/prod/build-player-launcher-linux.sh" \
     "$ROOT_DIR/scripts/prod/build-player-launcher-windows.sh" \
     "$ROOT_DIR/scripts/prod/delivery-v2-preflight.sh" \
     "$ROOT_DIR/scripts/prod/verify-player-launcher-artifacts.sh"

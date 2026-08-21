@@ -30,6 +30,8 @@ type Config struct {
 	// DeliveryManifestSigningKey is a 32-byte Ed25519 seed encoded as hex.
 	// Production requires it; development may publish unsigned manifests.
 	DeliveryManifestSigningKey string
+	// Public key used only to verify launcher binaries during operator migration.
+	LauncherUpdatePublicKey string
 	// ProfileCDNBase — база публичного зеркала файлов профилей (бакет S3).
 	// Задан → манифест отдаёт absolute download_url на бакет, трафик сборок идёт мимо VPS.
 	// Пусто → файлы качаются с бэкенда по относительному /api/profiles/... (дефолт).
@@ -104,6 +106,7 @@ func Load() Config {
 		DeliveryV1Bridge:           env("DELIVERY_V1_BRIDGE", "false") == "true",
 		DeliveryV1BridgeUntil:      parseRFC3339(os.Getenv("DELIVERY_V1_BRIDGE_UNTIL")),
 		DeliveryManifestSigningKey: strings.TrimSpace(os.Getenv("DELIVERY_MANIFEST_SIGNING_KEY")),
+		LauncherUpdatePublicKey:    strings.TrimSpace(os.Getenv("LAUNCHER_UPDATE_PUBKEY")),
 		ProfileCDNBase:             strings.TrimRight(env("PROFILE_CDN_BASE", ""), "/"),
 		LauncherReleaseRoot: env(
 			"LAUNCHER_RELEASE_ROOT",
@@ -172,15 +175,27 @@ func (c Config) Validate() error {
 	if c.DeliveryV1Bridge && c.DeliveryV1BridgeUntil.IsZero() {
 		return errors.New("DELIVERY_V1_BRIDGE=true требует DELIVERY_V1_BRIDGE_UNTIL в RFC3339")
 	}
+	if c.AppEnv == "production" {
+		deliverySeed, deliverySeedErr := hex.DecodeString(c.DeliveryManifestSigningKey)
+		if deliverySeedErr != nil || len(deliverySeed) != 32 || strings.ToLower(c.DeliveryManifestSigningKey) != c.DeliveryManifestSigningKey {
+			return errors.New("APP_ENV=production требует DELIVERY_MANIFEST_SIGNING_KEY: 32-byte Ed25519 seed в hex")
+		}
+	}
+	return c.validateCommon()
+}
+
+// ValidateBot applies only the configuration required by the Telegram bot.
+// In particular, the bot must never receive the delivery manifest signing key.
+func (c Config) ValidateBot() error {
+	return c.validateCommon()
+}
+
+func (c Config) validateCommon() error {
 	if c.AppEnv != "production" {
 		return nil
 	}
 	if devSecrets[c.JWTSecret] {
 		return errors.New("APP_ENV=production требует настоящий JWT_SECRET (сейчас дев-заглушка)")
-	}
-	deliverySeed, deliverySeedErr := hex.DecodeString(c.DeliveryManifestSigningKey)
-	if deliverySeedErr != nil || len(deliverySeed) != 32 || strings.ToLower(c.DeliveryManifestSigningKey) != c.DeliveryManifestSigningKey {
-		return errors.New("APP_ENV=production требует DELIVERY_MANIFEST_SIGNING_KEY: 32-byte Ed25519 seed в hex")
 	}
 	// Античит-секрет (подпись launch-token) в проде должен быть задан ЯВНО и отличаться
 	// от JWT: иначе компрометация одного раскрывает второй, а деривация предсказуема.

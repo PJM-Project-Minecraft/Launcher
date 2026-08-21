@@ -53,6 +53,8 @@ services:
       LAUNCHER_RELEASE_ROOT: "${LAUNCHER_RELEASE_ROOT:-/app/storage/releases}"
       DELIVERY_ROOT: "${DELIVERY_ROOT:-/app/storage/delivery-v2}"
       DELIVERY_MANIFEST_SIGNING_KEY: "${DELIVERY_MANIFEST_SIGNING_KEY:-}"
+      # Public only: operator migration verifies each legacy launcher signature.
+      LAUNCHER_UPDATE_PUBKEY: "${LAUNCHER_UPDATE_PUBKEY:-}"
       DELIVERY_V1_BRIDGE: "${DELIVERY_V1_BRIDGE:-false}"
       DELIVERY_V1_BRIDGE_UNTIL: "${DELIVERY_V1_BRIDGE_UNTIL:-}"
       # prod (.env на VPS): APP_ENV=production — сервер откажется стартовать с дев-секретами.
@@ -91,11 +93,6 @@ services:
       GAME_API_SECRET: "${GAME_API_SECRET:-}"
       # bot тоже вызывает config.Validate(), поэтому секрет нужен в его env.
       SITE_ORDER_SECRET: "${SITE_ORDER_SECRET:-}"
-      # bot использует общий Config.Validate(), поэтому production signing/cutoff
-      # должны доходить и сюда, хотя сам bot delivery-файлы не обслуживает.
-      DELIVERY_MANIFEST_SIGNING_KEY: "${DELIVERY_MANIFEST_SIGNING_KEY:-}"
-      DELIVERY_V1_BRIDGE: "${DELIVERY_V1_BRIDGE:-false}"
-      DELIVERY_V1_BRIDGE_UNTIL: "${DELIVERY_V1_BRIDGE_UNTIL:-}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       ADMIN_TELEGRAM_IDS: "${ADMIN_TELEGRAM_IDS:-}"
       TOTP_ISSUER: "${TOTP_ISSUER:-Launcher Accounts}"

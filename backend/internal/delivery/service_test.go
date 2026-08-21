@@ -481,6 +481,10 @@ func TestGarbageCollectRecoversInterruptedQuarantine(t *testing.T) {
 
 func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 	service, db := testService(t)
+	updatePublicKey, updatePrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	profile := models.Profile{
 		ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true,
 		LaunchCommandWindows: "javaw.exe -jar launcher.jar", LaunchCommandLinux: "java -jar launcher.jar",
@@ -507,7 +511,7 @@ func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 		}
 		file := models.LauncherReleaseFile{
 			ID: newID(), ReleaseID: release.ID, Platform: platform, FileName: fileName,
-			HashSHA256: hex.EncodeToString(digest[:]), Size: int64(len(payload)), SignatureEd25519: strings.Repeat("a", 128),
+			HashSHA256: hex.EncodeToString(digest[:]), Size: int64(len(payload)), SignatureEd25519: hex.EncodeToString(ed25519.Sign(updatePrivateKey, payload)),
 		}
 		release.Files = append(release.Files, file)
 		path := filepath.Join(service.launcherRoot, release.Version, platform, fileName)
@@ -521,13 +525,46 @@ func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 	if err := db.Create(&release).Error; err != nil {
 		t.Fatal(err)
 	}
+	historical := models.LauncherRelease{ID: newID(), Version: "8.0.0", IsActive: true}
+	for _, platform := range []string{"linux-x64", "windows-x64"} {
+		payload := []byte("historical-launcher-" + platform)
+		digest := sha256.Sum256(payload)
+		fileName := "launcher"
+		if platform == "windows-x64" {
+			fileName = "launcher.exe"
+		}
+		historical.Files = append(historical.Files, models.LauncherReleaseFile{
+			ID: newID(), ReleaseID: historical.ID, Platform: platform, FileName: fileName,
+			HashSHA256: hex.EncodeToString(digest[:]), Size: int64(len(payload)),
+		})
+		path := filepath.Join(service.launcherRoot, historical.Version, platform, fileName)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, payload, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&historical).Error; err != nil {
+		t.Fatal(err)
+	}
 
-	plan, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot)
+	plan, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot, updatePublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Profiles != 1 || plan.ProfileFiles != 1 || plan.LauncherReleases != 1 || plan.LauncherFiles != 2 || plan.RequiredBytes == 0 {
+	if plan.Profiles != 1 || plan.ProfileFiles != 1 || plan.LauncherReleases != 2 || plan.LauncherFiles != 4 || plan.UnsignedLegacyLauncherFiles != 2 || plan.RequiredBytes == 0 {
 		t.Fatalf("migration plan = %+v", plan)
+	}
+	originalSignature := release.Files[0].SignatureEd25519
+	if err := db.Model(&models.LauncherReleaseFile{}).Where("id = ?", release.Files[0].ID).Update("signature_ed25519", strings.Repeat("a", 128)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot, updatePublicKey); err == nil {
+		t.Fatal("invalid launcher Ed25519 signature passed migration inspection")
+	}
+	if err := db.Model(&models.LauncherReleaseFile{}).Where("id = ?", release.Files[0].ID).Update("signature_ed25519", originalSignature).Error; err != nil {
+		t.Fatal(err)
 	}
 	var deliveryRows int64
 	if err := db.Model(&models.DeliveryBlob{}).Count(&deliveryRows).Error; err != nil {
@@ -541,7 +578,7 @@ func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 	if err := os.WriteFile(corrupt, []byte("corrupt-payload"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot); err == nil {
+	if _, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot, updatePublicKey); err == nil {
 		t.Fatal("corrupt launcher source passed migration inspection")
 	}
 	linuxPayload := []byte("launcher-linux-x64")
@@ -554,13 +591,43 @@ func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 	if err := service.ImportLauncherRelease(context.Background(), release); err != nil {
 		t.Fatal(err)
 	}
-	audit, err := service.AuditMigration(context.Background())
+	if err := service.ImportLauncherRelease(context.Background(), historical); err != nil {
+		t.Fatal(err)
+	}
+	audit, err := service.AuditMigration(context.Background(), updatePublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if audit.ProfileReleases != 1 || audit.ProfileFiles != 1 || audit.LauncherReleases != 1 || audit.LauncherFiles != 2 || audit.VerifiedBytes == 0 {
+	if audit.ProfileReleases != 1 || audit.ProfileFiles != 1 || audit.LauncherReleases != 2 || audit.LauncherFiles != 4 || audit.VerifiedBytes == 0 {
 		t.Fatalf("migration audit = %+v", audit)
 	}
+	var profileChunk models.ProfileReleaseFileChunk
+	if err := db.First(&profileChunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Delete(&profileChunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AuditMigration(context.Background(), updatePublicKey); err == nil {
+		t.Fatal("missing profile chunk relation passed migration audit")
+	}
+	if err := db.Create(&profileChunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	var launcherChunk models.LauncherDeliveryArtifactChunk
+	if err := db.First(&launcherChunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Delete(&launcherChunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AuditMigration(context.Background(), updatePublicKey); err == nil {
+		t.Fatal("missing launcher chunk relation passed migration audit")
+	}
+	if err := db.Create(&launcherChunk).Error; err != nil {
+		t.Fatal(err)
+	}
+
 	var blob models.DeliveryBlob
 	if err := db.First(&blob).Error; err != nil {
 		t.Fatal(err)
@@ -568,7 +635,7 @@ func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
 	if err := os.WriteFile(service.blobPath(blob.HashSHA256), bytes.Repeat([]byte("x"), int(blob.Size)), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.AuditMigration(context.Background()); err == nil {
+	if _, err := service.AuditMigration(context.Background(), updatePublicKey); err == nil {
 		t.Fatal("corrupt CAS blob passed migration audit")
 	}
 }

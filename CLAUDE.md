@@ -67,15 +67,19 @@ docker run --rm \
 `deploy.sh` гоняет тесты именно так. Builder-образ закреплён на Go 1.26.6 и digest,
 чтобы security-патч не откатывался из-за плавающего тега.
 
-Сборка плеер-лаунчера с зашитым URL бэкенда:
+Локальная development-сборка плеер-лаунчера с зашитым URL бэкенда:
 ```bash
 scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 # либо переменная LAUNCHER_API_URL при cargo build/run
 ```
 Release-сборка также требует `LAUNCHER_UPDATE_PUBKEY` (либо `--signing-key`) и
 `DELIVERY_MANIFEST_PUBKEY`; без любого из ключей сборка fail-closed.
-Windows MSVC-кандидат собирается воспроизводимо через
-`scripts/prod/build-player-launcher-windows.sh` (cargo-xwin 0.23.1 + LLVM 18).
+Generic script не используется для публикации production-артефактов.
+Production-кандидаты собираются только pinned Docker wrappers
+`scripts/prod/build-player-launcher-linux.sh` и
+`scripts/prod/build-player-launcher-windows.sh` (Rust 1.96, Ubuntu snapshot;
+Windows: cargo-xwin 0.23.1 + LLVM 18). Приватный update key остаётся на
+release-box и не передаётся в CI.
 Версия бампится одновременно в `src-tauri/Cargo.toml` и `src-tauri/tauri.conf.json` →
 обязательно `cargo update -p project-minecraft-launcher` после правки.
 
@@ -461,13 +465,12 @@ Windows использует WebView2. Состояние Rust→React идёт 
   `cargo update -p project-minecraft-launcher`.
 
 Workflow заливки:
-1. Собрать оба бинарника В CI: `gh workflow run build-launcher.yml -f api_url=https://launcher.likonchik.xyz`
-   (матрица windows-x64 + linux-x64, подпись Ed25519 одним ключом из секрета
-   `LAUNCHER_SIGNING_KEY`, проверка «pubkey вшит» и «маркер версии на месте» внутри рана).
-   Скачать артефакты: `gh run download <id>`. Локальный `scripts/prod/build-player-launcher.sh`
-   остался для дев-сборок — подписать им нечего, приватный ключ живёт в секретах GitHub.
-2. Залить через UI дашборда (раздел «Релизы»), multipart.
-3. Перед первой заливкой убедиться, что nginx имеет `client_max_body_size 512m;`.
+1. На изолированном release-box собрать оба бинарника pinned Docker wrappers из
+   `docs/DELIVERY_V2_ROLLOUT.md`. CI production artifacts не выпускает и приватного
+   `LAUNCHER_SIGNING_KEY` не получает.
+2. Прогнать offline verifier, сохранить `SHA256SUMS` и immutable build info.
+3. Залить через UI дашборда (раздел «Релизы»), multipart.
+4. Перед первой заливкой убедиться, что nginx имеет `client_max_body_size 512m;`.
 
 Гоча enforcement: первый же mandatory-релиз заблокирует launch 426-м ВСЕМ лаунчерам
 без `X-Launcher-Version` или ниже порога. Сначала раздать новый как необязательный,

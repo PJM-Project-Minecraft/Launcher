@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -90,7 +91,7 @@ func inspectPortableTree(root string) (int, int64, error) {
 	return files, bytes, nil
 }
 
-func verifyLegacyLauncherFile(path string, file models.LauncherReleaseFile) error {
+func verifyLegacyLauncherFile(path string, file models.LauncherReleaseFile, updatePublicKey ed25519.PublicKey) error {
 	if !validHash(strings.ToLower(file.HashSHA256)) || file.HashSHA256 != strings.ToLower(file.HashSHA256) {
 		return errors.New("invalid SHA-256 metadata")
 	}
@@ -104,31 +105,34 @@ func verifyLegacyLauncherFile(path string, file models.LauncherReleaseFile) erro
 	if metadata.Size() != file.Size {
 		return fmt.Errorf("size mismatch: disk=%d database=%d", metadata.Size(), file.Size)
 	}
-	input, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	defer input.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, input); err != nil {
-		return err
-	}
-	if hex.EncodeToString(hash.Sum(nil)) != file.HashSHA256 {
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != file.HashSHA256 {
 		return errors.New("SHA-256 mismatch")
 	}
-	if file.SignatureEd25519 != "" {
-		signature, err := hex.DecodeString(file.SignatureEd25519)
-		if err != nil || len(signature) != 64 || strings.ToLower(file.SignatureEd25519) != file.SignatureEd25519 {
-			return errors.New("invalid Ed25519 signature metadata")
-		}
+	if file.SignatureEd25519 == "" {
+		return nil
+	}
+	signature, err := hex.DecodeString(file.SignatureEd25519)
+	if err != nil || len(signature) != ed25519.SignatureSize || strings.ToLower(file.SignatureEd25519) != file.SignatureEd25519 {
+		return errors.New("invalid Ed25519 signature metadata")
+	}
+	if len(updatePublicKey) != ed25519.PublicKeySize || !ed25519.Verify(updatePublicKey, data, signature) {
+		return errors.New("Ed25519 signature verification failed")
 	}
 	return nil
 }
 
 // InspectMigrationSources validates every byte source without creating v2
 // tables, manifests, jobs or CAS blobs. It is safe to run before deployment.
-func InspectMigrationSources(ctx context.Context, db *gorm.DB, profileRoot, launcherRoot string) (MigrationPlan, error) {
+func InspectMigrationSources(ctx context.Context, db *gorm.DB, profileRoot, launcherRoot string, updatePublicKey ed25519.PublicKey) (MigrationPlan, error) {
 	plan := MigrationPlan{}
+	if len(updatePublicKey) != ed25519.PublicKeySize {
+		return plan, errors.New("trusted launcher update public key is required")
+	}
 	var profiles []models.Profile
 	if err := db.WithContext(ctx).Where("is_active = ?", true).Order("created_at asc").Find(&profiles).Error; err != nil {
 		return plan, err
@@ -168,7 +172,7 @@ func InspectMigrationSources(ctx context.Context, db *gorm.DB, profileRoot, laun
 			}
 			platforms[file.Platform] = true
 			path := filepath.Join(launcherRoot, release.Version, file.Platform, file.FileName)
-			if err := verifyLegacyLauncherFile(path, file); err != nil {
+			if err := verifyLegacyLauncherFile(path, file, updatePublicKey); err != nil {
 				return plan, fmt.Errorf("launcher %s %s: %w", release.Version, file.Platform, err)
 			}
 			if file.SignatureEd25519 == "" {
@@ -201,7 +205,7 @@ func InspectMigrationSources(ctx context.Context, db *gorm.DB, profileRoot, laun
 	return plan, nil
 }
 
-func (s *Service) auditReleaseFile(ctx context.Context, file ReleaseFile) error {
+func (s *Service) auditReleaseFile(ctx context.Context, file ReleaseFile, output io.Writer) error {
 	whole := sha256.New()
 	var total int64
 	for _, chunk := range file.Chunks {
@@ -220,7 +224,11 @@ func (s *Service) auditReleaseFile(ctx context.Context, file ReleaseFile) error 
 			return err
 		}
 		chunkHash := sha256.New()
-		written, copyErr := io.Copy(io.MultiWriter(whole, chunkHash), input)
+		writers := []io.Writer{whole, chunkHash}
+		if output != nil {
+			writers = append(writers, output)
+		}
+		written, copyErr := io.Copy(io.MultiWriter(writers...), input)
 		closeErr := input.Close()
 		if copyErr != nil {
 			return copyErr
@@ -235,6 +243,37 @@ func (s *Service) auditReleaseFile(ctx context.Context, file ReleaseFile) error 
 	}
 	if total != file.Size || hex.EncodeToString(whole.Sum(nil)) != file.SHA256 {
 		return errors.New("reconstructed file differs from descriptor")
+	}
+	return nil
+}
+
+func compareProfileFileRows(file ReleaseFile, row models.ProfileReleaseFile) error {
+	if row.Path != file.Path || row.HashSHA256 != file.SHA256 || row.Size != file.Size || row.Executable != file.Executable {
+		return errors.New("profile file row differs from manifest")
+	}
+	sort.Slice(row.Chunks, func(left, right int) bool { return row.Chunks[left].Ordinal < row.Chunks[right].Ordinal })
+	if len(row.Chunks) != len(file.Chunks) {
+		return errors.New("profile chunk relation count differs from manifest")
+	}
+	for ordinal, chunk := range file.Chunks {
+		stored := row.Chunks[ordinal]
+		if stored.Ordinal != ordinal || stored.HashSHA256 != chunk.SHA256 || stored.Size != chunk.Size {
+			return errors.New("profile chunk relation differs from manifest")
+		}
+	}
+	return nil
+}
+
+func compareLauncherChunkRows(file ReleaseFile, artifact models.LauncherDeliveryArtifact) error {
+	sort.Slice(artifact.Chunks, func(left, right int) bool { return artifact.Chunks[left].Ordinal < artifact.Chunks[right].Ordinal })
+	if len(artifact.Chunks) != len(file.Chunks) {
+		return errors.New("launcher chunk relation count differs from descriptor")
+	}
+	for ordinal, chunk := range file.Chunks {
+		stored := artifact.Chunks[ordinal]
+		if stored.Ordinal != ordinal || stored.HashSHA256 != chunk.SHA256 || stored.Size != chunk.Size {
+			return errors.New("launcher chunk relation differs from descriptor")
+		}
 	}
 	return nil
 }
@@ -260,8 +299,11 @@ func (s *Service) verifySignedDocument(body []byte, expectedHash, signature stri
 // AuditMigration reconstructs every active v2 file from CAS and verifies the
 // signed immutable documents. It is read-only and intended as the post-import
 // gate before a v2 launcher is published.
-func (s *Service) AuditMigration(ctx context.Context) (MigrationAudit, error) {
+func (s *Service) AuditMigration(ctx context.Context, updatePublicKey ed25519.PublicKey) (MigrationAudit, error) {
 	audit := MigrationAudit{}
+	if len(updatePublicKey) != ed25519.PublicKeySize {
+		return audit, errors.New("trusted launcher update public key is required")
+	}
 	var profiles []models.Profile
 	if err := s.db.WithContext(ctx).Where("is_active = ?", true).Find(&profiles).Error; err != nil {
 		return audit, err
@@ -285,9 +327,36 @@ func (s *Service) AuditMigration(ctx context.Context) (MigrationAudit, error) {
 		if manifest.SchemaVersion != SchemaVersion || manifest.ReleaseID != release.ID || manifest.Profile.ID != profile.ID || manifest.FileCount != len(manifest.Files) {
 			return audit, fmt.Errorf("profile release %s manifest metadata mismatch", release.ID)
 		}
+		var storedFiles []models.ProfileReleaseFile
+		if err := s.db.WithContext(ctx).Preload("Chunks").Where("release_id = ?", release.ID).Find(&storedFiles).Error; err != nil {
+			return audit, err
+		}
+		storedByPath := make(map[string]models.ProfileReleaseFile, len(storedFiles))
+		for _, stored := range storedFiles {
+			storedByPath[stored.Path] = stored
+		}
+		if len(storedByPath) != len(manifest.Files) {
+			return audit, fmt.Errorf("profile release %s file row count differs from manifest", release.ID)
+		}
 		var manifestBytes int64
+		authorizedHashes := make(map[string]struct{})
 		for _, file := range manifest.Files {
-			if err := s.auditReleaseFile(ctx, file); err != nil {
+			stored, exists := storedByPath[file.Path]
+			if !exists {
+				return audit, fmt.Errorf("profile release %s file %s has no database row", release.ID, file.Path)
+			}
+			if err := compareProfileFileRows(file, stored); err != nil {
+				return audit, fmt.Errorf("profile release %s file %s: %w", release.ID, file.Path, err)
+			}
+			for _, chunk := range file.Chunks {
+				if _, checked := authorizedHashes[chunk.SHA256]; !checked {
+					if _, _, err := s.Blob(ctx, profile.ID, chunk.SHA256); err != nil {
+						return audit, fmt.Errorf("profile release %s chunk %s is not deliverable: %w", release.ID, chunk.SHA256, err)
+					}
+					authorizedHashes[chunk.SHA256] = struct{}{}
+				}
+			}
+			if err := s.auditReleaseFile(ctx, file, nil); err != nil {
 				return audit, fmt.Errorf("profile release %s file %s: %w", release.ID, file.Path, err)
 			}
 			audit.ProfileFiles++
@@ -304,10 +373,13 @@ func (s *Service) AuditMigration(ctx context.Context) (MigrationAudit, error) {
 	if err := s.db.WithContext(ctx).Preload("Files").Where("is_active = ?", true).Find(&releases).Error; err != nil {
 		return audit, err
 	}
-	for _, release := range releases {
+	sort.Slice(releases, func(left, right int) bool {
+		return compareVersion(releases[left].Version, releases[right].Version) > 0
+	})
+	for releaseIndex, release := range releases {
 		for _, sourceFile := range release.Files {
 			var artifact models.LauncherDeliveryArtifact
-			if err := s.db.WithContext(ctx).Where("release_id = ? AND platform = ?", release.ID, sourceFile.Platform).First(&artifact).Error; err != nil {
+			if err := s.db.WithContext(ctx).Preload("Chunks").Where("release_id = ? AND platform = ?", release.ID, sourceFile.Platform).First(&artifact).Error; err != nil {
 				return audit, fmt.Errorf("launcher %s %s has no v2 artifact: %w", release.Version, sourceFile.Platform, err)
 			}
 			body := []byte(artifact.DescriptorJSON)
@@ -324,8 +396,27 @@ func (s *Service) AuditMigration(ctx context.Context) (MigrationAudit, error) {
 			if artifact.HashSHA256 != descriptor.Artifact.SHA256 || artifact.Size != descriptor.Artifact.Size || sourceFile.HashSHA256 != descriptor.Artifact.SHA256 || sourceFile.Size != descriptor.Artifact.Size {
 				return audit, fmt.Errorf("launcher %s %s artifact metadata mismatch", release.Version, sourceFile.Platform)
 			}
-			if err := s.auditReleaseFile(ctx, descriptor.Artifact); err != nil {
+			if err := compareLauncherChunkRows(descriptor.Artifact, artifact); err != nil {
 				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, sourceFile.Platform, err)
+			}
+			for _, chunk := range descriptor.Artifact.Chunks {
+				if _, _, err := s.LauncherBlob(ctx, release.ID, chunk.SHA256); err != nil {
+					return audit, fmt.Errorf("launcher %s %s chunk %s is not deliverable: %w", release.Version, sourceFile.Platform, chunk.SHA256, err)
+				}
+			}
+			var binary bytes.Buffer
+			if err := s.auditReleaseFile(ctx, descriptor.Artifact, &binary); err != nil {
+				return audit, fmt.Errorf("launcher %s %s: %w", release.Version, sourceFile.Platform, err)
+			}
+			if descriptor.ArtifactSignature == "" {
+				if releaseIndex == 0 {
+					return audit, fmt.Errorf("current launcher %s %s is unsigned", release.Version, sourceFile.Platform)
+				}
+			} else {
+				artifactSignature, err := hex.DecodeString(descriptor.ArtifactSignature)
+				if err != nil || len(artifactSignature) != ed25519.SignatureSize || !ed25519.Verify(updatePublicKey, binary.Bytes(), artifactSignature) {
+					return audit, fmt.Errorf("launcher %s %s has invalid update signature", release.Version, sourceFile.Platform)
+				}
 			}
 			audit.LauncherFiles++
 			audit.VerifiedBytes += descriptor.Artifact.Size

@@ -66,6 +66,9 @@ env_value() {
 manifest_seed="$(env_value DELIVERY_MANIFEST_SIGNING_KEY)"
 [[ "$manifest_seed" =~ ^[0-9a-f]{64}$ ]] || fail "DELIVERY_MANIFEST_SIGNING_KEY is missing or malformed"
 unset manifest_seed
+update_public_key="$(env_value LAUNCHER_UPDATE_PUBKEY)"
+[[ "$update_public_key" =~ ^[0-9a-f]{64}$ ]] || fail "LAUNCHER_UPDATE_PUBKEY is missing or malformed"
+unset update_public_key
 [[ "$(env_value DELIVERY_V1_BRIDGE)" == "true" ]] || fail "DELIVERY_V1_BRIDGE must be true for the migration release"
 bridge_until="$(env_value DELIVERY_V1_BRIDGE_UNTIL)"
 [[ -n "$bridge_until" ]] || fail "DELIVERY_V1_BRIDGE_UNTIL is missing"
@@ -84,6 +87,35 @@ storage_source="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app
 [[ -n "$storage_source" && -d "$storage_source" ]] || fail "/app/storage is not backed by a persistent host mount"
 [[ -w "$storage_source" ]] || fail "persistent storage is not writable: $storage_source"
 
+available_bytes=""
+profile_root=""
+launcher_root=""
+delivery_root=""
+for root_key in PROFILE_STORAGE_ROOT LAUNCHER_RELEASE_ROOT DELIVERY_ROOT; do
+  configured_root="$(env_value "$root_key")"
+  [[ -n "$configured_root" ]] || fail "$root_key is missing"
+  canonical_root="$(docker compose exec -T server readlink -m -- "$configured_root" | tr -d '\r')"
+  case "$canonical_root" in
+    /app/storage|/app/storage/*) ;;
+    *) fail "$root_key escapes persistent /app/storage: $canonical_root" ;;
+  esac
+  case "$root_key" in
+    PROFILE_STORAGE_ROOT) profile_root="$canonical_root" ;;
+    LAUNCHER_RELEASE_ROOT) launcher_root="$canonical_root" ;;
+    DELIVERY_ROOT) delivery_root="$canonical_root" ;;
+  esac
+  root_available="$(docker compose exec -T server sh -c '
+    probe="$1"
+    [ -e "$probe" ] || probe=/app/storage
+    df -PB1 "$probe" | tail -1 | tr -s " " | cut -d " " -f 4
+  ' sh "$canonical_root" | tr -d '\r')"
+  [[ "$root_available" =~ ^[0-9]+$ ]] || fail "cannot determine free space for $root_key"
+  if [[ -z "$available_bytes" ]] || (( root_available < available_bytes )); then
+    available_bytes="$root_available"
+  fi
+done
+ok "delivery roots are inside persistent /app/storage"
+
 latest_backup="$(ls -1t "$BACKUP_DIR"/launcher-*.sql.gz 2>/dev/null | head -1 || true)"
 [[ -n "$latest_backup" && -s "$latest_backup" ]] || fail "no non-empty PostgreSQL backup found in $BACKUP_DIR"
 gzip -t "$latest_backup" || fail "latest PostgreSQL backup is corrupt: $latest_backup"
@@ -91,12 +123,11 @@ backup_epoch="$(date -r "$latest_backup" +%s)"
 (( now_epoch - backup_epoch <= MAX_BACKUP_AGE_HOURS*3600 )) || fail "latest PostgreSQL backup is older than ${MAX_BACKUP_AGE_HOURS}h"
 ok "recent PostgreSQL backup: $(basename "$latest_backup")"
 
-profile_bytes="$(du -sb "$storage_source/profiles" 2>/dev/null | awk '{print $1}')"
-launcher_bytes="$(du -sb "$storage_source/releases" 2>/dev/null | awk '{print $1}')"
+profile_bytes="$(docker compose exec -T server du -sb "$profile_root" 2>/dev/null | awk '{print $1}' | tr -d '\r')"
+launcher_bytes="$(docker compose exec -T server du -sb "$launcher_root" 2>/dev/null | awk '{print $1}' | tr -d '\r')"
 profile_bytes="${profile_bytes:-0}"
 launcher_bytes="${launcher_bytes:-0}"
 required_bytes=$((profile_bytes + launcher_bytes + MIN_RESERVE_BYTES))
-available_bytes="$(df -PB1 "$storage_source" | awk 'NR==2 {print $4}')"
 (( available_bytes >= required_bytes )) || fail "insufficient disk: available=$available_bytes required=$required_bytes"
 ok "disk capacity: available=$available_bytes conservative_required=$required_bytes"
 

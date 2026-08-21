@@ -18,12 +18,31 @@
 обоих бинарников в операторский журнал. Не собирать артефакты заново между
 canary и mandatory promotion.
 
+Оба production artifact собираются на release-box из одного commit и одним
+update key. Docker images используют Ubuntu snapshot `20260801T000000Z` и
+Rust `1.96.0`:
+
+```bash
+scripts/prod/build-player-launcher-linux.sh \
+  --api-url https://launcher.likonchik.xyz \
+  --signing-key /secure/pjm-update-signing.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-0.5.7
+scripts/prod/build-player-launcher-windows.sh \
+  --api-url https://launcher.likonchik.xyz \
+  --signing-key /secure/pjm-update-signing.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-0.5.7
+```
+
 Финальный offline gate и единый `SHA256SUMS`:
 
 ```bash
 scripts/prod/verify-player-launcher-artifacts.sh \
   --dir release-artifacts/production-candidate-0.5.7 \
   --version 0.5.7 \
+  --api-url https://launcher.likonchik.xyz \
+  --commit "$(git rev-parse HEAD)" \
   --update-pubkey <public-update-key> \
   --manifest-pubkey <public-delivery-key>
 ```
@@ -36,8 +55,8 @@ scripts/prod/verify-player-launcher-artifacts.sh \
 4. На VPS не менее `legacy profile bytes + active launcher bytes + 4 GiB`.
 5. Последний `launcher-*.sql.gz` моложе 24 часов и проходит `gzip -t`.
 6. `/app/storage` является persistent host mount, а не container layer.
-7. В `.env` настроены `DELIVERY_*`, но running services не перезапускаются до
-   отдельного подтверждения rollout.
+7. В `.env` настроены `DELIVERY_*` и публичный `LAUNCHER_UPDATE_PUBKEY`, но
+   running services не перезапускаются до отдельного подтверждения rollout.
 
 Бэкап:
 
@@ -69,12 +88,13 @@ operator binaries и запускает строго read-only `delivery-migrate
 
 ```bash
 cd /root/Launcher
-docker compose exec -T server /app/delivery-migrate \
+docker compose exec -T server /app/delivery-migrate --apply \
   | tee "/root/backups/launcher/delivery-v2-migrate-$(date +%Y%m%d-%H%M%S).log"
 scripts/prod/delivery-v2-preflight.sh --verify-only
 ```
 
-Команда идемпотентна. После импорта она сама проверяет подписи manifest и
+Только `--apply` разрешает запись; запуск без флага остаётся dry-run. Команда
+идемпотентна. После импорта она сама проверяет подписи manifest и
 descriptor, читает каждый CAS chunk и реконструирует каждый активный файл.
 До успешного `--verify-only` WEB и launcher `0.5.7` не публиковать.
 

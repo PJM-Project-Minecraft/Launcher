@@ -168,7 +168,23 @@ P1 (SHA-сверка) и P3 (proof + `-Dac.challenge`) доходят до иг�
 бинарником лаунчера (автообновление), не через backend-деплой.
 
 ```bash
-scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
+scripts/prod/build-player-launcher-linux.sh \
+  --api-url https://launcher.likonchik.xyz \
+  --signing-key /secure/launcher-update.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-X.Y.Z
+scripts/prod/build-player-launcher-windows.sh \
+  --api-url https://launcher.likonchik.xyz \
+  --signing-key /secure/launcher-update.key \
+  --manifest-pubkey <public-delivery-key> \
+  --out-dir release-artifacts/production-candidate-X.Y.Z
+scripts/prod/verify-player-launcher-artifacts.sh \
+  --dir release-artifacts/production-candidate-X.Y.Z \
+  --version X.Y.Z \
+  --api-url https://launcher.likonchik.xyz \
+  --commit "$(git rev-parse HEAD)" \
+  --update-pubkey <public-update-key> \
+  --manifest-pubkey <public-delivery-key>
 ```
 
 Залить релиз через дашборд (Релизы). Для P3 — **поднять минимальную mandatory-версию**, чтобы

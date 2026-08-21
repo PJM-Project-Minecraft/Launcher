@@ -14,6 +14,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 API_URL="${LAUNCHER_DEFAULT_API_URL:-}"
 OUT_DIR="$ROOT_DIR/release-artifacts"
 BUILD=1
+BUILD_ONLY=0
 TARGET_TRIPLE=""
 # Ключ подписи и публичный ключ можно задать флагом или переменной окружения.
 SIGNING_KEY="${LAUNCHER_SIGNING_KEY:-}"
@@ -33,6 +34,7 @@ Options:
                          Можно задать DELIVERY_MANIFEST_PUBKEY.
   --out-dir DIR       Output directory (default: release-artifacts, outside Vite dist)
   --target TRIPLE     Rust target; Windows MSVC automatically uses cargo-xwin
+  --build-only        Build and verify the binary without packaging or signing
   --no-build          Package the existing release binary without rebuilding
   -h, --help          Show this help
 
@@ -66,6 +68,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-build)
       BUILD=0
+      ;;
+    --build-only)
+      BUILD_ONLY=1
       ;;
     -h|--help)
       usage
@@ -141,6 +146,21 @@ if [[ ! "$PUBKEY" =~ ^[0-9a-f]{64}$ ]]; then
 fi
 
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT_DIR/src-tauri/Cargo.toml")"
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" log -1 --format=%ct)}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)}"
+[[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || {
+  echo "[launcher] ОШИБКА: SOURCE_DATE_EPOCH должен быть Unix timestamp." >&2
+  exit 1
+}
+[[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "[launcher] ОШИБКА: SOURCE_COMMIT должен быть полным SHA-1 commit." >&2
+  exit 1
+}
+if (( BUILD_ONLY == 1 && BUILD == 0 )); then
+  echo "[launcher] ОШИБКА: --build-only и --no-build несовместимы." >&2
+  exit 2
+fi
+export SOURCE_DATE_EPOCH TZ=UTC LC_ALL=C
 if [[ -z "$TARGET_TRIPLE" ]]; then
   TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 fi
@@ -164,6 +184,7 @@ if (( BUILD == 1 )); then
       exit 1
     fi
     build_args=(build --no-bundle --runner cargo-xwin --target "$TARGET_TRIPLE")
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=/Brepro"
   fi
   (
     cd "$ROOT_DIR"
@@ -185,6 +206,50 @@ fi
 if [[ ! -f "$SOURCE_BIN" ]] || [[ "$PLATFORM" != windows-* && ! -x "$SOURCE_BIN" ]]; then
   echo "ERROR: release binary not found: $SOURCE_BIN" >&2
   exit 1
+fi
+
+# Release binary validation runs before packaging, so the networked build phase
+# can stop here without ever receiving the private signing key.
+if [[ "$PLATFORM" == windows-* ]]; then
+  OBJDUMP=""
+  if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
+    OBJDUMP="x86_64-w64-mingw32-objdump"
+  elif command -v objdump >/dev/null 2>&1; then
+    OBJDUMP="objdump"
+  else
+    echo "[launcher] ОШИБКА: objdump обязателен для проверки Windows imports." >&2
+    exit 1
+  fi
+  IMPORTS="$($OBJDUMP -p "$SOURCE_BIN")"
+  if grep -Eiq 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS"; then
+    echo "[launcher] ОШИБКА: Windows-бинарник зависит от внешней DLL:" >&2
+    grep -Ei 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS" >&2
+    exit 1
+  fi
+fi
+
+grep -aq "$PUBKEY" "$SOURCE_BIN" || {
+  echo "[launcher] ОШИБКА: публичный update-ключ не вшит в бинарник." >&2
+  exit 1
+}
+grep -aq "$MANIFEST_PUBKEY" "$SOURCE_BIN" || {
+  echo "[launcher] ОШИБКА: ключ delivery manifest не вшит в бинарник." >&2
+  exit 1
+}
+grep -aq "$API_URL" "$SOURCE_BIN" || {
+  echo "[launcher] ОШИБКА: production API URL не вшит в бинарник." >&2
+  exit 1
+}
+grep -aq "PMLVER=$VERSION;" "$SOURCE_BIN" || {
+  echo "[launcher] ОШИБКА: marker версии $VERSION не вшит в бинарник." >&2
+  exit 1
+}
+echo "[launcher] Публичный ключ вшит в бинарник ✓"
+echo "[launcher] Ключ delivery manifest вшит в бинарник ✓"
+
+if (( BUILD_ONLY == 1 )); then
+  echo "[launcher] Build-only phase complete; private signing key was not mounted."
+  exit 0
 fi
 
 PACKAGE_NAME="project-minecraft-launcher-${VERSION}-${PLATFORM}"
@@ -220,48 +285,17 @@ Do not set LAUNCHER_API_URL unless you intentionally want to override the
 production backend.
 EOF
 
+cat > "$PACKAGE_DIR/BUILD-INFO.txt" <<EOF
+source_commit=$SOURCE_COMMIT
+source_date_epoch=$SOURCE_DATE_EPOCH
+platform=$PLATFORM
+api_url=$API_URL
+update_pubkey=$PUBKEY
+manifest_pubkey=$MANIFEST_PUBKEY
+EOF
+
 PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
 [[ "$PLATFORM" == windows-* ]] && PLAYER_BIN="$PACKAGE_DIR/ProjectMinecraftLauncher.exe"
-
-# Updater заменяет ровно один бинарник, поэтому Windows-сборка не может
-# зависеть от WebView2Loader.dll или Visual C++ Runtime рядом с .exe.
-if [[ "$PLATFORM" == windows-* ]]; then
-  OBJDUMP=""
-  if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
-    OBJDUMP="x86_64-w64-mingw32-objdump"
-  elif command -v objdump >/dev/null 2>&1; then
-    OBJDUMP="objdump"
-  else
-    echo "[launcher] ОШИБКА: objdump обязателен для проверки Windows imports." >&2
-    exit 1
-  fi
-  IMPORTS="$($OBJDUMP -p "$PLAYER_BIN")"
-  if grep -Eiq 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS"; then
-    echo "[launcher] ОШИБКА: Windows-бинарник зависит от внешней DLL:" >&2
-    grep -Ei 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS" >&2
-    echo "[launcher] Собирай x86_64-pc-windows-msvc через cargo-xwin; Tauri сам встроит VC runtime." >&2
-    exit 1
-  fi
-fi
-
-# Подпись автообновления (Ed25519). Публичный ключ вшивается через option_env! на этапе
-# cargo — проверяем, что он реально попал в бинарник (страховка от кэша cargo/сбоя).
-if [[ -n "$PUBKEY" ]]; then
-  if grep -aq "$PUBKEY" "$PLAYER_BIN"; then
-    echo "[launcher] Публичный ключ вшит в бинарник ✓"
-  else
-    echo "[launcher] ОШИБКА: публичный ключ задан, но в бинарнике его НЕТ (cargo не пересобрал?)." >&2
-    echo "[launcher]        Удали src-tauri/target/release и пересобери." >&2
-    exit 1
-  fi
-fi
-
-if grep -aq "$MANIFEST_PUBKEY" "$PLAYER_BIN"; then
-  echo "[launcher] Ключ delivery manifest вшит в бинарник ✓"
-else
-  echo "[launcher] ОШИБКА: ключ delivery manifest не вшит в бинарник." >&2
-  exit 1
-fi
 
 if [[ -n "$SIGNING_KEY" ]]; then
   SIG="$(run_updatesign sign -key "$SIGNING_KEY" "$PLAYER_BIN")" || exit 1
@@ -279,7 +313,8 @@ mkdir -p "$OUT_DIR"
 if command -v tar >/dev/null 2>&1; then
   (
     cd "$OUT_DIR"
-    tar -czf "$PACKAGE_NAME.tar.gz" "$PACKAGE_NAME"
+    tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+      -cf - "$PACKAGE_NAME" | gzip -n > "$PACKAGE_NAME.tar.gz"
   )
   echo "[launcher] Package: $OUT_DIR/$PACKAGE_NAME.tar.gz"
 else

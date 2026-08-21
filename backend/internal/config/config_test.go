@@ -179,3 +179,19 @@ func TestProductionRejectsMalformedDeliverySigningKey(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
+
+func TestBotValidationDoesNotRequireDeliverySigningMaterial(t *testing.T) {
+	cfg := Config{
+		AppEnv:                     "production",
+		JWTSecret:                  "a-real-jwt-secret-value",
+		AnticheatSecret:            "a-distinct-anticheat-secret-value",
+		GameAPISecret:              "a-distinct-game-api-secret-value",
+		SiteOrderSecret:            "a-distinct-site-secret-value",
+		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		DeliveryV1Bridge:           true,
+		DeliveryManifestSigningKey: "not-a-key",
+	}
+	if err := cfg.ValidateBot(); err != nil {
+		t.Fatalf("bot must not require delivery signing configuration: %v", err)
+	}
+}

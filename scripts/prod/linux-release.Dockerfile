@@ -9,39 +9,24 @@ FROM rust:1.96.0-slim-bookworm@sha256:bef0c0c8eee5b866fadb56bd83cdf4681921c3851f
 
 FROM ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
-ARG CARGO_XWIN_VERSION=0.23.1
+ARG RUST_VERSION=1.96.0
 ARG UBUNTU_SNAPSHOT=20260801T000000Z
 ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo \
-    PATH=/opt/cargo/bin:/usr/lib/llvm-18/bin:${PATH}
+    PATH=/opt/cargo/bin:${PATH}
 
 COPY --from=updatesign /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i "s#http://archive.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/#; s#http://security.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/#" /etc/apt/sources.list.d/ubuntu.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates clang-18 curl git lld-18 llvm-18 nodejs npm \
-      pkg-config xz-utils \
- && ln -s /usr/bin/clang-cl-18 /usr/local/bin/clang-cl \
- && ln -s /usr/bin/lld-link-18 /usr/local/bin/lld-link \
- && ln -s /usr/bin/llvm-lib-18 /usr/local/bin/llvm-lib \
- && ln -s /usr/bin/llvm-rc-18 /usr/local/bin/llvm-rc \
+      build-essential ca-certificates curl file git libgtk-3-dev \
+      libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev nodejs npm pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust_toolchain /usr/local/rustup /opt/rustup
 COPY --from=rust_toolchain /usr/local/cargo /opt/cargo
-RUN rustup target add x86_64-pc-windows-msvc \
- && cargo install cargo-xwin --version "${CARGO_XWIN_VERSION}" --locked
-
-# Ubuntu's LLVM 18 package exposes these tools only under /usr/lib/llvm-18/bin.
-# Replace the compatibility links after the expensive cargo-xwin layer so the
-# toolchain remains cacheable while broken links can never reach a release build.
-RUN ln -sfn /usr/lib/llvm-18/bin/clang /usr/local/bin/clang-cl \
- && ln -sfn /usr/lib/llvm-18/bin/lld-link /usr/local/bin/lld-link \
- && ln -sfn /usr/lib/llvm-18/bin/llvm-lib /usr/local/bin/llvm-lib \
- && ln -sfn /usr/lib/llvm-18/bin/llvm-rc /usr/local/bin/llvm-rc \
- && clang-cl --version >/dev/null \
- && lld-link --version >/dev/null
+RUN rustup target add x86_64-unknown-linux-gnu
 
 COPY --from=updatesign /out/updatesign /usr/local/bin/updatesign
 WORKDIR /work
