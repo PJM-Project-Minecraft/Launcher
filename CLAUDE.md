@@ -60,9 +60,12 @@ docker run --rm \
   -v "$PWD/backend":/src \
   -v launcher_gocache:/root/.cache/go-build \
   -v launcher_gomodcache:/go/pkg/mod \
-  -w /src golang:1.26-bookworm go test ./...
+  -w /src \
+  golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 \
+  go test ./...
 ```
-`deploy.sh` гоняет тесты именно так. Образ: `golang:1.26-bookworm`.
+`deploy.sh` гоняет тесты именно так. Builder-образ закреплён на Go 1.26.6 и digest,
+чтобы security-патч не откатывался из-за плавающего тега.
 
 Сборка плеер-лаунчера с зашитым URL бэкенда:
 ```bash

@@ -27,7 +27,7 @@ cyan "→ [0/3] Тесты backend (в Docker)..."
 docker run --rm \
   -v "$(cd "$(dirname "$0")" && pwd)/backend":/src -w /src \
   -v launcher_gomodcache:/go/pkg/mod -v launcher_gocache:/root/.cache/go-build \
-  golang:1.26-bookworm go test ./...
+  golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 go test ./...
 
 cyan "→ [1/3] Пуш ветки ${BRANCH} в GitHub..."
 git push origin "${BRANCH}"
