@@ -36,7 +36,7 @@ impl IntegrityManifest {
             config.api_url().trim_end_matches('/'),
             obfstr::obfstr!("/api/anticheat/manifest")
         );
-        let response = client.get(url).bearer_auth(token).send().ok()?;
+        let response = client.get(&url, Some(token), None).ok()?;
         if !response.status().is_success() {
             return None;
         }

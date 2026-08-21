@@ -6,8 +6,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use reqwest::blocking::Client;
-use reqwest::header::RANGE;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -46,7 +44,7 @@ pub(crate) fn should_use(
 }
 
 pub(crate) fn download_and_install(
-    client: &Client,
+    client: &crate::DownloadClient,
     url: &str,
     token: &str,
     profile_root: &Path,
@@ -91,7 +89,7 @@ pub(crate) fn download_and_install(
 }
 
 fn download_resumable(
-    client: &Client,
+    client: &crate::DownloadClient,
     url: &str,
     token: &str,
     path: &Path,
@@ -109,12 +107,9 @@ fn download_resumable(
         return Ok(());
     }
 
-    let mut request = client.get(url).bearer_auth(token);
-    if offset > 0 {
-        request = request.header(RANGE, format!("bytes={offset}-"));
-    }
-    let response = request
-        .send()
+    let range = (offset > 0).then(|| format!("bytes={offset}-"));
+    let response = client
+        .get(url, Some(token), range)
         .map_err(|error| format!("Не удалось скачать bundle: {error}"))?;
 
     let append = offset > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
@@ -132,15 +127,16 @@ fn download_resumable(
         .open(path)
         .map_err(|_| "Не удалось записать bundle.".to_string())?;
     let mut downloaded = if append { offset } else { 0 };
-    crate::read_response_chunks(response, |buffer| {
-        output
-            .write_all(buffer)
-            .map_err(|_| "Не удалось записать bundle.".to_string())?;
-        downloaded += buffer.len() as u64;
-        progress(downloaded.min(expected_size), expected_size);
-        Ok(())
-    })
-    .map_err(|error| format!("Соединение при скачивании bundle оборвалось: {error}"))?;
+    response
+        .consume(|buffer| {
+            output
+                .write_all(buffer)
+                .map_err(|_| "Не удалось записать bundle.".to_string())?;
+            downloaded += buffer.len() as u64;
+            progress(downloaded.min(expected_size), expected_size);
+            Ok(())
+        })
+        .map_err(|error| format!("Соединение при скачивании bundle оборвалось: {error}"))?;
     output
         .flush()
         .map_err(|_| "Не удалось сохранить bundle.".to_string())?;

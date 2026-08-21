@@ -5,8 +5,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reqwest::blocking::Client;
-
 /// Несовпадение SHA-256 — подмена артефакта (MITM или локально) → запуск блокируется.
 #[derive(Debug)]
 pub enum IntegrityError {
@@ -55,7 +53,7 @@ pub fn verify_sha(path: &Path, expected: Option<&str>) -> Result<(), IntegrityEr
 // Ok(true) — файл на месте и валиден; Ok(false) — скачать не удалось (сеть/HTTP);
 // Err — файл скачан, но SHA не совпал (подмена).
 fn download_and_verify(
-    client: &Client,
+    client: &crate::DownloadClient,
     url: &str,
     path: &Path,
     dir: &Path,
@@ -64,18 +62,19 @@ fn download_and_verify(
     if fs::create_dir_all(dir).is_err() {
         return Ok(false);
     }
-    let Ok(response) = client.get(url).send() else {
+    let Ok(response) = client.get(url, None, None) else {
         return Ok(false);
     };
     if !response.status().is_success() {
         return Ok(false);
     }
     let mut bytes = Vec::new();
-    if crate::read_response_chunks(response, |chunk| {
-        bytes.extend_from_slice(chunk);
-        Ok(())
-    })
-    .is_err()
+    if response
+        .consume(|chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })
+        .is_err()
     {
         return Ok(false);
     }
@@ -114,7 +113,7 @@ fn install_verified(
 /// откатом на кэш. Ok(Some) — готов и валиден; Ok(None) — недоступен (оффлайн без
 /// кэша, fail-open); Err — подмена (блок запуска).
 pub fn ensure(
-    client: &Client,
+    client: &crate::DownloadClient,
     url: &str,
     path: &Path,
     dir: &Path,
