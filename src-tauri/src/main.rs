@@ -217,6 +217,19 @@ enum InitialInstallLocation {
 static SETTINGS_IO_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static PROFILE_CHECK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROFILE_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PROFILE_SYNC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn begin_profile_sync() {
+    PROFILE_SYNC_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    PROFILE_SYNC_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+fn end_profile_sync() {
+    // Проверка, начатая во время синхронизации, должна устареть даже если
+    // успела закончиться уже после сброса active=false.
+    PROFILE_SYNC_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    PROFILE_SYNC_ACTIVE.store(false, Ordering::SeqCst);
+}
 
 /// Состояние автообновления. Глобальное (OnceLock): проверка живёт дольше
 /// сессии логина и дёргается из SSE-слушателя, периодики и старта.
@@ -1109,7 +1122,7 @@ fn register_settings_handler(
 
         app.set_is_syncing(true);
         app.set_message("Переносим профили на новый диск. Не закрывайте лаунчер…".into());
-        PROFILE_SYNC_ACTIVE.store(true, Ordering::SeqCst);
+        begin_profile_sync();
         let app_weak = change_folder_app.clone();
         let active = change_folder_active.clone();
         thread::spawn(move || {
@@ -1121,7 +1134,7 @@ fn register_settings_handler(
                 install::finalize_migration(&migration);
                 Ok(migration)
             });
-            PROFILE_SYNC_ACTIVE.store(false, Ordering::SeqCst);
+            end_profile_sync();
             active.store(false, Ordering::SeqCst);
 
             let _ = invoke_from_ui(move || {
@@ -1244,7 +1257,7 @@ fn register_play_handler(
         }
 
         if let Some(app) = play_app.upgrade() {
-            PROFILE_SYNC_ACTIVE.store(true, Ordering::SeqCst);
+            begin_profile_sync();
             app.set_is_syncing(true);
             app.set_settings_visible(false);
             app.set_download_panel_visible(true);
@@ -1284,7 +1297,7 @@ fn register_play_handler(
             }
             let result = preparation
                 .and_then(|_| sync_and_launch(&config, &token, &user, &profile, &app_weak));
-            PROFILE_SYNC_ACTIVE.store(false, Ordering::SeqCst);
+            end_profile_sync();
             if let Err(ref message) = result {
                 log_sync_error(message);
             }
@@ -1304,9 +1317,11 @@ fn register_play_handler(
                     app.set_is_syncing(false);
                     match result {
                         Ok(message) => {
-                            if !app.get_profile_update_available() {
-                                set_profile_install_state(&app, ProfileInstallState::Checking);
-                            }
+                            // Синхронизация сохранила новый локальный manifest. Старое
+                            // «Доступно обновление» больше не является достоверным:
+                            // сразу показываем перепроверку, пока фоновый запрос
+                            // подтверждает итоговое Ready/UpdateAvailable.
+                            set_profile_install_state(&app, ProfileInstallState::Checking);
                             app.set_download_phase("Готово".into());
                             app.set_download_file("Minecraft закрыт".into());
                             app.set_download_counter("100%".into());
@@ -1713,6 +1728,10 @@ fn start_local_profile_watch(
                 Ok(state) => state.clone(),
                 Err(_) => return,
             };
+            let sync_sequence = PROFILE_SYNC_SEQUENCE.load(Ordering::SeqCst);
+            if PROFILE_SYNC_ACTIVE.load(Ordering::SeqCst) {
+                continue;
+            }
             let (Some(user), Some(profile)) = (snapshot.user.as_ref(), selected_profile(&snapshot))
             else {
                 continue;
@@ -1729,6 +1748,13 @@ fn start_local_profile_watch(
             let Some(detected_state) = detected_state else {
                 continue;
             };
+            if !local_profile_watch_scan_is_current(
+                sync_sequence,
+                PROFILE_SYNC_SEQUENCE.load(Ordering::SeqCst),
+                PROFILE_SYNC_ACTIVE.load(Ordering::SeqCst),
+            ) {
+                continue;
+            }
             PROFILE_CHECK_SEQUENCE.fetch_add(1, Ordering::SeqCst);
             let expected_user = user.provider_uuid.clone();
             let expected_profile = profile.id.clone();
@@ -1748,6 +1774,14 @@ fn start_local_profile_watch(
             });
         }
     });
+}
+
+fn local_profile_watch_scan_is_current(
+    scan_sync_sequence: u64,
+    current_sync_sequence: u64,
+    sync_active: bool,
+) -> bool {
+    !sync_active && scan_sync_sequence == current_sync_sequence
 }
 
 fn local_profile_files_changed(
@@ -5458,6 +5492,7 @@ mod tests {
             profile_install_state(&paths, &manifest).unwrap(),
             ProfileInstallState::Ready
         );
+        thread::sleep(Duration::from_millis(2));
         write_test_file(&files_root.join("mods/official.jar"), "modified");
         assert_eq!(
             profile_install_state(&paths, &manifest).unwrap(),
@@ -5554,6 +5589,19 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(profile_root);
+    }
+
+    #[test]
+    fn local_profile_watch_discards_scan_started_before_sync() {
+        assert!(local_profile_watch_scan_is_current(7, 7, false));
+        assert!(
+            !local_profile_watch_scan_is_current(7, 8, false),
+            "результат проверки старого manifest не должен возвращать «Доступно обновление» после успешной синхронизации"
+        );
+        assert!(
+            !local_profile_watch_scan_is_current(8, 8, true),
+            "локальная проверка не должна менять карточку во время синхронизации"
+        );
     }
 
     #[test]
