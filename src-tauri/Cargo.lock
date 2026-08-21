@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "project-minecraft-launcher"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "base64 0.22.1",
  "directories",
