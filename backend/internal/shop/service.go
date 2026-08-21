@@ -24,17 +24,18 @@ var itemIDPattern = regexp.MustCompile(`^[a-z0-9_.-]+:[a-z0-9_./-]+$`)
 var paidRoles = map[string]struct{}{"special_forces": {}, "uav_operator": {}, "ew_specialist": {}}
 
 type CatalogItem struct {
-	ID           int64               `json:"id"`
-	Category     string              `json:"category"`
-	CategoryIcon string              `json:"categoryIcon"`
-	Name         string              `json:"name"`
-	Description  string              `json:"description"`
-	Price        int64               `json:"price"`
-	ImageURL     string              `json:"imageUrl,omitempty"`
-	Badge        string              `json:"badge,omitempty"`
-	Sort         int                 `json:"sort"`
-	Active       bool                `json:"active"`
-	Delivery     models.DeliverySpec `json:"delivery"`
+	ID           int64                   `json:"id"`
+	Category     string                  `json:"category"`
+	CategoryIcon string                  `json:"categoryIcon"`
+	Name         string                  `json:"name"`
+	Description  string                  `json:"description"`
+	Price        int64                   `json:"price"`
+	ImageURL     string                  `json:"imageUrl,omitempty"`
+	Badge        string                  `json:"badge,omitempty"`
+	Sort         int                     `json:"sort"`
+	Active       bool                    `json:"active"`
+	Delivery     models.DeliverySpec     `json:"delivery"`
+	Kit          *models.GameKitSnapshot `json:"kit,omitempty"`
 }
 
 type ItemInput struct {
@@ -144,8 +145,23 @@ func (s Service) List(ctx context.Context, activeOnly bool) ([]CatalogItem, erro
 		return nil, err
 	}
 	items := make([]CatalogItem, 0, len(rows))
+	var kitRows []models.GameKitCatalog
+	if err := s.db.WithContext(ctx).Find(&kitRows).Error; err != nil {
+		return nil, err
+	}
+	kits := make(map[string]models.GameKitSnapshot, len(kitRows))
+	for _, row := range kitRows {
+		kits[row.RoleID] = row.Snapshot
+	}
 	for _, row := range rows {
-		items = append(items, catalogItem(row))
+		item := catalogItem(row)
+		if row.Delivery.Type == models.DeliveryTypeRole {
+			if kit, ok := kits[row.Delivery.RoleID]; ok {
+				copy := kit
+				item.Kit = &copy
+			}
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }

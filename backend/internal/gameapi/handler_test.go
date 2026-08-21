@@ -27,17 +27,48 @@ func newApp(t *testing.T) (*fiber.App, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.AutoMigrate(&models.PlayerProfile{}, &models.PlayerXpAdjustment{}, &models.Order{}, &models.Delivery{}); err != nil {
+	if err := db.AutoMigrate(&models.PlayerProfile{}, &models.PlayerXpAdjustment{}, &models.Order{}, &models.Delivery{}, &models.GameKitCatalog{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	db.Exec("DELETE FROM player_profiles")
 	db.Exec("DELETE FROM player_xp_adjustments")
 	db.Exec("DELETE FROM deliveries")
 	db.Exec("DELETE FROM orders")
+	db.Exec("DELETE FROM game_kit_catalogs")
 
 	app := fiber.New()
 	gameapi.NewHandler(db, secret, purchases.NewService(db)).RegisterRoutes(app)
 	return app, db
+}
+
+func TestKitSyncReplacesAuthoritativeCatalog(t *testing.T) {
+	app, db := newApp(t)
+	body := `{"schemaVersion":1,"kits":[{"roleId":"special_forces","displayName":"ССО","primary":[{"id":"ak","gunId":"tacz:ak47","name":"АК","minRank":"","allowedTeams":[],"restricted":false,"magazines":4,"ammoId":"tacz:ammo_762x39","attachments":[]}],"sidearm":[],"gear":[],"fixed":[]}]}`
+	if code, out := post(t, app, "/api/game/kits/sync", body, secret); code != http.StatusOK {
+		t.Fatalf("sync: %d %s", code, out)
+	}
+	var row models.GameKitCatalog
+	if err := db.First(&row, "role_id = ?", "special_forces").Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Snapshot.DisplayName != "ССО" || len(row.Snapshot.Primary) != 1 {
+		t.Fatalf("неверный снимок: %+v", row.Snapshot)
+	}
+	if code, out := post(t, app, "/api/game/kits/sync", `{"schemaVersion":1,"kits":[]}`, secret); code != http.StatusOK {
+		t.Fatalf("clear: %d %s", code, out)
+	}
+	var count int64
+	db.Model(&models.GameKitCatalog{}).Count(&count)
+	if count != 0 {
+		t.Fatalf("устаревшие роли не удалены: %d", count)
+	}
+}
+
+func TestKitSyncRequiresGameSecret(t *testing.T) {
+	app, _ := newApp(t)
+	if code, _ := post(t, app, "/api/game/kits/sync", `{"schemaVersion":1,"kits":[]}`, "wrong"); code != http.StatusUnauthorized {
+		t.Fatalf("ожидался 401, получен %d", code)
+	}
 }
 
 func TestDeliveryPollReturnsOnlyPendingForOnlinePlayers(t *testing.T) {

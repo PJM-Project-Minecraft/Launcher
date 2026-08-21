@@ -26,7 +26,7 @@ func newApp(t *testing.T) (*fiber.App, *gorm.DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.ShopItem{}); err != nil {
+	if err := db.AutoMigrate(&models.ShopItem{}, &models.GameKitCatalog{}); err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
@@ -63,6 +63,11 @@ func TestPublicCatalogOnlyExposesActiveItems(t *testing.T) {
 	if err := db.Create(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
+	kit := models.GameKitSnapshot{RoleID: "uav_operator", DisplayName: "Оператор БПЛА",
+		Fixed: []models.KitFixed{{ID: "drone", ItemID: "pjm:drone", Name: "БПЛА", Count: 1}}}
+	if err := db.Create(&models.GameKitCatalog{RoleID: kit.RoleID, Snapshot: kit}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	code, data := request(t, app, http.MethodGet, "/api/shop/catalog", "", "")
 	if code != http.StatusOK {
@@ -81,6 +86,9 @@ func TestPublicCatalogOnlyExposesActiveItems(t *testing.T) {
 		}
 		if item.ID == 4150 && (item.Price != 55000 || item.Delivery.RoleID != "uav_operator") {
 			t.Fatalf("денежный/Delivery seed неверен: %+v", item)
+		}
+		if item.ID == 4150 && (item.Kit == nil || len(item.Kit.Fixed) != 1) {
+			t.Fatalf("роль-товар не получил состав кита: %+v", item.Kit)
 		}
 	}
 }

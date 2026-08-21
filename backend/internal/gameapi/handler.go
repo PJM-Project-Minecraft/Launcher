@@ -6,6 +6,7 @@ package gameapi
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"time"
 
@@ -25,19 +26,42 @@ type Handler struct {
 	db       *gorm.DB
 	secret   string
 	delivery DeliveryService
+	kits     KitCatalogService
 }
 
 func NewHandler(db *gorm.DB, secret string, delivery DeliveryService) Handler {
-	return Handler{db: db, secret: secret, delivery: delivery}
+	return Handler{db: db, secret: secret, delivery: delivery, kits: NewKitCatalogService(db)}
 }
 
 func (h Handler) RegisterRoutes(app *fiber.App) {
 	g := app.Group("/api/game")
 	g.Use(h.requireSecret)
 	g.Post("/players/sync", h.syncPlayers)
+	g.Post("/kits/sync", h.syncKits)
 	g.Post("/adjustments/poll", h.pollAdjustments)
 	g.Post("/deliveries/poll", h.pollDeliveries)
 	g.Post("/deliveries/ack", h.ackDeliveries)
+}
+
+type kitSyncRequest struct {
+	SchemaVersion int                      `json:"schemaVersion"`
+	Kits          []models.GameKitSnapshot `json:"kits"`
+}
+
+// syncKits полностью заменяет публичный каталог: отсутствующая роль считается удалённой из kits.json.
+func (h Handler) syncKits(c fiber.Ctx) error {
+	var req kitSyncRequest
+	if err := c.Bind().Body(&req); err != nil || req.SchemaVersion != 1 || len(req.Kits) > 64 {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"message": "bad kit catalog"})
+	}
+	saved, err := h.kits.Replace(c.Context(), req.Kits)
+	if errors.Is(err, ErrInvalidKitCatalog) {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"message": "bad kit catalog"})
+	}
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"message": "kit sync failed"})
+	}
+	return c.JSON(fiber.Map{"ok": true, "saved": saved})
 }
 
 func (h Handler) pollDeliveries(c fiber.Ctx) error {
