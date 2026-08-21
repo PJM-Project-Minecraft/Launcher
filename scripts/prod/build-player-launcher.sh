@@ -6,7 +6,7 @@
 # в бинарник и им же подписывается сборка. Ключ создаётся `updatesign keygen`, хранится
 # ТОЛЬКО на релиз-боксе (в git/на сервере его нет).
 #   scripts/prod/build-player-launcher.sh --api-url https://... --signing-key ~/pjm-update-signing.key
-# Без ключа собирается лаунчер, принимающий обновления по SHA (как раньше).
+# Release-сборка без обоих публичных ключей запрещена.
 
 set -euo pipefail
 
@@ -17,6 +17,7 @@ BUILD=1
 # Ключ подписи и публичный ключ можно задать флагом или переменной окружения.
 SIGNING_KEY="${LAUNCHER_SIGNING_KEY:-}"
 PUBKEY="${LAUNCHER_UPDATE_PUBKEY:-}"
+MANIFEST_PUBKEY="${DELIVERY_MANIFEST_PUBKEY:-}"
 
 usage() {
   cat <<'EOF'
@@ -27,6 +28,8 @@ Options:
   --signing-key PATH  Приватный Ed25519-ключ (updatesign keygen). Публичный ключ
                       выводится из него, вшивается в бинарник и им же подписывается сборка.
                       Можно вместо флага задать переменную LAUNCHER_SIGNING_KEY.
+  --manifest-pubkey HEX  Публичный Ed25519-ключ подписи delivery manifest.
+                         Можно задать DELIVERY_MANIFEST_PUBKEY.
   --out-dir DIR       Output directory (default: dist/releases)
   --no-build          Package the existing release binary without rebuilding
   -h, --help          Show this help
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --signing-key)
       SIGNING_KEY="${2:-}"
+      shift
+      ;;
+    --manifest-pubkey)
+      MANIFEST_PUBKEY="${2:-}"
       shift
       ;;
     --out-dir)
@@ -75,6 +82,11 @@ fi
 
 if [[ "$API_URL" != http://* && "$API_URL" != https://* ]]; then
   echo "ERROR: --api-url must start with http:// or https://." >&2
+  exit 2
+fi
+
+if [[ ! "$MANIFEST_PUBKEY" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: --manifest-pubkey / DELIVERY_MANIFEST_PUBKEY должен содержать 64 lowercase hex-символа." >&2
   exit 2
 fi
 
@@ -117,6 +129,11 @@ if [[ -n "$SIGNING_KEY" ]]; then
   echo "[launcher] Публичный ключ выведен из приватного: $PUBKEY"
 fi
 
+if [[ ! "$PUBKEY" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: задайте --signing-key либо LAUNCHER_UPDATE_PUBKEY (64 lowercase hex-символа)." >&2
+  exit 2
+fi
+
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT_DIR/src-tauri/Cargo.toml")"
 TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 PLATFORM="linux-x64"
@@ -137,6 +154,7 @@ if (( BUILD == 1 )); then
     npm ci
     LAUNCHER_DEFAULT_API_URL="$API_URL" \
       LAUNCHER_UPDATE_PUBKEY="$PUBKEY" \
+      DELIVERY_MANIFEST_PUBKEY="$MANIFEST_PUBKEY" \
       npm run tauri -- build --no-bundle
   )
 fi
@@ -208,6 +226,13 @@ if [[ -n "$PUBKEY" ]]; then
     echo "[launcher]        Удали src-tauri/target/release и пересобери." >&2
     exit 1
   fi
+fi
+
+if grep -aq "$MANIFEST_PUBKEY" "$PLAYER_BIN"; then
+  echo "[launcher] Ключ delivery manifest вшит в бинарник ✓"
+else
+  echo "[launcher] ОШИБКА: ключ delivery manifest не вшит в бинарник." >&2
+  exit 1
 fi
 
 if [[ -n "$SIGNING_KEY" ]]; then

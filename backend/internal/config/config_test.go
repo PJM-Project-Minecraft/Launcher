@@ -2,6 +2,8 @@ package config
 
 import "testing"
 
+const testDeliverySigningKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func TestValidateRejectsDevSecretsInProduction(t *testing.T) {
 	cfg := Config{AppEnv: "production", JWTSecret: "dev-only-change-me"}
 	if err := cfg.Validate(); err == nil {
@@ -22,12 +24,13 @@ func TestValidateAllowsDevSecretsInDevelopment(t *testing.T) {
 
 func TestValidateAllowsRealSecretInProduction(t *testing.T) {
 	cfg := Config{
-		AppEnv:          "production",
-		JWTSecret:       "a-real-32-char-random-secret-value",
-		AnticheatSecret: "a-distinct-anticheat-secret-value",
-		GameAPISecret:   "a-distinct-game-api-secret-value",
-		SiteOrderSecret: "a-distinct-site-order-secret-value",
-		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		AppEnv:                     "production",
+		JWTSecret:                  "a-real-32-char-random-secret-value",
+		AnticheatSecret:            "a-distinct-anticheat-secret-value",
+		GameAPISecret:              "a-distinct-game-api-secret-value",
+		SiteOrderSecret:            "a-distinct-site-order-secret-value",
+		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		DeliveryManifestSigningKey: testDeliverySigningKey,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("production с нормальными секретами должен проходить: %v", err)
@@ -36,11 +39,12 @@ func TestValidateAllowsRealSecretInProduction(t *testing.T) {
 
 func TestValidateRejectsEmptyDatabaseURLInProduction(t *testing.T) {
 	cfg := Config{
-		AppEnv:          "production",
-		JWTSecret:       "a-real-32-char-random-secret-value",
-		AnticheatSecret: "a-distinct-anticheat-secret-value",
-		GameAPISecret:   "a-distinct-game-api-secret-value",
-		SiteOrderSecret: "a-distinct-site-order-secret-value",
+		AppEnv:                     "production",
+		JWTSecret:                  "a-real-32-char-random-secret-value",
+		AnticheatSecret:            "a-distinct-anticheat-secret-value",
+		GameAPISecret:              "a-distinct-game-api-secret-value",
+		SiteOrderSecret:            "a-distinct-site-order-secret-value",
+		DeliveryManifestSigningKey: testDeliverySigningKey,
 		// DatabaseURL пуст → тихий SQLite-fallback, запрещён в проде.
 	}
 	if err := cfg.Validate(); err == nil {
@@ -75,7 +79,7 @@ func TestGameAPISecretFromEnv(t *testing.T) {
 
 func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
 	jwt := "a-real-32-char-random-secret-value"
-	base := Config{AppEnv: "production", JWTSecret: jwt}
+	base := Config{AppEnv: "production", JWTSecret: jwt, DeliveryManifestSigningKey: testDeliverySigningKey}
 
 	cases := map[string]string{
 		"деривированный из JWT": "anticheat:" + jwt,
@@ -94,11 +98,12 @@ func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
 func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
 	jwt := "a-real-32-char-random-secret-value"
 	base := Config{
-		AppEnv:          "production",
-		JWTSecret:       jwt,
-		AnticheatSecret: "a-distinct-anticheat-secret-value",
-		SiteOrderSecret: "a-distinct-site-order-secret-value",
-		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		AppEnv:                     "production",
+		JWTSecret:                  jwt,
+		AnticheatSecret:            "a-distinct-anticheat-secret-value",
+		SiteOrderSecret:            "a-distinct-site-order-secret-value",
+		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		DeliveryManifestSigningKey: testDeliverySigningKey,
 	}
 
 	cases := map[string]string{
@@ -118,11 +123,12 @@ func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
 func TestValidateRejectsWeakSiteOrderSecret(t *testing.T) {
 	jwt := "a-real-32-char-random-secret-value"
 	base := Config{
-		AppEnv:          "production",
-		JWTSecret:       jwt,
-		AnticheatSecret: "a-distinct-anticheat-secret-value",
-		GameAPISecret:   "a-distinct-game-api-secret-value",
-		DatabaseURL:     "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		AppEnv:                     "production",
+		JWTSecret:                  jwt,
+		AnticheatSecret:            "a-distinct-anticheat-secret-value",
+		GameAPISecret:              "a-distinct-game-api-secret-value",
+		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		DeliveryManifestSigningKey: testDeliverySigningKey,
 	}
 
 	for name, secret := range map[string]string{

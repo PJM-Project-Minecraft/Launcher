@@ -21,6 +21,13 @@ type Config struct {
 	AllowedOrigins     []string
 	AdminLogins        []string
 	ProfileStorageRoot string
+	DeliveryRoot       string
+	// DeliveryV1Bridge temporarily exposes legacy profile/update routes while
+	// the mandatory v2 launcher release is being adopted.
+	DeliveryV1Bridge bool
+	// DeliveryManifestSigningKey is a 32-byte Ed25519 seed encoded as hex.
+	// Production requires it; development may publish unsigned manifests.
+	DeliveryManifestSigningKey string
 	// ProfileCDNBase — база публичного зеркала файлов профилей (бакет S3).
 	// Задан → манифест отдаёт absolute download_url на бакет, трафик сборок идёт мимо VPS.
 	// Пусто → файлы качаются с бэкенда по относительному /api/profiles/... (дефолт).
@@ -91,7 +98,10 @@ func Load() Config {
 			"PROFILE_STORAGE_ROOT",
 			filepath.Join("storage", "profiles"),
 		),
-		ProfileCDNBase: strings.TrimRight(env("PROFILE_CDN_BASE", ""), "/"),
+		DeliveryRoot:               env("DELIVERY_ROOT", filepath.Join("storage", "delivery-v2")),
+		DeliveryV1Bridge:           env("DELIVERY_V1_BRIDGE", "true") == "true",
+		DeliveryManifestSigningKey: strings.TrimSpace(os.Getenv("DELIVERY_MANIFEST_SIGNING_KEY")),
+		ProfileCDNBase:             strings.TrimRight(env("PROFILE_CDN_BASE", ""), "/"),
 		LauncherReleaseRoot: env(
 			"LAUNCHER_RELEASE_ROOT",
 			filepath.Join("storage", "releases"),
@@ -161,6 +171,9 @@ func (c Config) Validate() error {
 	}
 	if devSecrets[c.JWTSecret] {
 		return errors.New("APP_ENV=production требует настоящий JWT_SECRET (сейчас дев-заглушка)")
+	}
+	if len(c.DeliveryManifestSigningKey) != 64 {
+		return errors.New("APP_ENV=production требует DELIVERY_MANIFEST_SIGNING_KEY: 32-byte Ed25519 seed в hex")
 	}
 	// Античит-секрет (подпись launch-token) в проде должен быть задан ЯВНО и отличаться
 	// от JWT: иначе компрометация одного раскрывает второй, а деривация предсказуема.

@@ -44,15 +44,21 @@ func NewHandler(service Service, broker *events.Broker) Handler {
 const profilesEvent = "profiles"
 
 func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
+	h.RegisterRoutesWithV1Bridge(app, authMiddleware, true)
+}
+
+func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber.Handler, v1Bridge bool) {
 	group := app.Group("/api/profiles")
 	group.Use(authMiddleware)
 	// Статический /events регистрируем до параметрических маршрутов.
 	group.Get("/events", h.events)
-	group.Get("/", h.listActive)
-	group.Get("/:id/manifest", h.manifest)
-	group.Get("/:id/bundles/:version", h.bundle)
-	group.Get("/:id/objects/:hash", h.object)
-	group.Get("/:id/files/*", h.download)
+	if v1Bridge {
+		group.Get("/", h.listActive)
+		group.Get("/:id/manifest", h.manifest)
+		group.Get("/:id/bundles/:version", h.bundle)
+		group.Get("/:id/objects/:hash", h.object)
+		group.Get("/:id/files/*", h.download)
+	}
 
 	// Браузерный WebSocket не умеет Authorization header. Админ сначала получает
 	// одноразовый билет обычным защищённым POST, затем билет погашается до upgrade.
@@ -71,18 +77,20 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/", h.listAll)
 	admin.Get("/loader-options", h.loaderOptions)
-	// HTTP snapshot нужен для детерминированного восстановления страницы после
-	// reload; WebSocket остаётся каналом последующих изменений.
-	admin.Get("/builds", h.buildSnapshots)
 	admin.Post("/", h.create)
-	admin.Get("/:id/manifest", h.manifest)
 	admin.Patch("/:id", h.update)
 	admin.Delete("/:id", h.delete)
-	admin.Post("/:id/prepare-client", h.prepareClient)
-	admin.Post("/:id/scan", h.scan)
-	admin.Post("/:id/publish", h.scan)
-	admin.Get("/:id/build", h.buildStatus)
-	admin.Get("/:id/drift", h.drift)
+	if v1Bridge {
+		// Эти маршруты существуют только на один миграционный цикл. Delivery v2
+		// использует durable jobs и атомарный SFTP rename .upload -> .ready.
+		admin.Get("/builds", h.buildSnapshots)
+		admin.Get("/:id/manifest", h.manifest)
+		admin.Post("/:id/prepare-client", h.prepareClient)
+		admin.Post("/:id/scan", h.scan)
+		admin.Post("/:id/publish", h.scan)
+		admin.Get("/:id/build", h.buildStatus)
+		admin.Get("/:id/drift", h.drift)
+	}
 }
 
 // notifyProfilesChanged рассылает подключённым лаунчерам сигнал перезапросить профили.

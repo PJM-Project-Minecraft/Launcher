@@ -10,6 +10,7 @@ import (
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/config"
 	"launcher-backend/internal/database"
+	"launcher-backend/internal/delivery"
 	"launcher-backend/internal/events"
 	"launcher-backend/internal/gameapi"
 	"launcher-backend/internal/launcherrelease"
@@ -120,12 +121,19 @@ func main() {
 	purchases.NewHandler(db, cfg.SiteOrderSecret).RegisterRoutes(app, authService.RequireAuth())
 	shop.NewHandler(shopService).RegisterRoutes(app, authService.RequireAuth())
 	profilesBroker := events.NewBroker()
+	deliveryService, err := delivery.NewService(db, cfg.DeliveryRoot, cfg.ProfileStorageRoot, cfg.LauncherReleaseRoot, cfg.DeliveryManifestSigningKey)
+	if err != nil {
+		slog.Error("delivery v2 initialization failed", "error", err)
+		os.Exit(1)
+	}
+	delivery.NewHandler(deliveryService).RegisterRoutes(app, authService.RequireAuth())
+	delivery.NewWatcher(deliveryService, profilesBroker).Start()
 	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot, cfg.ProfileCDNBase), profilesBroker).
-		RegisterRoutes(app, authService.RequireAuth())
-	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot)
+		RegisterRoutesWithV1Bridge(app, authService.RequireAuth(), cfg.DeliveryV1Bridge)
+	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot).RequireSignatures()
 	launcherrelease.SetLogger(slog.Warn)
-	launcherrelease.NewHandler(releaseService, profilesBroker).
-		RegisterRoutes(app, authService.RequireAuth())
+	launcherrelease.NewHandler(releaseService, profilesBroker, deliveryService).
+		RegisterRoutesWithV1Bridge(app, authService.RequireAuth(), cfg.DeliveryV1Bridge)
 	news.NewHandler(news.NewService(cfg.TelegramChannel)).
 		RegisterRoutes(app, authService.RequireAuth())
 

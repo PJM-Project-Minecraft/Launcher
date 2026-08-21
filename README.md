@@ -86,31 +86,14 @@ On successful provider response, the backend stores/updates the local user and r
 
 ## Project Profiles
 
-The launcher is project-oriented: players do not choose a custom game directory in v1. After login, the desktop app restores the saved JWT from the system keyring, loads active profiles from the backend, downloads the selected project profile into app data, verifies SHA-256 hashes, removes only files managed by the previous local manifest, and launches the profile command without using a shell.
+Профили и самообновление доставляются через Delivery v2: immutable signed
+manifest, content-addressed chunks и журналируемую установку. Для публикации WEB
+создаёт SFTP generation; полный managed-клиент загружается в `.upload` и только
+после завершения атомарно переименовывается в `.ready`. Ручных scan/drift и
+таймера тишины в v2 нет.
 
-Backend profile files are stored under:
-
-```text
-backend/storage/profiles/<profile-slug>/files/
-```
-
-In the dashboard this is shown as "Папка профиля". It is generated from the profile name and is only the safe folder name used on the backend.
-
-Upload project-specific files there over SFTP. Client mods go into:
-
-```text
-backend/storage/profiles/<profile-folder>/files/mods/
-```
-
-Configs go into `files/config/`, shaderpacks into `files/shaderpacks/`, and any other client files should keep the same relative path they need on the player machine.
-
-In the dashboard:
-
-1. Create or edit a profile.
-2. Choose the Minecraft version and loader.
-3. Click "Подготовить клиент и загрузчик" to download official Minecraft client files into the backend profile folder.
-4. Add your project mods/configs over SFTP.
-5. Click "Собрать manifest" so the launcher can download and verify everything.
+Архитектура, API, миграция, временный v1 bridge и операторский GC описаны в
+[`docs/MANIFEST_PIPELINE.md`](docs/MANIFEST_PIPELINE.md).
 
 NeoForge 1.20.1 uses the legacy `net.neoforged:forge` artifact; newer NeoForge uses `net.neoforged:neoforge`. For older Minecraft versions, use Forge instead.
 

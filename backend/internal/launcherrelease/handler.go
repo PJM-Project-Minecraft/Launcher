@@ -1,6 +1,7 @@
 package launcherrelease
 
 import (
+	"context"
 	"errors"
 	"mime/multipart"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/events"
+	"launcher-backend/internal/models"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -20,32 +22,56 @@ const releaseEvent = "launcher-release"
 type Handler struct {
 	service Service
 	broker  *events.Broker
+	v2      V2Publisher
+}
+
+type V2Publisher interface {
+	ImportLauncherRelease(context.Context, models.LauncherRelease) error
 }
 
 type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-func NewHandler(service Service, broker *events.Broker) Handler {
-	return Handler{service: service, broker: broker}
+func NewHandler(service Service, broker *events.Broker, publishers ...V2Publisher) Handler {
+	handler := Handler{service: service, broker: broker}
+	if len(publishers) > 0 {
+		handler.v2 = publishers[0]
+	}
+	return handler
 }
 
 func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
+	h.RegisterRoutesWithV1Bridge(app, authMiddleware, true)
+}
+
+func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber.Handler, v1Bridge bool) {
 	// Публичные: проверка и скачивание обновления работают до логина.
-	group := app.Group("/api/launcher")
-	group.Get("/update", h.checkUpdate)
-	group.Get("/download/:version/:platform", h.download)
+	if v1Bridge {
+		group := app.Group("/api/launcher")
+		group.Get("/update", h.checkUpdate)
+		group.Get("/download/:version/:platform", h.download)
+	}
 
 	// Публичная витрина скачивания для игроков (ссылка «Скачать с сайта» в боте).
 	app.Get("/download", h.downloadPage)
 	app.Get("/download/pjm.png", h.logo)
 
-	admin := app.Group("/api/admin/releases")
-	admin.Use(authMiddleware, auth.RequireAdmin)
-	admin.Get("/", h.list)
-	admin.Post("/", h.create)
-	admin.Patch("/:id", h.patch)
-	admin.Delete("/:id", h.delete)
+	if v1Bridge {
+		admin := app.Group("/api/admin/releases")
+		admin.Use(authMiddleware, auth.RequireAdmin)
+		admin.Get("/", h.list)
+		admin.Post("/", h.create)
+		admin.Patch("/:id", h.patch)
+		admin.Delete("/:id", h.delete)
+	}
+
+	adminV2 := app.Group("/api/v2/admin/launcher-releases")
+	adminV2.Use(authMiddleware, auth.RequireAdmin)
+	adminV2.Get("/", h.list)
+	adminV2.Post("/", h.create)
+	adminV2.Patch("/:id", h.patch)
+	adminV2.Delete("/:id", h.delete)
 }
 
 func (h Handler) notifyReleaseChanged() {
@@ -113,6 +139,12 @@ func (h Handler) create(c fiber.Ctx) error {
 	release, err := h.service.Create(c.Context(), req, files)
 	if err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: err.Error()})
+	}
+	if h.v2 != nil {
+		if err := h.v2.ImportLauncherRelease(c.Context(), release); err != nil {
+			_ = h.service.Delete(c.Context(), release.ID)
+			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Delivery v2 отклонил релиз: " + err.Error()})
+		}
 	}
 	h.notifyReleaseChanged()
 	return c.Status(http.StatusCreated).JSON(release)

@@ -113,3 +113,28 @@ func TestCreateRejectsBadVersion(t *testing.T) {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
 	}
 }
+
+func TestV1BridgeCanBeDisabledWithoutRemovingV2Admin(t *testing.T) {
+	service := newTestService(t)
+	app := fiber.New()
+	auth := func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
+		return c.Next()
+	}
+	NewHandler(service, nil).RegisterRoutesWithV1Bridge(app, auth, false)
+
+	legacy, err := app.Test(httptest.NewRequest("GET", "/api/launcher/update?platform=linux-x64&version=0.1.0", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.StatusCode != 404 {
+		t.Fatalf("legacy status = %d, want 404", legacy.StatusCode)
+	}
+	v2, err := app.Test(httptest.NewRequest("GET", "/api/v2/admin/launcher-releases/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2.StatusCode != 200 {
+		t.Fatalf("v2 admin status = %d, want 200", v2.StatusCode)
+	}
+}

@@ -61,6 +61,14 @@ func AutoMigrate(db *gorm.DB) error {
 		// Релизы лаунчера (автообновление).
 		&models.LauncherRelease{},
 		&models.LauncherReleaseFile{},
+		// Delivery v2: immutable releases, chunked CAS and durable jobs.
+		&models.DeliveryBlob{},
+		&models.ProfileRelease{},
+		&models.ProfileReleaseFile{},
+		&models.ProfileReleaseFileChunk{},
+		&models.LauncherDeliveryArtifact{},
+		&models.LauncherDeliveryArtifactChunk{},
+		&models.DeliveryJob{},
 		// Скриншоты экранов игроков (античит-запросы от админа).
 		&models.Screenshot{},
 		// Игровой прогресс PJM BaseMod (пишет мод, читают дашборд и бот).

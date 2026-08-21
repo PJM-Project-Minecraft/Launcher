@@ -27,13 +27,21 @@ var AllowedPlatforms = []string{"linux-x64", "windows-x64"}
 const maxReleaseFileSize = 200 << 20
 
 type Service struct {
-	db          *gorm.DB
-	storageRoot string
-	cache       *releaseCache
+	db                *gorm.DB
+	storageRoot       string
+	cache             *releaseCache
+	requireSignatures bool
 }
 
 func NewService(db *gorm.DB, storageRoot string) Service {
 	return Service{db: db, storageRoot: storageRoot, cache: &releaseCache{}}
+}
+
+// RequireSignatures makes every newly uploaded artifact fail closed. Existing
+// rows remain readable for the bounded v1 bridge, but cannot be republished.
+func (s Service) RequireSignatures() Service {
+	s.requireSignatures = true
+	return s
 }
 
 // releaseCache — TTL-кэш активных релизов. Публичные /download и
@@ -204,6 +212,10 @@ func (s Service) storeFile(releaseID, version string, file UploadedFile) (models
 	}
 
 	sig := strings.ToLower(strings.TrimSpace(file.Signature))
+	if s.requireSignatures && sig == "" {
+		_ = os.Remove(dst)
+		return models.LauncherReleaseFile{}, errors.New("для каждого бинарника обязательна Ed25519-подпись")
+	}
 	if sig != "" && !isHex128(sig) {
 		_ = os.Remove(dst)
 		return models.LauncherReleaseFile{}, errors.New("подпись Ed25519 должна быть 128 hex-символов")

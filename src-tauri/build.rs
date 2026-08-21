@@ -4,6 +4,7 @@ fn main() {
     // Публичный ключ подписи автообновления (option_env! в updater.rs): пересобрать
     // при смене, иначе во вшитом ключе останется старое/пустое значение.
     println!("cargo:rerun-if-env-changed=LAUNCHER_UPDATE_PUBKEY");
+    println!("cargo:rerun-if-env-changed=DELIVERY_MANIFEST_PUBKEY");
 
     tauri_build::build();
 }

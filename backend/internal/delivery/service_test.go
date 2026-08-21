@@ -1,0 +1,256 @@
+package delivery
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"launcher-backend/internal/models"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func testService(t *testing.T) (*Service, *gorm.DB) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "delivery.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&models.Profile{}, &models.DeliveryBlob{}, &models.ProfileRelease{},
+		&models.ProfileReleaseFile{}, &models.ProfileReleaseFileChunk{},
+		&models.DeliveryJob{}, &models.LauncherRelease{}, &models.LauncherReleaseFile{},
+		&models.LauncherDeliveryArtifact{}, &models.LauncherDeliveryArtifactChunk{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]byte, ed25519.SeedSize)
+	if _, err := rand.Read(seed); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	service, err := NewService(db, filepath.Join(root, "delivery"), filepath.Join(root, "profiles"), filepath.Join(root, "launcher"), hex.EncodeToString(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, db
+}
+
+func TestChunkerIsDeterministicAndBounded(t *testing.T) {
+	data := make([]byte, 19<<20)
+	for index := range data {
+		data[index] = byte(index*31 + index/97)
+	}
+	collect := func() []chunkData {
+		result := make([]chunkData, 0)
+		if err := splitChunks(bytes.NewReader(data), func(chunk chunkData) error { result = append(result, chunk); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	left, right := collect(), collect()
+	if len(left) < 3 || len(left) != len(right) {
+		t.Fatalf("chunk counts: %d and %d", len(left), len(right))
+	}
+	var total int
+	for index := range left {
+		if left[index].Hash != right[index].Hash {
+			t.Fatalf("chunk %d is not deterministic", index)
+		}
+		if len(left[index].Data) > chunkMax {
+			t.Fatalf("chunk %d exceeds max", index)
+		}
+		if index < len(left)-1 && len(left[index].Data) < chunkMin {
+			t.Fatalf("chunk %d below min", index)
+		}
+		total += len(left[index].Data)
+	}
+	if total != len(data) {
+		t.Fatalf("chunk bytes = %d, want %d", total, len(data))
+	}
+}
+
+func TestPublishProfileActivatesSignedImmutableRelease(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "neoforge", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "mods", "example.jar"), bytes.Repeat([]byte("content"), 300000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, release, err := service.Manifest(context.Background(), profile.ID, releaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !release.IsActive || release.ManifestSignature == "" {
+		t.Fatalf("release = %+v", release)
+	}
+	signature, err := hex.DecodeString(release.ManifestSignature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(service.signingKey.Public().(ed25519.PublicKey), body, signature) {
+		t.Fatal("manifest signature is invalid")
+	}
+	var manifest ProfileManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != 2 || manifest.ReleaseID != releaseID || len(manifest.Files) != 1 || len(manifest.Files[0].Chunks) == 0 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	chunk := manifest.Files[0].Chunks[0]
+	path, size, err := service.Blob(context.Background(), profile.ID, chunk.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != chunk.Size {
+		t.Fatalf("blob size = %d, want %d", size, chunk.Size)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishRepairsCorruptCASBlobWithSameSize(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	payload := bytes.Repeat([]byte("trusted"), 300000)
+	if err := os.WriteFile(filepath.Join(source, "client.jar"), payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _, err := service.Manifest(context.Background(), profile.ID, releaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest ProfileManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	chunk := manifest.Files[0].Chunks[0]
+	if err := os.WriteFile(service.blobPath(chunk.SHA256), bytes.Repeat([]byte("x"), int(chunk.Size)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {}); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := os.ReadFile(service.blobPath(chunk.SHA256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(repaired)
+	if hex.EncodeToString(digest[:]) != chunk.SHA256 {
+		t.Fatal("corrupt CAS blob was not repaired")
+	}
+}
+
+func TestReadyRenameIsTheOnlyPublicationSignal(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	generation, upload, err := service.CreateDraft(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upload, "client.jar"), []byte("complete"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	watcher := NewWatcher(service, nil)
+	watcher.reconcile()
+	var count int64
+	db.Model(&models.ProfileRelease{}).Count(&count)
+	if count != 0 {
+		t.Fatal(".upload directory was published")
+	}
+	ready := filepath.Join(filepath.Dir(upload), generation+".ready")
+	if err := os.Rename(upload, ready); err != nil {
+		t.Fatal(err)
+	}
+	watcher.reconcile()
+	db.Model(&models.ProfileRelease{}).Count(&count)
+	if count != 1 {
+		t.Fatalf("release count = %d", count)
+	}
+}
+
+func TestGarbageCollectRetainsNewestReleaseAndReferencedBlobs(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "neoforge", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	file := filepath.Join(source, "client.jar")
+	if err := os.WriteFile(file, bytes.Repeat([]byte("old"), 500000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBody, _, err := service.Manifest(context.Background(), profile.ID, oldID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldManifest ProfileManifest
+	if err := json.Unmarshal(oldBody, &oldManifest); err != nil {
+		t.Fatal(err)
+	}
+	oldBlob := oldManifest.Files[0].Chunks[0].SHA256
+
+	if err := os.WriteFile(file, bytes.Repeat([]byte("new"), 500000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	newID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.GarbageCollect(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ProfileReleases != 1 || result.Blobs == 0 {
+		var references int64
+		db.Model(&models.ProfileReleaseFileChunk{}).Where("hash_sha256 = ?", oldBlob).Count(&references)
+		var blob models.DeliveryBlob
+		blobErr := db.First(&blob, "hash_sha256 = ?", oldBlob).Error
+		t.Fatalf("gc result = %+v, old references=%d, old blob=%+v, blob err=%v", result, references, blob, blobErr)
+	}
+	if _, _, err := service.Manifest(context.Background(), profile.ID, oldID); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("old release still exists: %v", err)
+	}
+	if _, _, err := service.Manifest(context.Background(), profile.ID, newID); err != nil {
+		t.Fatalf("new release removed: %v", err)
+	}
+	if _, err := os.Stat(service.blobPath(oldBlob)); !os.IsNotExist(err) {
+		t.Fatalf("old blob was not removed: %v", err)
+	}
+}

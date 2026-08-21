@@ -50,6 +50,31 @@ func TestBundleDownloadSupportsRangeAndETag(t *testing.T) {
 	}
 }
 
+func TestV1DeliveryRoutesCanBeDisabledWithoutRemovingProfileAdmin(t *testing.T) {
+	service := newTestService(t)
+	app := fiber.New()
+	handler := NewHandler(service, nil)
+	handler.RegisterRoutesWithV1Bridge(app, func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
+		return c.Next()
+	}, false)
+
+	legacy, err := app.Test(httptest.NewRequest("GET", "/api/profiles/profile/manifest", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.StatusCode != 404 {
+		t.Fatalf("legacy status = %d, want 404", legacy.StatusCode)
+	}
+	admin, err := app.Test(httptest.NewRequest("GET", "/api/admin/profiles/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.StatusCode != 200 {
+		t.Fatalf("admin status = %d, want 200", admin.StatusCode)
+	}
+}
+
 func TestManifestSupportsConditionalRequest(t *testing.T) {
 	service := newTestService(t)
 	profile, err := service.Create(context.Background(), ProfileRequest{

@@ -15,7 +15,7 @@
 #   2) Ключ офлайн (безопаснее): Settings → Variables → Actions → LAUNCHER_UPDATE_PUBKEY =
 #      публичный ключ (hex, не секрет). CI вшивает его, но НЕ подписывает; скачай бинарник
 #      из артефакта и подпиши локально: `updatesign sign -key <ключ> <файл>`.
-# Без секрета и без variable бинарник соберётся БЕЗ проверки подписи (обновления по SHA).
+# Без ключа автообновления или ключа delivery manifest release-сборка запрещена.
 name: Build Launcher Release
 
 on:
@@ -108,15 +108,25 @@ jobs:
             echo "pubkey=$PUBVAR" >> "$GITHUB_OUTPUT"
             echo "Секрета нет — вшиваю pubkey из variables, подпишешь бинарник локально. pubkey=$PUBVAR"
           else
-            echo "have_key=0" >> "$GITHUB_OUTPUT"
-            echo "pubkey=" >> "$GITHUB_OUTPUT"
-            echo "Ни секрета, ни variable — сборка БЕЗ проверки подписи."
+            echo "Не задан LAUNCHER_SIGNING_KEY или LAUNCHER_UPDATE_PUBKEY." >&2
+            exit 1
+          fi
+
+      - name: Validate delivery manifest pubkey
+        shell: bash
+        env:
+          DELIVERY_MANIFEST_PUBKEY: ${{ vars.DELIVERY_MANIFEST_PUBKEY }}
+        run: |
+          if [[ ! "$DELIVERY_MANIFEST_PUBKEY" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "DELIVERY_MANIFEST_PUBKEY должен содержать 64 lowercase hex-символа." >&2
+            exit 1
           fi
 
       - name: Build release
         env:
           LAUNCHER_DEFAULT_API_URL: ${{ inputs.api_url }}
           LAUNCHER_UPDATE_PUBKEY: ${{ steps.resolve.outputs.pubkey }}
+          DELIVERY_MANIFEST_PUBKEY: ${{ vars.DELIVERY_MANIFEST_PUBKEY }}
         # Только Tauri CLI встраивает frontendDist вместо devUrl. Голый cargo build
         # оставляет WebView на 127.0.0.1:1420 и непригоден для player-релиза.
         run: npm run tauri -- build --no-bundle --runner ${{ matrix.runner }} --target ${{ matrix.target }}
@@ -155,6 +165,16 @@ jobs:
             echo "Публичный ключ вшит в бинарник ✓"
           else
             echo "ОШИБКА: публичный ключ не вшит в бинарник." >&2
+            exit 1
+          fi
+
+      - name: Verify delivery manifest pubkey embedded
+        shell: bash
+        run: |
+          if grep -aq "${{ vars.DELIVERY_MANIFEST_PUBKEY }}" "dist/${{ matrix.artifact_name }}"; then
+            echo "Ключ delivery manifest вшит в бинарник ✓"
+          else
+            echo "ОШИБКА: ключ delivery manifest не вшит в бинарник." >&2
             exit 1
           fi
 

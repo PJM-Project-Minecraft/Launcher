@@ -40,6 +40,16 @@ func createRelease(t *testing.T, s Service, version string, mandatory bool) mode
 	return release
 }
 
+func TestRequiredSignatureRejectsUnsignedArtifact(t *testing.T) {
+	s := newTestService(t).RequireSignatures()
+	_, err := s.Create(context.Background(), CreateRequest{Version: "1.0.0"}, []UploadedFile{{
+		Platform: "linux-x64", FileName: "launcher", Reader: bytes.NewReader([]byte("binary")),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "обязательна") {
+		t.Fatalf("unsigned artifact error = %v", err)
+	}
+}
+
 func TestCheckUpdate(t *testing.T) {
 	s := newTestService(t)
 	createRelease(t, s, "0.2.0", false)

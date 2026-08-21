@@ -16,9 +16,35 @@ pub struct NewsItem {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryViewState {
+    pub phase: String,
+    pub message: String,
+    pub version: String,
+    pub progress: f32,
+    pub mandatory: bool,
+    pub retryable: bool,
+}
+
+impl Default for DeliveryViewState {
+    fn default() -> Self {
+        Self {
+            phase: "idle".into(),
+            message: String::new(),
+            version: String::new(),
+            progress: 0.0,
+            mandatory: false,
+            retryable: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiState {
+    pub launcher_delivery: DeliveryViewState,
+    pub profile_delivery: DeliveryViewState,
     pub api_url: String,
     pub server_names: Vec<String>,
     pub server_index: i32,
@@ -37,10 +63,6 @@ pub struct UiState {
     pub is_slim: bool,
     pub is_syncing: bool,
     pub has_profile: bool,
-    pub profile_installed: bool,
-    pub profile_update_available: bool,
-    pub profile_state_checking: bool,
-    pub profile_state_unknown: bool,
     pub download_panel_visible: bool,
     pub selected_profile_name: String,
     pub selected_profile_version: String,
@@ -62,10 +84,6 @@ pub struct UiState {
     pub install_folder: String,
     pub news_items: Vec<NewsItem>,
     pub anticheat_alert: String,
-    pub update_ready: bool,
-    pub update_mandatory: bool,
-    pub update_version: String,
-    pub update_status: String,
     pub policy_visible: bool,
     pub policy_accepting: bool,
     pub policy_text: String,
@@ -76,6 +94,8 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            launcher_delivery: DeliveryViewState::default(),
+            profile_delivery: DeliveryViewState::default(),
             api_url: String::new(),
             server_names: Vec::new(),
             server_index: 0,
@@ -94,10 +114,6 @@ impl Default for UiState {
             is_slim: false,
             is_syncing: false,
             has_profile: false,
-            profile_installed: false,
-            profile_update_available: false,
-            profile_state_checking: false,
-            profile_state_unknown: false,
             download_panel_visible: false,
             selected_profile_name: String::new(),
             selected_profile_version: "-".to_string(),
@@ -119,10 +135,6 @@ impl Default for UiState {
             install_folder: String::new(),
             news_items: Vec::new(),
             anticheat_alert: String::new(),
-            update_ready: false,
-            update_mandatory: false,
-            update_version: String::new(),
-            update_status: String::new(),
             policy_visible: false,
             policy_accepting: false,
             policy_text: String::new(),
@@ -275,8 +287,6 @@ impl AppWindow {
     string_setter!(set_discrete_gpu_label, discrete_gpu_label);
     string_setter!(set_install_folder, install_folder);
     string_setter!(set_anticheat_alert, anticheat_alert);
-    string_setter!(set_update_version, update_version);
-    string_setter!(set_update_status, update_status);
     string_setter!(set_policy_text, policy_text);
     string_setter!(set_policy_version_label, policy_version_label);
 
@@ -289,10 +299,6 @@ impl AppWindow {
     value_setter!(set_is_slim, is_slim, bool);
     value_setter!(set_is_syncing, is_syncing, bool);
     value_setter!(set_has_profile, has_profile, bool);
-    value_setter!(set_profile_installed, profile_installed, bool);
-    value_setter!(set_profile_update_available, profile_update_available, bool);
-    value_setter!(set_profile_state_checking, profile_state_checking, bool);
-    value_setter!(set_profile_state_unknown, profile_state_unknown, bool);
     value_setter!(set_download_panel_visible, download_panel_visible, bool);
     value_setter!(set_download_progress, download_progress, f32);
     value_setter!(set_settings_visible, settings_visible, bool);
@@ -302,8 +308,6 @@ impl AppWindow {
     value_setter!(set_discrete_gpu_available, discrete_gpu_available, bool);
     value_setter!(set_use_discrete_gpu, use_discrete_gpu, bool);
     value_setter!(set_discord_rpc_enabled, discord_rpc_enabled, bool);
-    value_setter!(set_update_ready, update_ready, bool);
-    value_setter!(set_update_mandatory, update_mandatory, bool);
     value_setter!(set_policy_visible, policy_visible, bool);
     value_setter!(set_policy_accepting, policy_accepting, bool);
     value_setter!(set_policy_version, policy_version, i32);
@@ -324,6 +328,14 @@ impl AppWindow {
         self.update(|state| state.news_items = items);
     }
 
+    pub fn set_launcher_delivery(&self, state: DeliveryViewState) {
+        self.update(|current| current.launcher_delivery = state);
+    }
+
+    pub fn set_profile_delivery(&self, state: DeliveryViewState) {
+        self.update(|current| current.profile_delivery = state);
+    }
+
     pub fn get_policy_accepting(&self) -> bool {
         self.snapshot().policy_accepting
     }
@@ -333,8 +345,8 @@ impl AppWindow {
     pub fn get_is_syncing(&self) -> bool {
         self.snapshot().is_syncing
     }
-    pub fn get_profile_update_available(&self) -> bool {
-        self.snapshot().profile_update_available
+    pub fn get_profile_delivery_phase(&self) -> String {
+        self.snapshot().profile_delivery.phase
     }
     pub fn get_policy_text(&self) -> String {
         self.snapshot().policy_text

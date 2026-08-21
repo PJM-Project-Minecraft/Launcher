@@ -6,13 +6,11 @@
 
 use std::cmp::Ordering;
 use std::fs;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Версия лаунчера, зашитая при сборке (Cargo.toml).
@@ -31,14 +29,24 @@ pub const VERSION_MARKER: &str = concat!("PMLVER=", env!("CARGO_PKG_VERSION"), "
 /// Публичный ключ Ed25519 для проверки подписи обновления, вшивается при сборке
 /// (`LAUNCHER_UPDATE_PUBKEY` = 64 hex-символа). Задан → подпись ОБЯЗАТЕЛЬНА и
 /// проверяется (fail-closed); не задан (dev-сборка) → как раньше, только SHA-256.
-fn update_pubkey() -> Option<VerifyingKey> {
-    let hex_key = option_env!("LAUNCHER_UPDATE_PUBKEY")?.trim();
+fn update_pubkey() -> Result<Option<VerifyingKey>, String> {
+    let hex_key = option_env!("LAUNCHER_UPDATE_PUBKEY")
+        .map(str::trim)
+        .unwrap_or_default();
     if hex_key.is_empty() {
-        return None;
+        if cfg!(debug_assertions) {
+            return Ok(None);
+        }
+        return Err("Release-сборка не содержит ключ подписи обновлений.".to_string());
     }
-    let bytes = hex::decode(hex_key).ok()?;
-    let arr: [u8; 32] = bytes.try_into().ok()?;
-    VerifyingKey::from_bytes(&arr).ok()
+    let bytes = hex::decode(hex_key)
+        .map_err(|_| "В сборке повреждён ключ подписи обновлений.".to_string())?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "В сборке повреждён ключ подписи обновлений.".to_string())?;
+    VerifyingKey::from_bytes(&arr)
+        .map(Some)
+        .map_err(|_| "В сборке повреждён ключ подписи обновлений.".to_string())
 }
 
 /// Платформа в терминах бэкенда (storage/releases/<version>/<platform>).
@@ -50,7 +58,7 @@ pub fn platform() -> &'static str {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub update_available: bool,
@@ -59,12 +67,13 @@ pub struct UpdateInfo {
     #[serde(default)]
     pub mandatory: bool,
     #[serde(default)]
-    pub download_url: String,
-    #[serde(default)]
     pub sha256: String,
     /// hex Ed25519-подпись бинарника (пусто — релиз без подписи).
     #[serde(default)]
     pub signature: String,
+    pub release_id: String,
+    pub changelog: String,
+    pub artifact: crate::delivery::ReleaseFile,
 }
 
 /// Посегментное сравнение версий "X.Y.Z"; отсутствующие и нечисловые
@@ -95,30 +104,34 @@ pub fn is_upgrade(latest_version: &str) -> bool {
 
 /// Запрашивает у бэкенда сведения об обновлении для текущей версии и платформы.
 pub fn check_update(api_url: &str) -> Result<UpdateInfo, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-launcher-build-marker",
+        reqwest::header::HeaderValue::from_static(VERSION_MARKER),
+    );
     let client = crate::hardened_backend_builder()
         .timeout(Duration::from_secs(30))
+        .default_headers(headers)
         .build()
         .map_err(|_| "Не удалось создать HTTP-клиент.".to_string())?;
-    let url = format!(
-        "{}/api/launcher/update?platform={}&version={}",
-        api_url.trim_end_matches('/'),
-        platform(),
-        CURRENT_VERSION
-    );
-    let response = client
-        .get(url)
-        .header("X-Launcher-Build", VERSION_MARKER)
-        .send()
-        .map_err(|_| "Сервер обновлений недоступен.".to_string())?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Проверка обновлений: HTTP {}",
-            response.status().as_u16()
-        ));
-    }
-    response
-        .json::<UpdateInfo>()
-        .map_err(|_| "Некорректный ответ сервера обновлений.".to_string())
+    let Some(manifest) =
+        crate::delivery::fetch_launcher_manifest(&client, api_url, platform(), CURRENT_VERSION)?
+    else {
+        return Ok(UpdateInfo {
+            latest_version: CURRENT_VERSION.to_string(),
+            ..Default::default()
+        });
+    };
+    Ok(UpdateInfo {
+        update_available: true,
+        latest_version: manifest.version,
+        mandatory: manifest.mandatory,
+        sha256: manifest.artifact.sha256.clone(),
+        signature: manifest.artifact_signature,
+        release_id: manifest.release_id,
+        changelog: manifest.changelog,
+        artifact: manifest.artifact,
+    })
 }
 
 fn exe_path() -> Result<PathBuf, String> {
@@ -135,49 +148,34 @@ fn staging_path(exe: &Path) -> PathBuf {
 /// Возвращает путь к подготовленному файлу. Ошибка создания временного файла
 /// означает, что каталог лаунчера не доступен на запись (fallback на ручное
 /// обновление).
-pub fn download_and_stage(api_url: &str, info: &UpdateInfo) -> Result<PathBuf, String> {
+pub fn download_and_stage(
+    api_url: &str,
+    info: &UpdateInfo,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<PathBuf, String> {
     let exe = exe_path()?;
     let staged = staging_path(&exe);
-    let mut out = fs::File::create(&staged).map_err(|_| {
-        "Каталог лаунчера недоступен для записи — скачайте новую версию вручную.".to_string()
-    })?;
-
     let client = crate::hardened_backend_builder()
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Duration::from_secs(20))
         .build()
         .map_err(|_| "Не удалось создать HTTP-клиент.".to_string())?;
-    let url = format!("{}{}", api_url.trim_end_matches('/'), info.download_url);
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|_| "Не удалось скачать обновление.".to_string())?;
-    if !response.status().is_success() {
-        let _ = fs::remove_file(&staged);
-        return Err(format!(
-            "Скачивание обновления: HTTP {}",
-            response.status().as_u16()
-        ));
-    }
-
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = match response.read(&mut buffer) {
-            Ok(read) => read,
-            Err(_) => {
-                let _ = fs::remove_file(&staged);
-                return Err("Обрыв скачивания обновления.".to_string());
-            }
-        };
-        if read == 0 {
-            break;
-        }
-        if out.write_all(&buffer[..read]).is_err() {
-            let _ = fs::remove_file(&staged);
-            return Err("Не удалось записать обновление на диск.".to_string());
-        }
-    }
-    drop(out);
+    let cache_root = exe
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".launcher-chunks-v2");
+    crate::delivery::reconstruct_file(
+        &client,
+        api_url,
+        None,
+        &crate::delivery::Scope::Launcher {
+            release_id: info.release_id.clone(),
+        },
+        &cache_root,
+        &info.artifact,
+        &staged,
+        progress,
+    )?;
 
     // SHA-256 + подпись. Подпись — корень доверия: SHA приходит тем же каналом, что и
     // файл, и один сам по себе подлинность не доказывает (MITM/скомпром. зеркало
@@ -226,7 +224,7 @@ fn verify_declares_version(data: &[u8], version: &str) -> Result<(), String> {
 /// ОБЯЗАТЕЛЬНА (fail-closed: сервер не «снимет» защиту, прислав пустую подпись).
 /// Ключа нет (dev-сборка) → подпись не требуется.
 fn verify_signature(data: &[u8], sig_hex: &str) -> Result<(), String> {
-    let Some(pubkey) = update_pubkey() else {
+    let Some(pubkey) = update_pubkey()? else {
         return Ok(());
     };
     let sig_bytes = hex::decode(sig_hex.trim())

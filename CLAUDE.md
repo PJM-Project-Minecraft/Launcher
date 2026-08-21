@@ -72,6 +72,8 @@ docker run --rm \
 scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 # либо переменная LAUNCHER_API_URL при cargo build/run
 ```
+Release-сборка также требует `LAUNCHER_UPDATE_PUBKEY` (либо `--signing-key`) и
+`DELIVERY_MANIFEST_PUBKEY`; без любого из ключей сборка fail-closed.
 Версия бампится одновременно в `src-tauri/Cargo.toml` и `src-tauri/tauri.conf.json` →
 обязательно `cargo update -p project-minecraft-launcher` после правки.
 
@@ -209,12 +211,13 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 - `anticheat` — рычаг enforcement: `confirm` от агента помечает игровую сессию `Verified`.
   Без confirm `/join` возвращает 403 (игрок не попадёт на сервер). Подписывает launch-token
   отдельным `ANTICHEAT_SECRET`. Детекты → HWID-бан + алерты в Telegram.
-- `profiles` — проекты-сборки. Файлы профиля: `backend/storage/profiles/<slug>/files/` (моды → `.../files/mods/`).
-  Реалтайм через SSE-брокер (`events.NewBroker`) на `/api/profiles/events`.
-  **Гоча:** файлы кладутся в storage по SFTP мимо бэкенда — после любого изменения обязательно «Сканировать файлы»
-  в дашборде, иначе манифест в БД расходится со storage и лаунчеры игроков падают на Hash mismatch.
-  Дрифт детектится `GET /api/admin/profiles/:id/drift` (сравнение путей/размеров/mtime без хэширования),
-  дашборд показывает предупреждение в секции «Сборка».
+- `delivery` — единый v2-контур профилей и самообновления: immutable manifest,
+  FastCDC 1/4/8 МиБ, SHA-256 CAS, durable jobs и атомарный SFTP rename
+  `.upload → .ready`. Ручные scan/drift, bundle и прямые file routes доступны
+  только при временном `DELIVERY_V1_BRIDGE=true`. Подробности —
+  `docs/MANIFEST_PIPELINE.md`.
+- `profiles` — CRUD конфигурации проектов и общий SSE/WebSocket change-signal.
+  Долговечный snapshot профилей/заданий находится в HTTP API v2.
 - `news` — новости из Telegram-канала.
 - `adminapi` — управление пользователями для дашборда, плюс игровые профили PJM BaseMod:
   `GET /api/admin/game/players` (витрина XP/рангов) и `POST /api/admin/game/players/:uuid/adjust`
@@ -235,9 +238,10 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
   `/api/admin/shop/items`; `ShopItem.delivery` снимком создаёт immutable `Delivery`
   при оплате. Ручная выдача закрывает pending, ACK мода автоматически переводит
   заказ в `issued`. Денежные значения хранятся в копейках, `order_id` — UUID.
-- `launcherrelease` — релизы лаунчера (автообновление). Бинарники в `backend/storage/releases/<version>/<platform>/`,
-  заливка через дашборд (multipart, лимит 200 МБ/файл на уровне Fiber). Публичные `/api/launcher/update|download`;
-  событие `launcher-release` идёт через общий SSE-брокер профилей. Обязательные релизы: anticheat handshake/init
+- `launcherrelease` — метаданные и оригинальные бинарники релизов лаунчера;
+  `delivery` импортирует их в CAS и раздаёт `/api/v2/launcher/releases/*`.
+  Новые загрузки требуют Ed25519-подпись. Старые `/api/launcher/update|download`
+  существуют только при v1 bridge. Событие `launcher-release` идёт через общий SSE-брокер профилей. Обязательные релизы: anticheat handshake/init
   отвечает 426 клиентам ниже mandatory-версии (`X-Launcher-Version`).
 - `policy` — политика конфиденциальности. Роуты: `GET /api/policy` (текст + version-константа),
   `POST /api/policy/accept` (JWT, записывает PolicyConsent), `GET /privacy` (HTML-страница).

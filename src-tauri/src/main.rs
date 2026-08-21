@@ -22,11 +22,13 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
 
-use ui_bridge::{invoke_from_ui, AppWindow, NewsItem, SharedString, UiState, Weak};
+use ui_bridge::{
+    invoke_from_ui, AppWindow, DeliveryViewState, NewsItem, SharedString, UiState, Weak,
+};
 
 mod anticheat;
 mod artifacts;
-mod bundle;
+mod delivery;
 mod discord_rpc;
 mod gpu;
 mod install;
@@ -40,7 +42,6 @@ const JAVA_RUNTIME_INDEX_URL: &str =
 const DEFAULT_MEMORY_GB: i32 = 8;
 const MIN_MEMORY_GB: i32 = 2;
 const MAX_MEMORY_GB: i32 = 64;
-static MANIFEST_CACHE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Зеркала бэкенда: игрок выбирает на окне входа, если основной домен недоступен.
 /// Первым пунктом всегда идёт вшитый при сборке URL («Основной»), сюда — только
@@ -280,10 +281,37 @@ fn spawn_update_check(app_weak: Weak<AppWindow>, config: AppConfig) {
 fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc<UpdateShared>) {
     let info = match updater::check_update(&config.api_url()) {
         Ok(info) => info,
-        // Сервер недоступен — тихо ждём следующего триггера (старт/SSE/30 мин).
-        Err(_) => return,
+        Err(message) => {
+            let app_weak = app_weak.clone();
+            let _ = invoke_from_ui(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_launcher_delivery(DeliveryViewState {
+                        phase: "failed".into(),
+                        message,
+                        version: String::new(),
+                        progress: 0.0,
+                        mandatory: false,
+                        retryable: true,
+                    });
+                }
+            });
+            return;
+        }
     };
     if !info.update_available {
+        let app_weak = app_weak.clone();
+        let _ = invoke_from_ui(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_launcher_delivery(DeliveryViewState {
+                    phase: "current".into(),
+                    message: "Установлена актуальная версия".into(),
+                    version: updater::CURRENT_VERSION.into(),
+                    progress: 1.0,
+                    mandatory: false,
+                    retryable: false,
+                });
+            }
+        });
         return;
     }
     // Клиентский guard от навязанного даунгрейда: не откатываемся на не-новее версию,
@@ -304,27 +332,45 @@ fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc
         })
         .unwrap_or(false);
     if already_staged {
-        set_update_ui(app_weak, &info, true, String::new());
+        set_update_ui(app_weak, &info, "ready", 1.0, info.changelog.clone(), false);
         return;
     }
 
     set_update_ui(
         app_weak,
         &info,
-        false,
+        "downloading",
+        0.0,
         format!("Скачивается обновление {}…", info.latest_version),
+        false,
     );
 
-    match updater::download_and_stage(&config.api_url(), &info) {
+    let progress_app = app_weak.clone();
+    let progress_info = info.clone();
+    match updater::download_and_stage(&config.api_url(), &info, &move |done, total| {
+        let ratio = if total == 0 {
+            0.0
+        } else {
+            done as f32 / total as f32
+        };
+        set_update_ui(
+            &progress_app,
+            &progress_info,
+            "downloading",
+            ratio,
+            format!("Получено chunks: {done} / {total}"),
+            false,
+        );
+    }) {
         Ok(staged_path) => {
             if let Ok(mut staged) = shared.staged.lock() {
                 *staged = Some((info.clone(), staged_path));
             }
-            set_update_ui(app_weak, &info, true, String::new());
+            set_update_ui(app_weak, &info, "ready", 1.0, info.changelog.clone(), false);
         }
         Err(message) => {
             // Ошибка остаётся в баннере; повтор — по следующему триггеру.
-            set_update_ui(app_weak, &info, false, message);
+            set_update_ui(app_weak, &info, "failed", 0.0, message, true);
         }
     }
 }
@@ -333,18 +379,25 @@ fn run_update_check(app_weak: &Weak<AppWindow>, config: &AppConfig, shared: &Arc
 fn set_update_ui(
     app_weak: &Weak<AppWindow>,
     info: &updater::UpdateInfo,
-    ready: bool,
-    status: String,
+    phase: &str,
+    progress: f32,
+    message: String,
+    retryable: bool,
 ) {
     let app_weak = app_weak.clone();
     let version = info.latest_version.clone();
     let mandatory = info.mandatory;
+    let phase = phase.to_string();
     let _ = invoke_from_ui(move || {
         if let Some(app) = app_weak.upgrade() {
-            app.set_update_ready(ready);
-            app.set_update_mandatory(mandatory);
-            app.set_update_version(version.into());
-            app.set_update_status(status.into());
+            app.set_launcher_delivery(DeliveryViewState {
+                phase,
+                message,
+                version,
+                progress,
+                mandatory,
+                retryable,
+            });
         }
     });
 }
@@ -358,25 +411,32 @@ fn register_update_restart_handler(app: &AppWindow) {
         let Some((info, staged_path)) = staged else {
             return;
         };
+        if let Some(app) = app_weak.upgrade() {
+            app.set_launcher_delivery(DeliveryViewState {
+                phase: "applying".into(),
+                message: "Устанавливаем обновление".into(),
+                version: info.latest_version.clone(),
+                progress: 1.0,
+                mandatory: info.mandatory,
+                retryable: false,
+            });
+        }
         if let Err(message) = updater::apply_and_restart(&staged_path, &info) {
             // Подмена не удалась: сбрасываем staged (файл мог быть повреждён).
             if let Ok(mut staged) = shared.staged.lock() {
                 *staged = None;
             }
             if let Some(app) = app_weak.upgrade() {
-                app.set_update_ready(false);
-                app.set_update_mandatory(info.mandatory);
-                app.set_update_status(message.into());
+                app.set_launcher_delivery(DeliveryViewState {
+                    phase: "failed".into(),
+                    message,
+                    version: info.latest_version.clone(),
+                    progress: 0.0,
+                    mandatory: info.mandatory,
+                    retryable: true,
+                });
             }
         }
-    });
-}
-
-/// Страховочный фоновый опрос обновлений раз в 30 минут (SSE — основной канал).
-fn start_periodic_update_check(app_weak: Weak<AppWindow>, config: AppConfig) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(30 * 60));
-        spawn_update_check(app_weak.clone(), config.clone());
     });
 }
 
@@ -424,6 +484,12 @@ struct ProfileSummary {
     game_version: String,
     #[serde(default)]
     is_active: bool,
+    #[serde(default)]
+    active_release_id: String,
+    #[serde(default)]
+    manifest_sha256: String,
+    #[serde(default)]
+    manifest_signature: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -440,14 +506,14 @@ struct NewsSummary {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
+    #[serde(default)]
+    release_id: String,
     profile: ManifestProfile,
     files: Vec<ManifestFile>,
     #[serde(default)]
     preserve_paths: Vec<String>,
     file_count: usize,
     total_size: i64,
-    #[serde(default)]
-    bundle: Option<bundle::BundleInfo>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -477,15 +543,13 @@ struct ManifestProfile {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ManifestFile {
-    id: String,
-    name: String,
     path: String,
-    download_url: String,
     hash_sha256: String,
     size: i64,
-    file_type: String,
     #[serde(default)]
     executable: bool,
+    #[serde(default)]
+    chunks: Vec<delivery::ChunkRef>,
 }
 
 type JavaRuntimeIndex = HashMap<String, HashMap<String, Vec<JavaRuntimeRelease>>>;
@@ -747,7 +811,6 @@ fn initialize_launcher(app: &AppWindow) {
     register_play_handler(app, config.clone(), state.clone(), migration_active);
     register_update_restart_handler(app);
     spawn_update_check(app.as_weak(), config.clone());
-    start_periodic_update_check(app.as_weak(), config.clone());
     restore_saved_session(
         app,
         config,
@@ -1340,6 +1403,19 @@ fn register_play_handler(
                             );
                         }
                         Err(message) => {
+                            let delivery_message = message
+                                .lines()
+                                .next()
+                                .unwrap_or("Неизвестная ошибка")
+                                .to_string();
+                            app.set_profile_delivery(DeliveryViewState {
+                                phase: "failed".into(),
+                                message: delivery_message,
+                                version: profile.active_release_id.clone(),
+                                progress: 0.0,
+                                mandatory: false,
+                                retryable: true,
+                            });
                             if let Some(alert) = message.strip_prefix(anticheat::kick::KICK_PREFIX) {
                                 // Игру закрыл античит — полноэкранное уведомление.
                                 app.set_download_panel_visible(false);
@@ -1866,41 +1942,45 @@ fn set_profile_ui(app: &AppWindow, selected: Option<&ProfileSummary>) {
     } else {
         app.set_has_profile(false);
         app.set_profile_status("Нет профилей".into());
-        app.set_profile_installed(false);
-        app.set_profile_update_available(false);
-        app.set_profile_state_checking(false);
-        app.set_profile_state_unknown(false);
         app.set_selected_profile_name(SharedString::default());
         app.set_selected_profile_version("-".into());
     }
 }
 
 fn set_profile_install_state(app: &AppWindow, state: ProfileInstallState) {
-    app.set_profile_state_checking(state == ProfileInstallState::Checking);
-    app.set_profile_state_unknown(state == ProfileInstallState::Unknown);
-    app.set_profile_installed(matches!(
-        state,
-        ProfileInstallState::Ready
-            | ProfileInstallState::UpdateAvailable
-            | ProfileInstallState::Unknown
-    ));
-    app.set_profile_update_available(state == ProfileInstallState::UpdateAvailable);
-    app.set_profile_status(
-        match state {
-            ProfileInstallState::Checking => "Проверяем файлы",
-            ProfileInstallState::Missing => "Не установлен",
-            ProfileInstallState::UpdateAvailable => "Доступно обновление",
-            ProfileInstallState::Ready => "Готов к запуску",
-            ProfileInstallState::Unknown => "Проверка недоступна",
-        }
-        .into(),
-    );
+    let message = match state {
+        ProfileInstallState::Checking => "Проверяем файлы",
+        ProfileInstallState::Missing => "Не установлен",
+        ProfileInstallState::UpdateAvailable => "Доступно обновление",
+        ProfileInstallState::Ready => "Готов к запуску",
+        ProfileInstallState::Unknown => "Проверка недоступна",
+    };
+    app.set_profile_status(message.into());
+    let phase = match state {
+        ProfileInstallState::Checking => "checking",
+        ProfileInstallState::Missing => "missing",
+        ProfileInstallState::UpdateAvailable => "updateAvailable",
+        ProfileInstallState::Ready => "current",
+        ProfileInstallState::Unknown => "failed",
+    };
+    app.set_profile_delivery(DeliveryViewState {
+        phase: phase.into(),
+        message: message.into(),
+        version: String::new(),
+        progress: if state == ProfileInstallState::Ready {
+            1.0
+        } else {
+            0.0
+        },
+        mandatory: false,
+        retryable: matches!(state, ProfileInstallState::Unknown),
+    });
 }
 
 /// После входа и каждого серверного события сверяет локальную сборку с актуальным
 /// manifest. Неизменённые с прошлого полного аудита файлы проверяются по размеру
 /// и mtime; SHA-256 пересчитывается только для изменившихся файлов. Перед запуском
-/// игры `collect_files_to_download` по-прежнему выполняет полный SHA-256-аудит.
+/// единый delivery v2 installer проверяет подписанный manifest и каждый chunk.
 fn refresh_profile_install_state(
     app_weak: Weak<AppWindow>,
     runtime_state: Arc<Mutex<RuntimeState>>,
@@ -1917,7 +1997,7 @@ fn refresh_profile_install_state(
             .as_ref()
             .is_ok_and(|paths| paths.manifest_path.is_file());
         let install_state = match paths {
-            Ok(paths) => match fetch_manifest(&config, &token, &profile.id, &paths) {
+            Ok(paths) => match fetch_manifest(&config, &token, &profile) {
                 Ok(manifest) => profile_install_state(&paths, &manifest)
                     .unwrap_or(ProfileInstallState::UpdateAvailable),
                 Err(_) if had_local_manifest => ProfileInstallState::Unknown,
@@ -1937,7 +2017,7 @@ fn refresh_profile_install_state(
                     == check_sequence;
                 if app.get_is_authenticated() && still_current {
                     if install_state == ProfileInstallState::Unknown
-                        && app.get_profile_update_available()
+                        && app.get_profile_delivery_phase() == "updateAvailable"
                     {
                         return;
                     }
@@ -2090,6 +2170,7 @@ fn stream_profile_events(
     // гарантирует replay и обновление во время офлайна могло потеряться.
     if profile_event_connection_needs_catch_up(has_connected) {
         refresh_profiles_now(config, state, app_weak);
+        spawn_update_check(app_weak.clone(), config.clone());
     }
 
     let reader = BufReader::new(response);
@@ -2253,7 +2334,7 @@ fn fetch_profiles(config: &AppConfig, token: &str) -> Result<Vec<ProfileSummary>
     let client = http_client()?;
     let response = client
         .get(format!(
-            "{}/api/profiles",
+            "{}/api/v2/profiles",
             config.api_url().trim_end_matches('/')
         ))
         .bearer_auth(token)
@@ -2425,92 +2506,52 @@ fn invalidate_yggdrasil_session(config: &AppConfig, access_token: &str) {
 fn fetch_manifest(
     config: &AppConfig,
     token: &str,
-    profile_id: &str,
-    paths: &ProfilePaths,
+    profile: &ProfileSummary,
 ) -> Result<Manifest, String> {
+    if profile.active_release_id.is_empty() || profile.manifest_sha256.is_empty() {
+        return Err("Для профиля ещё не опубликован release v2.".to_string());
+    }
     let client = http_client()?;
-    let url = format!(
-        "{}/api/profiles/{}/manifest",
-        config.api_url().trim_end_matches('/'),
-        profile_id
-    );
-    let cache_path = paths.profile_root.join("manifest.remote.json");
-    let etag_path = paths.profile_root.join("manifest.remote.etag");
-    let cached_etag = fs::read_to_string(&etag_path).ok();
-
-    let mut request = client.get(&url).bearer_auth(token);
-    if let Some(etag) = cached_etag
-        .as_deref()
-        .map(str::trim)
-        .filter(|etag| !etag.is_empty())
-    {
-        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-    }
-    let mut response = request
-        .send()
-        .map_err(|_| "Не удалось получить manifest профиля.".to_string())?;
-
-    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-        if let Ok(data) = fs::read(&cache_path) {
-            if let Ok(manifest) = serde_json::from_slice::<Manifest>(&data) {
-                return Ok(manifest);
-            }
-        }
-        // 304 без пригодного локального тела возможен после ручной чистки или
-        // аварийного выключения между записью ETag и JSON. Один раз повторяем
-        // запрос без условия и восстанавливаем кэш.
-        let _ = fs::remove_file(&etag_path);
-        response = client
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .map_err(|_| "Не удалось повторно получить manifest профиля.".to_string())?;
-    }
-
-    if !response.status().is_success() {
-        return parse_json_response(response, "Backend вернул некорректный manifest");
-    }
-
-    let response_etag = response
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let data = response
-        .bytes()
-        .map_err(|error| format!("Не удалось прочитать manifest профиля: {error}"))?;
-    let manifest = serde_json::from_slice::<Manifest>(&data)
-        .map_err(|error| format!("Backend вернул некорректный manifest: {error}"))?;
-
-    // Кэш — ускорение, не условие запуска: ошибка записи не мешает использовать
-    // уже проверенный ответ текущего запроса.
-    if write_manifest_cache(&cache_path, &data).is_ok() {
-        if let Some(etag) = response_etag {
-            let _ = write_manifest_cache(&etag_path, etag.as_bytes());
-        }
-    }
-    Ok(manifest)
-}
-
-fn write_manifest_cache(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let sequence = MANIFEST_CACHE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut temp_name = path.as_os_str().to_os_string();
-    temp_name.push(format!(".{}.{}.part", std::process::id(), sequence));
-    let temp = PathBuf::from(temp_name);
-    fs::write(&temp, data)?;
-    let result = (|| {
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        fs::rename(&temp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
+    let remote = delivery::fetch_profile_manifest(
+        &client,
+        &config.api_url(),
+        token,
+        &profile.id,
+        &profile.active_release_id,
+        &profile.manifest_sha256,
+        &profile.manifest_signature,
+    )?;
+    let files = remote
+        .files
+        .iter()
+        .map(|file| ManifestFile {
+            path: file.path.clone(),
+            hash_sha256: file.sha256.clone(),
+            size: file.size,
+            executable: file.executable,
+            chunks: file.chunks.clone(),
+        })
+        .collect();
+    Ok(Manifest {
+        release_id: remote.release_id,
+        profile: ManifestProfile {
+            id: remote.profile.id,
+            name: remote.profile.name,
+            java_version: remote.profile.java_version,
+            jvm_args: remote.profile.jvm_args,
+            java_path_windows: remote.profile.java_path_windows,
+            java_path_linux: remote.profile.java_path_linux,
+            java_path_macos: remote.profile.java_path_macos,
+            launch_command_windows: remote.profile.launch_command_windows,
+            launch_command_linux: remote.profile.launch_command_linux,
+            launch_command_macos: remote.profile.launch_command_macos,
+            manifest_version: remote.sequence,
+        },
+        files,
+        preserve_paths: remote.profile.preserve_paths,
+        file_count: remote.file_count,
+        total_size: remote.total_size,
+    })
 }
 
 fn parse_json_response<T: for<'de> Deserialize<'de>>(
@@ -2546,7 +2587,7 @@ fn sync_and_launch(
 ) -> Result<String, String> {
     post_progress(app, "Получаем профиль", &profile.name, "0%", 0.0, true);
     let paths = profile_paths(user, &profile.id)?;
-    let manifest = fetch_manifest(config, token, &profile.id, &paths)?;
+    let manifest = fetch_manifest(config, token, profile)?;
     if manifest.profile.id != profile.id {
         return Err("Backend вернул manifest другого профиля.".to_string());
     }
@@ -2586,73 +2627,37 @@ fn sync_and_launch(
 
     post_progress(
         app,
-        "Проверяем файлы",
+        "Готовим release v2",
         &format!("{} файлов", manifest.file_count),
         "0%",
         0.04,
         true,
     );
-    let files_to_download = collect_files_to_download(app, &paths.files_root, &manifest.files)?;
-    let missing_bytes = files_to_download
-        .iter()
-        .map(|file| file.size.max(0) as u64)
-        .sum();
-    if bundle::should_use(
-        manifest.bundle.as_ref(),
-        files_to_download.len(),
-        missing_bytes,
-    ) {
-        let bundle = manifest.bundle.as_ref().expect("checked by should_use");
-        let url = absolute_api_url(config, &bundle.download_url);
-        let specs = manifest
-            .files
-            .iter()
-            .map(|file| bundle::FileSpec {
-                path: file.path.clone(),
-                hash_sha256: file.hash_sha256.clone(),
-                size: file.size,
-                executable: file.executable,
-            })
-            .collect::<Vec<_>>();
-        let client = backend_download_client()?;
-        bundle::download_and_install(
-            &client,
-            &url,
-            token,
-            &paths.profile_root,
-            &paths.files_root,
-            bundle,
-            &specs,
-            |downloaded, total| {
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    downloaded as f32 / total as f32
-                };
-                post_progress(
-                    app,
-                    "Скачиваем сборку",
-                    &format!("bundle v{}", bundle.build_id),
-                    &format!(
-                        "{} / {}",
-                        format_bytes(downloaded as i64),
-                        format_bytes(total as i64)
-                    ),
-                    0.22 + fraction * 0.70,
-                    true,
-                );
-            },
-        )?;
-    } else {
-        download_files(
-            config,
-            token,
-            app,
-            &paths.files_root,
-            &manifest,
-            &files_to_download,
-        )?;
-    }
+    let release_v2 = delivery_manifest_from_legacy(&manifest);
+    let client = http_client()?;
+    delivery::install_profile(
+        &client,
+        &config.api_url(),
+        token,
+        &paths.profile_root,
+        &paths.files_root,
+        &release_v2,
+        |current, total| {
+            let fraction = if total == 0 {
+                1.0
+            } else {
+                current as f32 / total as f32
+            };
+            post_progress(
+                app,
+                "Синхронизация v2",
+                &format!("{} / {} файлов", current, total),
+                &format!("{}%", (fraction * 100.0).round() as i32),
+                0.08 + fraction * 0.80,
+                true,
+            );
+        },
+    )?;
 
     post_progress(
         app,
@@ -2679,201 +2684,39 @@ fn sync_and_launch(
     launch_profile(app, config, &paths, &manifest, token, &user.login)
 }
 
-fn collect_files_to_download(
-    app: &Weak<AppWindow>,
-    files_root: &Path,
-    files: &[ManifestFile],
-) -> Result<Vec<ManifestFile>, String> {
-    let total = files.len().max(1);
-    let processed = AtomicUsize::new(0);
-
-    // Проверяем файлы параллельно по всем ядрам. Каждый файл по-прежнему
-    // полностью сверяется по SHA256 с backend manifest — модель безопасности
-    // не меняется, ускоряется только пропускная способность хеширования.
-    // `collect` в rayon сохраняет исходный порядок манифеста.
-    let checked = files
-        .par_iter()
-        .map(|file| -> Result<Option<ManifestFile>, String> {
-            let needs = needs_download(files_root, file)?;
-            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-            post_progress(
-                app,
-                "Проверяем файлы",
-                &file.path,
-                &format!("{}/{}", done, files.len()),
-                0.04 + (done as f32 / total as f32) * 0.16,
-                true,
-            );
-            Ok(needs.then(|| file.clone()))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    Ok(checked.into_iter().flatten().collect())
-}
-
-fn download_files(
-    config: &AppConfig,
-    token: &str,
-    app: &Weak<AppWindow>,
-    files_root: &Path,
-    manifest: &Manifest,
-    files: &[ManifestFile],
-) -> Result<(), String> {
-    if files.is_empty() {
-        post_progress(
-            app,
-            "Скачиваем",
-            "Все файлы уже актуальны",
-            "92%",
-            0.92,
-            true,
-        );
-        return Ok(());
-    }
-
-    // Два клиента: защищённый для файлов со своего бэкенда (rustls+webpki+JWT) и обычный
-    // для файлов с публичного S3-зеркала (download_one_file выбирает по is_api_url).
-    let backend_client = backend_download_client()?;
-    let asset_client = download_client()?;
-    let total_bytes = files
-        .iter()
-        .map(|file| file.size.max(0) as u64)
-        .sum::<u64>()
-        .max(1);
-    let completed_bytes = AtomicU64::new(0);
-    let completed_files = AtomicUsize::new(0);
-    let total_files = files.len();
-
-    // Файлы качаются параллельно пулом воркеров. На профиле из множества мелких
-    // файлов узкое место — задержка (RTT) на каждый запрос, а не канал, поэтому
-    // перекрытие запросов даёт кратное ускорение. Воркеров берём больше числа ядер,
-    // т.к. работа I/O-bound (потоки большую часть времени ждут сеть). Модель
-    // безопасности не меняется: каждый файл по-прежнему сверяется по SHA256 и
-    // атомарно переименовывается из временного файла.
-    let workers = total_files.clamp(1, 16);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .map_err(|_| "Не удалось создать пул загрузки.".to_string())?;
-
-    pool.install(|| {
-        files
-            .par_iter()
-            .map(|file| -> Result<(), String> {
-                let file_bytes = download_one_file(
-                    &backend_client,
-                    &asset_client,
-                    config,
-                    token,
-                    files_root,
-                    file,
-                )?;
-
-                let done_files = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
-                let done_bytes =
-                    completed_bytes.fetch_add(file_bytes, Ordering::Relaxed) + file_bytes;
-                let progress = 0.22 + (done_bytes as f32 / total_bytes as f32) * 0.70;
-                post_progress(
-                    app,
-                    "Скачиваем",
-                    &file.path,
-                    &format!("{}/{}", done_files, total_files),
-                    progress.min(0.92),
-                    true,
-                );
-                Ok(())
+fn delivery_manifest_from_legacy(manifest: &Manifest) -> delivery::ProfileManifest {
+    delivery::ProfileManifest {
+        schema_version: delivery::SCHEMA_VERSION,
+        kind: "profile".to_string(),
+        release_id: manifest.release_id.clone(),
+        sequence: manifest.profile.manifest_version,
+        profile: delivery::ProfileConfig {
+            id: manifest.profile.id.clone(),
+            name: manifest.profile.name.clone(),
+            java_version: manifest.profile.java_version,
+            jvm_args: manifest.profile.jvm_args.clone(),
+            java_path_windows: manifest.profile.java_path_windows.clone(),
+            java_path_linux: manifest.profile.java_path_linux.clone(),
+            java_path_macos: manifest.profile.java_path_macos.clone(),
+            launch_command_windows: manifest.profile.launch_command_windows.clone(),
+            launch_command_linux: manifest.profile.launch_command_linux.clone(),
+            launch_command_macos: manifest.profile.launch_command_macos.clone(),
+            preserve_paths: manifest.preserve_paths.clone(),
+        },
+        files: manifest
+            .files
+            .iter()
+            .map(|file| delivery::ReleaseFile {
+                path: file.path.clone(),
+                size: file.size,
+                sha256: file.hash_sha256.clone(),
+                executable: file.executable,
+                chunks: file.chunks.clone(),
             })
-            .collect::<Result<Vec<_>, String>>()
-    })?;
-
-    post_progress(
-        app,
-        "Скачиваем",
-        &format!(
-            "{} файлов, {}",
-            manifest.file_count,
-            format_bytes(manifest.total_size)
-        ),
-        "92%",
-        0.92,
-        true,
-    );
-    Ok(())
-}
-
-// Скачивает один файл во временный путь, сверяет SHA256 и размер, затем атомарно
-// переименовывает в целевой путь. Вызывается параллельно из пула в download_files;
-// все пути уникальны на файл, поэтому конкурентная запись безопасна.
-fn download_one_file(
-    backend_client: &DownloadClient,
-    asset_client: &DownloadClient,
-    config: &AppConfig,
-    token: &str,
-    files_root: &Path,
-    file: &ManifestFile,
-) -> Result<u64, String> {
-    let target = safe_join(files_root, &file.path)?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|_| "Не удалось создать папку для файла.".to_string())?;
+            .collect(),
+        file_count: manifest.file_count,
+        total_size: manifest.total_size,
     }
-
-    let url = absolute_api_url(config, &file.download_url);
-    // Свой бэкенд — защищённый клиент (rustls+webpki, без прокси) + JWT. Публичное
-    // зеркало (S3-бакет) — обычный клиент без токена: JWT туда слать и незачем, и
-    // вредно (S3 отвечает 400 на Authorization), а его CA может быть вне webpki.
-    let is_backend = is_api_url(config, &url);
-    let client = if is_backend {
-        backend_client
-    } else {
-        asset_client
-    };
-    let response = client
-        .get(&url, is_backend.then_some(token), None)
-        .map_err(|_| format!("Не удалось скачать {}", file.path))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Ошибка скачивания {}: HTTP {}",
-            file.path,
-            response.status().as_u16()
-        ));
-    }
-
-    let temp_path = temp_download_path(&target);
-    let mut output =
-        File::create(&temp_path).map_err(|_| format!("Не удалось записать {}", file.path))?;
-    let mut hasher = Sha256::new();
-    let mut file_bytes = 0_u64;
-    response
-        .consume(|buffer| {
-            output
-                .write_all(buffer)
-                .map_err(|_| format!("Ошибка записи {}", file.path))?;
-            hasher.update(buffer);
-            file_bytes += buffer.len() as u64;
-            Ok(())
-        })
-        .map_err(|error| format!("Ошибка чтения {}: {error}", file.path))?;
-    output
-        .flush()
-        .map_err(|_| format!("Ошибка записи {}", file.path))?;
-
-    let hash = hex_hash(hasher.finalize().as_slice());
-    if hash != file.hash_sha256.to_lowercase() {
-        let _ = fs::remove_file(&temp_path);
-        return Err(format!("Hash mismatch: {}", file.path));
-    }
-    if file.size >= 0 && file_bytes != file.size as u64 {
-        let _ = fs::remove_file(&temp_path);
-        return Err(format!("Размер файла изменился: {}", file.path));
-    }
-
-    set_manifest_executable(&temp_path, file.executable)?;
-
-    remove_existing_path_for_replace(&target)
-        .map_err(|_| format!("Не удалось заменить {}", file.path))?;
-    fs::rename(&temp_path, &target).map_err(|_| format!("Не удалось сохранить {}", file.path))?;
-    Ok(file_bytes)
 }
 
 fn ensure_java_runtime(
@@ -4244,11 +4087,19 @@ fn post_progress(
     let progress = progress.clamp(0.0, 1.0);
     let _ = invoke_from_ui(move || {
         if let Some(app) = app.upgrade() {
-            app.set_download_phase(phase.into());
+            app.set_download_phase(phase.clone());
             app.set_download_file(file_name.into());
             app.set_download_counter(counter.into());
             app.set_download_progress(progress);
             app.set_download_panel_visible(visible);
+            app.set_profile_delivery(DeliveryViewState {
+                phase: "syncing".into(),
+                message: phase.to_string(),
+                version: String::new(),
+                progress,
+                mandatory: false,
+                retryable: false,
+            });
         }
     });
 }
@@ -5164,28 +5015,6 @@ fn temp_download_path(target: &Path) -> PathBuf {
     target.with_file_name(format!(".{}.download", file_name))
 }
 
-fn absolute_api_url(config: &AppConfig, value: &str) -> String {
-    if value.starts_with("http://") || value.starts_with("https://") {
-        value.to_string()
-    } else {
-        format!(
-            "{}/{}",
-            config.api_url().trim_end_matches('/'),
-            value.trim_start_matches('/')
-        )
-    }
-}
-
-/// Ведёт ли absolute-URL на выбранный бэкенд (а не на публичное зеркало файлов).
-/// Граница — `/` после базы: без неё `https://api.example.com.evil.tld` прошёл бы
-/// как «свой» и получил бы JWT игрока.
-fn is_api_url(config: &AppConfig, url: &str) -> bool {
-    let api_url = config.api_url();
-    let base = api_url.trim_end_matches('/');
-    url.strip_prefix(base)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
-
 fn os_value<'a>(windows: &'a str, linux: &'a str, macos: &'a str) -> &'a str {
     if cfg!(target_os = "windows") {
         windows
@@ -5193,24 +5022,6 @@ fn os_value<'a>(windows: &'a str, linux: &'a str, macos: &'a str) -> &'a str {
         macos
     } else {
         linux
-    }
-}
-
-fn format_bytes(value: i64) -> String {
-    if value <= 0 {
-        return "0 B".to_string();
-    }
-    let units = ["B", "KB", "MB", "GB"];
-    let mut amount = value as f64;
-    let mut unit_index = 0_usize;
-    while amount >= 1024.0 && unit_index < units.len() - 1 {
-        amount /= 1024.0;
-        unit_index += 1;
-    }
-    if unit_index == 0 {
-        format!("{} {}", amount as i64, units[unit_index])
-    } else {
-        format!("{:.1} {}", amount, units[unit_index])
     }
 }
 
@@ -5247,29 +5058,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{host}: {e}"));
             assert!(resp.status().is_success(), "{host}: HTTP {}", resp.status());
         }
-    }
-
-    #[test]
-    fn bearer_goes_only_to_own_backend() {
-        let config = AppConfig {
-            api_url: Arc::new(RwLock::new("https://launcher.likonchik.xyz".to_string())),
-        };
-
-        assert!(is_api_url(
-            &config,
-            "https://launcher.likonchik.xyz/api/profiles/1/files/mods/a.jar"
-        ));
-        assert!(is_api_url(&config, "https://launcher.likonchik.xyz"));
-        // Файлы с бакета — без токена.
-        assert!(!is_api_url(
-            &config,
-            "https://pjm-files.s3.cloud.ru/vanilla/files/mods/a.jar"
-        ));
-        // Префикс базы, но чужой хост — токен туда уйти не должен.
-        assert!(!is_api_url(
-            &config,
-            "https://launcher.likonchik.xyz.evil.tld/api/steal"
-        ));
     }
 
     #[test]
@@ -5719,6 +5507,9 @@ mod tests {
             name: "Profile".to_string(),
             game_version: "1.21.1".to_string(),
             is_active: true,
+            active_release_id: "release".to_string(),
+            manifest_sha256: "a".repeat(64),
+            manifest_signature: String::new(),
         };
         let paths = profile_paths_at_root(&user, &profile.id, &install_root).unwrap();
         let hash = hex_hash(Sha256::digest(b"official").as_slice());
@@ -5928,6 +5719,7 @@ mod tests {
 
     fn test_manifest(files: Vec<ManifestFile>, preserve_paths: Vec<String>) -> Manifest {
         Manifest {
+            release_id: "release-id".to_string(),
             profile: ManifestProfile {
                 id: "profile-id".to_string(),
                 name: "Profile".to_string(),
@@ -5945,24 +5737,16 @@ mod tests {
             total_size: files.iter().map(|file| file.size).sum(),
             files,
             preserve_paths,
-            bundle: None,
         }
     }
 
     fn test_manifest_file(path: &str, hash: &str, size: i64) -> ManifestFile {
         ManifestFile {
-            id: path.to_string(),
-            name: Path::new(path)
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
             path: path.to_string(),
-            download_url: format!("/{}", path),
             hash_sha256: hash.to_string(),
             size,
-            file_type: "test".to_string(),
             executable: false,
+            chunks: Vec::new(),
         }
     }
 }

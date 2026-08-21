@@ -7,8 +7,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 const logoAsset = new URL("../src-tauri/assets/logo.svg", import.meta.url).href;
 
 type NewsItem = { title: string; date: string; body: string };
+type DeliveryState = { phase: string; message: string; version: string; progress: number; mandatory: boolean; retryable: boolean };
 
 type LauncherState = {
+	launcherDelivery: DeliveryState;
+	profileDelivery: DeliveryState;
   apiUrl: string;
   serverNames: string[];
   serverIndex: number;
@@ -24,10 +27,6 @@ type LauncherState = {
   isSlim: boolean;
   isSyncing: boolean;
   hasProfile: boolean;
-  profileInstalled: boolean;
-  profileUpdateAvailable: boolean;
-  profileStateChecking: boolean;
-  profileStateUnknown: boolean;
   downloadPanelVisible: boolean;
   selectedProfileName: string;
   selectedProfileVersion: string;
@@ -49,10 +48,6 @@ type LauncherState = {
   installFolder: string;
   newsItems: NewsItem[];
   anticheatAlert: string;
-  updateReady: boolean;
-  updateMandatory: boolean;
-  updateVersion: string;
-  updateStatus: string;
   policyVisible: boolean;
   policyAccepting: boolean;
   policyText: string;
@@ -61,6 +56,8 @@ type LauncherState = {
 };
 
 const emptyState: LauncherState = {
+	launcherDelivery: { phase: "idle", message: "", version: "", progress: 0, mandatory: false, retryable: false },
+	profileDelivery: { phase: "checking", message: "Проверяем файлы", version: "", progress: 0, mandatory: false, retryable: false },
   apiUrl: "",
   serverNames: [],
   serverIndex: 0,
@@ -76,10 +73,6 @@ const emptyState: LauncherState = {
   isSlim: false,
   isSyncing: false,
   hasProfile: false,
-  profileInstalled: false,
-  profileUpdateAvailable: false,
-  profileStateChecking: false,
-  profileStateUnknown: false,
   downloadPanelVisible: false,
   selectedProfileName: "",
   selectedProfileVersion: "-",
@@ -101,10 +94,6 @@ const emptyState: LauncherState = {
   installFolder: "",
   newsItems: [],
   anticheatAlert: "",
-  updateReady: false,
-  updateMandatory: false,
-  updateVersion: "",
-  updateStatus: "",
   policyVisible: false,
   policyAccepting: false,
   policyText: "",
@@ -124,7 +113,6 @@ const browserPreview: LauncherState = {
   userUuid: "2bdc44c5-9c18-42d1-a2cb-b0977924fd18",
   tokenExpiresAt: "2026-09-19 14:40",
   hasProfile: true,
-  profileInstalled: true,
   selectedProfileName: "Project Minecraft: Warfare",
   selectedProfileVersion: "1.21.1 · NeoForge",
   profileStatus: "Готов к запуску",
@@ -316,36 +304,36 @@ function HeaderBar({ state, tab, setTab }: { state: LauncherState; tab: "home" |
 }
 
 function PlayButton({ state }: { state: LauncherState }) {
-  const label = state.updateMandatory
+  const label = state.launcherDelivery.mandatory
     ? "Требуется обновление"
-    : state.isSyncing
+    : state.profileDelivery.phase === "syncing"
       ? state.downloadPhase || "Подготовка"
-      : state.profileStateChecking
+      : state.profileDelivery.phase === "checking"
         ? "Проверяем файлы"
-        : state.profileStateUnknown
+        : state.profileDelivery.phase === "failed"
           ? "Проверить сборку"
-          : !state.profileInstalled
+          : state.profileDelivery.phase === "missing"
             ? "Установить сборку"
-            : state.profileUpdateAvailable
+            : state.profileDelivery.phase === "updateAvailable"
               ? "Обновить сборку"
               : "Играть";
 
   return (
-    <button className="launch-button" onClick={() => void action("play")} disabled={!state.hasProfile || state.isSyncing || state.updateMandatory}>
-      <PixelIcon name={state.isSyncing || state.profileStateChecking ? "reload" : state.profileInstalled ? "play" : "download"} className={state.isSyncing || state.profileStateChecking ? "spin" : ""} />
+    <button className="launch-button" onClick={() => void action("play")} disabled={!state.hasProfile || state.profileDelivery.phase === "syncing" || state.launcherDelivery.mandatory}>
+      <PixelIcon name={state.profileDelivery.phase === "syncing" || state.profileDelivery.phase === "checking" ? "reload" : state.profileDelivery.phase === "current" ? "play" : "download"} className={state.profileDelivery.phase === "syncing" || state.profileDelivery.phase === "checking" ? "spin" : ""} />
       <span>{label}</span>
     </button>
   );
 }
 
 function launchStatus(state: LauncherState) {
-  if (state.updateMandatory) return "Обновите лаунчер для продолжения";
-  if (state.isSyncing) return state.downloadPhase || "Подготавливаем файлы";
-  if (state.profileStateChecking) return "Проверяем файлы";
-  if (state.profileStateUnknown) return "Требуется проверка файлов";
+  if (state.launcherDelivery.mandatory) return "Обновите лаунчер для продолжения";
+  if (state.profileDelivery.phase === "syncing") return state.profileDelivery.message || "Подготавливаем файлы";
+  if (state.profileDelivery.phase === "checking") return "Проверяем файлы";
+  if (state.profileDelivery.phase === "failed") return state.profileDelivery.message || "Требуется проверка файлов";
   if (!state.hasProfile) return "Игра сейчас недоступна";
-  if (!state.profileInstalled) return "Игра не установлена";
-  if (state.profileUpdateAvailable) return "Доступно обновление";
+  if (state.profileDelivery.phase === "missing") return "Игра не установлена";
+  if (state.profileDelivery.phase === "updateAvailable") return "Доступно обновление";
   return "Готово к запуску";
 }
 
@@ -444,12 +432,14 @@ function SettingsOverlay({ state }: { state: LauncherState }) {
 }
 
 function UpdateBanner({ state }: { state: LauncherState }) {
-  if (!state.updateReady && !state.updateStatus && !state.updateMandatory) return null;
+  const update = state.launcherDelivery;
+  if (update.phase === "idle" || update.phase === "current") return null;
+  const ready = update.phase === "ready";
   return (
-    <aside className={`update-banner${state.updateMandatory ? " mandatory" : ""}`}>
-      <PixelIcon name="reload" className={!state.updateReady ? "spin" : ""} />
-      <div><b>{state.updateReady ? `Версия ${state.updateVersion} готова` : state.updateStatus || "Проверяем обновление"}</b><span>{state.updateMandatory ? "Обновление обязательно для запуска игры." : "Перезапустите лаунчер, когда будете готовы."}</span></div>
-      {state.updateReady && <button onClick={() => void action("restartForUpdate")}>Перезапустить</button>}
+    <aside className={`update-banner${update.mandatory ? " mandatory" : ""}`}>
+      <PixelIcon name="reload" className={update.phase === "downloading" || update.phase === "applying" ? "spin" : ""} />
+      <div><b>{ready ? `Версия ${update.version} готова` : update.message || "Проверяем обновление"}</b><span>{update.mandatory ? "Обновление обязательно для запуска игры." : ready ? update.message || "Перезапустите лаунчер, когда будете готовы." : update.phase === "failed" ? "Повторим проверку после reconnect." : `Загрузка ${Math.round(update.progress * 100)}%`}</span></div>
+      {ready && <button onClick={() => void action("restartForUpdate")}>Перезапустить</button>}
     </aside>
   );
 }
