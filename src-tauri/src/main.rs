@@ -1755,7 +1755,6 @@ fn start_local_profile_watch(
             ) {
                 continue;
             }
-            PROFILE_CHECK_SEQUENCE.fetch_add(1, Ordering::SeqCst);
             let expected_user = user.provider_uuid.clone();
             let expected_profile = profile.id.clone();
             let app_weak = app_weak.clone();
@@ -1768,7 +1767,15 @@ fn start_local_profile_watch(
                         .is_some_and(|user| user.provider_uuid == expected_user)
                         && state.selected_profile_id.as_deref() == Some(expected_profile.as_str())
                 });
-                if let Some(app) = app_weak.upgrade().filter(|_| still_current) {
+                if let Some(app) = app_weak.upgrade().filter(|_| {
+                    local_profile_watch_result_is_current(
+                        still_current,
+                        sync_sequence,
+                        PROFILE_SYNC_SEQUENCE.load(Ordering::SeqCst),
+                        PROFILE_SYNC_ACTIVE.load(Ordering::SeqCst),
+                    )
+                }) {
+                    PROFILE_CHECK_SEQUENCE.fetch_add(1, Ordering::SeqCst);
                     set_profile_install_state(&app, detected_state);
                 }
             });
@@ -1782,6 +1789,20 @@ fn local_profile_watch_scan_is_current(
     sync_active: bool,
 ) -> bool {
     !sync_active && scan_sync_sequence == current_sync_sequence
+}
+
+fn local_profile_watch_result_is_current(
+    still_selected: bool,
+    scan_sync_sequence: u64,
+    current_sync_sequence: u64,
+    sync_active: bool,
+) -> bool {
+    still_selected
+        && local_profile_watch_scan_is_current(
+            scan_sync_sequence,
+            current_sync_sequence,
+            sync_active,
+        )
 }
 
 fn local_profile_files_changed(
@@ -2532,6 +2553,37 @@ fn sync_and_launch(
     ensure_directory(&paths.profile_root, "Не удалось создать папку профиля.")?;
     ensure_directory(&paths.files_root, "Не удалось создать папку профиля.")?;
 
+    // Не запускаем JVM с пользовательским jar, которого не было ни в текущей, ни в
+    // предыдущей опубликованной сборке. Проверка выполняется ДО LaunchGuard::begin:
+    // обычная ошибка состава профиля не должна превращаться в античит-детект/бан.
+    // Файлы прошлого manifest разрешаем здесь, чтобы штатное обновление могло удалить
+    // мод, который администратор убрал из новой версии сборки.
+    let current_managed_paths = manifest
+        .files
+        .iter()
+        .filter_map(|file| normalize_relative_path(&file.path))
+        .collect::<HashSet<_>>();
+    let previous_managed_paths = previous_managed_paths(&paths.manifest_path);
+    let unmanaged_mods = unmanaged_mod_jars_at(
+        &paths.files_root,
+        &current_managed_paths,
+        &previous_managed_paths,
+    )?;
+    if !unmanaged_mods.is_empty() {
+        let shown = unmanaged_mods.iter().take(10).cloned().collect::<Vec<_>>();
+        let remainder = unmanaged_mods.len().saturating_sub(shown.len());
+        let suffix = if remainder == 0 {
+            String::new()
+        } else {
+            format!(" и ещё {remainder}")
+        };
+        return Err(format!(
+            "Запуск заблокирован: в папке mods найдены посторонние файлы: {}{}. Удалите или переместите их и повторите запуск. Аккаунт не заблокирован.",
+            shown.join(", "),
+            suffix,
+        ));
+    }
+
     post_progress(
         app,
         "Проверяем файлы",
@@ -3184,6 +3236,87 @@ fn cleanup_unmanaged_files(
         &allowed_paths,
         &preserve_paths,
     )
+}
+
+fn previous_managed_paths(manifest_path: &Path) -> HashSet<String> {
+    fs::read_to_string(manifest_path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<LocalManifest>(&data).ok())
+        .map(|manifest| {
+            manifest
+                .files
+                .into_iter()
+                .filter_map(|file| normalize_relative_path(&file.path))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn unmanaged_mod_jars_at(
+    files_root: &Path,
+    current_managed_paths: &HashSet<String>,
+    previous_managed_paths: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let mods_root = files_root.join("mods");
+    let metadata = match fs::symlink_metadata(&mods_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Не удалось проверить папку mods.".to_string()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Запуск заблокирован: папка mods подменена ссылкой или файлом.".to_string());
+    }
+
+    let mut unmanaged = Vec::new();
+    collect_unmanaged_mod_jars(
+        files_root,
+        &mods_root,
+        current_managed_paths,
+        previous_managed_paths,
+        &mut unmanaged,
+    )?;
+    unmanaged.sort();
+    Ok(unmanaged)
+}
+
+fn collect_unmanaged_mod_jars(
+    files_root: &Path,
+    current: &Path,
+    current_managed_paths: &HashSet<String>,
+    previous_managed_paths: &HashSet<String>,
+    unmanaged: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(current)
+        .map_err(|_| format!("Не удалось прочитать папку {}", current.to_string_lossy()))?;
+    for entry in entries {
+        let entry = entry.map_err(|_| "Не удалось прочитать файл в папке mods.".to_string())?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| "Не удалось проверить файл в папке mods.".to_string())?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            collect_unmanaged_mod_jars(
+                files_root,
+                &path,
+                current_managed_paths,
+                previous_managed_paths,
+                unmanaged,
+            )?;
+            continue;
+        }
+        let is_jar = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"));
+        if !is_jar {
+            continue;
+        }
+        let relative = relative_path(files_root, &path)?;
+        if !current_managed_paths.contains(&relative) && !previous_managed_paths.contains(&relative)
+        {
+            unmanaged.push(relative);
+        }
+    }
+    Ok(())
 }
 
 fn cleanup_directory(
@@ -5605,6 +5738,20 @@ mod tests {
     }
 
     #[test]
+    fn delayed_profile_watch_result_cannot_restore_update_after_sync() {
+        assert!(local_profile_watch_result_is_current(true, 7, 7, false));
+        assert!(
+            !local_profile_watch_result_is_current(true, 7, 8, false),
+            "callback старого manifest уже стоял в UI-очереди и не должен применяться после синхронизации"
+        );
+        assert!(
+            !local_profile_watch_result_is_current(true, 8, 8, true),
+            "отложенный callback не должен менять карточку во время новой синхронизации"
+        );
+        assert!(!local_profile_watch_result_is_current(false, 8, 8, false));
+    }
+
+    #[test]
     fn strict_cleanup_removes_unknown_files_and_keeps_preserved_paths() {
         let profile_root =
             test_root("strict_cleanup_removes_unknown_files_and_keeps_preserved_paths");
@@ -5635,6 +5782,33 @@ mod tests {
         assert!(!files_root.join("mods/custom.jar").exists());
         assert!(files_root.join("saves/world/level.dat").exists());
         assert!(files_root.join("options.txt").exists());
+
+        let _ = fs::remove_dir_all(profile_root);
+    }
+
+    #[test]
+    fn prelaunch_blocks_only_mod_jars_never_managed_by_the_profile() {
+        let profile_root = test_root("prelaunch_blocks_only_mod_jars_never_managed_by_the_profile");
+        let files_root = profile_root.join("files");
+        write_test_file(&files_root.join("mods/official.jar"), "official");
+        write_test_file(&files_root.join("mods/retired.jar"), "retired");
+        write_test_file(&files_root.join("mods/custom.jar"), "custom");
+        write_test_file(&files_root.join("mods/nested/extra.JAR"), "extra");
+        write_test_file(&files_root.join("mods/readme.txt"), "not a mod jar");
+
+        let current = HashSet::from(["mods/official.jar".to_string()]);
+        let previous = HashSet::from([
+            "mods/official.jar".to_string(),
+            "mods/retired.jar".to_string(),
+        ]);
+
+        assert_eq!(
+            unmanaged_mod_jars_at(&files_root, &current, &previous).unwrap(),
+            vec![
+                "mods/custom.jar".to_string(),
+                "mods/nested/extra.JAR".to_string(),
+            ]
+        );
 
         let _ = fs::remove_dir_all(profile_root);
     }
