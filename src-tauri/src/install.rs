@@ -219,7 +219,14 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
             ));
         }
 
-        let copied = fs::copy(&source_path, &destination_path)
+        let mut source_file = File::open(&source_path)
+            .map_err(|err| format!("Не удалось открыть {}: {err}", source_path.display()))?;
+        let mut destination_file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&destination_path)
+            .map_err(|err| format!("Не удалось создать {}: {err}", destination_path.display()))?;
+        let copied = std::io::copy(&mut source_file, &mut destination_file)
             .map_err(|err| format!("Не удалось скопировать {}: {err}", source_path.display()))?;
         if copied != metadata.len() {
             return Err(format!(
@@ -233,16 +240,19 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
                 source_path.display()
             ));
         }
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&destination_path)
-            .and_then(|file| file.sync_all())
-            .map_err(|err| {
-                format!(
-                    "Не удалось сбросить {} на диск: {err}",
-                    destination_path.display()
-                )
-            })?;
+        destination_file.sync_all().map_err(|err| {
+            format!(
+                "Не удалось сбросить {} на диск: {err}",
+                destination_path.display()
+            )
+        })?;
+        drop(destination_file);
+        fs::set_permissions(&destination_path, metadata.permissions()).map_err(|err| {
+            format!(
+                "Не удалось восстановить права {}: {err}",
+                destination_path.display()
+            )
+        })?;
     }
     sync_directory(destination)?;
     Ok(())
@@ -353,6 +363,34 @@ mod tests {
             .exists());
         assert!(!destination.join(MIGRATION_DIR).exists());
         assert!(!destination.join(MIGRATION_MARKER).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_flushes_read_only_files_before_restoring_permissions() {
+        let root = test_root("readonly");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let source_file = source.join("users/u/profiles/p/files/options.txt");
+        let destination_file = destination.join("users/u/profiles/p/files/options.txt");
+        fs::create_dir_all(source_file.parent().unwrap()).unwrap();
+        fs::write(&source_file, b"readonly").unwrap();
+        let original_permissions = fs::metadata(&source_file).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source_file, permissions).unwrap();
+
+        let result = migrate_users(&source, &destination).unwrap();
+
+        assert_eq!(fs::read(&destination_file).unwrap(), b"readonly");
+        assert!(fs::metadata(&destination_file)
+            .unwrap()
+            .permissions()
+            .readonly());
+        finalize_migration(&result);
+        for path in [&source_file, &destination_file] {
+            fs::set_permissions(path, original_permissions.clone()).unwrap();
+        }
         let _ = fs::remove_dir_all(root);
     }
 
