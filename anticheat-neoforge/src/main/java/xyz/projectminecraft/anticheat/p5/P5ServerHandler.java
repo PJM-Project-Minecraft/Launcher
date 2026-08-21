@@ -37,8 +37,10 @@ final class P5ServerHandler {
         t.setDaemon(true);
         return t;
     });
-    // Игрок → выданный challenge (пока ждём ответ).
-    private static final ConcurrentHashMap<String, String> PENDING = new ConcurrentHashMap<>();
+    // Ник → конкретное подключение и его challenge. ServerPlayer входит в запись,
+    // чтобы таймер старого подключения не забрал challenge нового входа с тем же ником.
+    private record PendingChallenge(ServerPlayer player, String challenge) {}
+    private static final ConcurrentHashMap<String, PendingChallenge> PENDING = new ConcurrentHashMap<>();
 
     /** Общий HTTP-клиент и планировщик — переиспользует поллер отзывов (P5RevokePoller). */
     static HttpClient http() {
@@ -54,31 +56,33 @@ final class P5ServerHandler {
         if (!P5Config.active()) return;
         String name = player.getGameProfile().getName();
         String challenge = randomHex(16);
-        PENDING.put(name, challenge);
+        PendingChallenge pending = new PendingChallenge(player, challenge);
+        PENDING.put(name, pending);
         PacketDistributor.sendToPlayer(player, new P5Payloads.P5Challenge(challenge));
-        scheduleCheck(player, name, 1);
+        scheduleCheck(name, pending, 1);
     }
 
     /** Нет ответа за окно — перевысылаем challenge (клиент мог быть занят загрузкой мира
      *  на слабом канале). Кончились попытки → верифицируем с пустым proof (бэкенд отвергнет). */
-    private static void scheduleCheck(ServerPlayer player, String name, int attempt) {
+    private static void scheduleCheck(String name, PendingChallenge expected, int attempt) {
         TIMER.schedule(() -> {
-            String pending = PENDING.get(name);
-            if (pending == null || player.connection == null) {
-                return; // клиент уже ответил или вышел
+            if (PENDING.get(name) != expected || expected.player().connection == null) {
+                return; // клиент уже ответил, вышел или ник принадлежит новому подключению
             }
             if (attempt < P5Config.CHALLENGE_ATTEMPTS) {
                 // Отправка — строго на серверном треде (мы в таймере).
-                player.server.execute(() -> {
-                    if (player.connection != null) {
-                        PacketDistributor.sendToPlayer(player, new P5Payloads.P5Challenge(pending));
+                expected.player().server.execute(() -> {
+                    if (PENDING.get(name) == expected && expected.player().connection != null) {
+                        PacketDistributor.sendToPlayer(expected.player(),
+                                new P5Payloads.P5Challenge(expected.challenge()));
                     }
                 });
-                scheduleCheck(player, name, attempt + 1);
+                scheduleCheck(name, expected, attempt + 1);
                 return;
             }
-            PENDING.remove(name);
-            verifyAndAct(player, name, pending, "");
+            if (PENDING.remove(name, expected)) {
+                verifyAndAct(expected.player(), name, expected.challenge(), "");
+            }
         }, P5Config.RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
@@ -86,9 +90,11 @@ final class P5ServerHandler {
     static void onResponse(P5Payloads.P5Response msg, IPayloadContext ctx) {
         if (!(ctx.player() instanceof ServerPlayer player)) return;
         String name = player.getGameProfile().getName();
-        String challenge = PENDING.remove(name);
-        if (challenge == null) return; // уже обработан таймаутом
-        verifyAndAct(player, name, challenge, msg.proof());
+        PendingChallenge pending = PENDING.get(name);
+        if (pending == null || pending.player() != player || !PENDING.remove(name, pending)) {
+            return; // уже обработан таймаутом либо это ответ старого подключения
+        }
+        verifyAndAct(player, name, pending.challenge(), msg.proof());
     }
 
     private static void verifyAndAct(ServerPlayer player, String name, String challenge, String proof) {
