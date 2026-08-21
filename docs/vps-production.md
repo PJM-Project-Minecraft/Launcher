@@ -172,7 +172,8 @@ dist/releases/
 
 ```powershell
 $env:LAUNCHER_DEFAULT_API_URL="https://launcher.example.com"
-cargo build --release --manifest-path launcher-slint/Cargo.toml
+npm ci && npm run build:web
+cargo build --release --manifest-path src-tauri/Cargo.toml
 ```
 
 `LAUNCHER_API_URL` всё ещё можно выставить вручную для отладки, но обычным

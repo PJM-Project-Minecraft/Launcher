@@ -342,10 +342,10 @@ mod tests {
 
     #[test]
     fn staging_path_is_sibling_of_exe() {
-        let staged = staging_path(Path::new("/opt/launcher/launcher-slint"));
+        let staged = staging_path(Path::new("/opt/launcher/project-minecraft-launcher"));
         assert_eq!(
             staged,
-            PathBuf::from("/opt/launcher/launcher-slint.update.partial")
+            PathBuf::from("/opt/launcher/project-minecraft-launcher.update.partial")
         );
         let staged_win = staging_path(Path::new("C:/launcher/launcher.exe"));
         assert!(staged_win

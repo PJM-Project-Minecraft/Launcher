@@ -14,7 +14,7 @@ import (
 )
 
 // releaseEvent — payload SSE-события: лаунчер по нему запускает проверку
-// обновления (см. stream_profile_events в launcher-slint).
+// обновления (см. stream_profile_events в src-tauri).
 const releaseEvent = "launcher-release"
 
 type Handler struct {

@@ -17,7 +17,6 @@ dashboard/tsconfig.tsbuildinfo
 data/
 
 src-tauri/target/
-launcher-slint/target/
 
 dashboard/node_modules/
 dashboard/.next/

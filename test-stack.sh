@@ -3,7 +3,7 @@
 # Local gameplay test stack:
 #   - backend on 127.0.0.1:8080
 #   - Minecraft test server on localhost:25565
-#   - Slint launcher pointed at the local backend
+#   - Tauri launcher pointed at the local backend
 #
 # Ctrl+C stops only the services started by this script. If a port is already
 # occupied, the script reuses that existing service and leaves it alone.
@@ -45,8 +45,8 @@ Usage: ./test-stack.sh [options]
 Options:
   --no-backend           Do not start the Go backend
   --no-server            Do not start the Minecraft test server
-  --no-launcher          Do not start the Slint launcher
-  --no-build-launcher    Do not rebuild launcher-slint release binary
+  --no-launcher          Do not start the Tauri launcher
+  --no-build-launcher    Do not rebuild the Tauri release binary
   --server-dir PATH      Minecraft test server directory
   -h, --help             Show this help
 
@@ -263,14 +263,14 @@ start_launcher() {
     return
   fi
 
-  local launcher_bin="$ROOT_DIR/launcher-slint/target/release/launcher-slint"
+  local launcher_bin="$ROOT_DIR/src-tauri/target/release/project-minecraft-launcher"
 
   if (( BUILD_LAUNCHER == 1 )) || [[ ! -x "$launcher_bin" ]]; then
-    need_cmd cargo
+    need_cmd npm
     log "$GRAY" "LAUNCHER" "Building launcher release binary"
     (
-      cd "$ROOT_DIR/launcher-slint"
-      cargo build --release
+      cd "$ROOT_DIR"
+      npm run build:launcher
     ) > >(prefix_output "$GRAY" "LAUNCHER") 2>&1
   fi
 
