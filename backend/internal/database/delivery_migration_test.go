@@ -42,3 +42,35 @@ func TestAutoMigratePostgres(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresQuerySurvivesResultTypeChange(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	db, err := database.Open(config.Config{DatabaseURL: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("DROP TABLE IF EXISTS delivery_plan_regression").Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Exec("DROP TABLE IF EXISTS delivery_plan_regression").Error })
+	if err := db.Exec("CREATE TABLE delivery_plan_regression (value text NOT NULL)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO delivery_plan_regression(value) VALUES ('before')").Error; err != nil {
+		t.Fatal(err)
+	}
+	var before []struct{ Value string }
+	if err := db.Raw("SELECT * FROM delivery_plan_regression").Scan(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("ALTER TABLE delivery_plan_regression ALTER COLUMN value TYPE varchar(64)").Error; err != nil {
+		t.Fatal(err)
+	}
+	var after []struct{ Value string }
+	if err := db.Raw("SELECT * FROM delivery_plan_regression").Scan(&after).Error; err != nil {
+		t.Fatalf("post-migration query reused an incompatible cached plan: %v", err)
+	}
+}

@@ -51,6 +51,16 @@ The player launcher can be built with a baked-in backend URL via:
 scripts/prod/build-player-launcher.sh --api-url https://launcher.example.com
 ```
 
+Production release требует update signing key и публичный delivery manifest
+key. Для Windows используйте воспроизводимый MSVC wrapper:
+
+```bash
+scripts/prod/build-player-launcher-windows.sh \
+  --api-url https://launcher.example.com \
+  --signing-key /secure/update-signing.key \
+  --manifest-pubkey <64-lowercase-hex>
+```
+
 ## Admin Dashboard
 
 Админка переехала в проект сайта: `/home/liko/Разработка/WEB`, маршрут

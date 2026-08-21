@@ -158,7 +158,7 @@ scripts/prod/build-player-launcher.sh \
 Скрипт соберёт release-бинарник с продовым URL внутри и положит пакет в:
 
 ```text
-dist/releases/
+release-artifacts/
 ```
 
 Игрокам отдавай архив `project-minecraft-launcher-...tar.gz`. На Linux игрок

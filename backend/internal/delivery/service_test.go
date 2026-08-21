@@ -478,3 +478,97 @@ func TestGarbageCollectRecoversInterruptedQuarantine(t *testing.T) {
 		t.Fatalf("committed launcher quarantine was not finalized: %v", err)
 	}
 }
+
+func TestInspectMigrationSourcesIsReadOnlyAndValidatesArtifacts(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{
+		ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true,
+		LaunchCommandWindows: "javaw.exe -jar launcher.jar", LaunchCommandLinux: "java -jar launcher.jar",
+	}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	profileSource := filepath.Join(service.profileRoot, profile.Slug, "files", "mods")
+	if err := os.MkdirAll(profileSource, 0755); err != nil {
+		t.Fatal(err)
+	}
+	profilePayload := []byte("profile-payload")
+	if err := os.WriteFile(filepath.Join(profileSource, "client.jar"), profilePayload, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	release := models.LauncherRelease{ID: newID(), Version: "9.9.9", IsActive: true}
+	for _, platform := range []string{"linux-x64", "windows-x64"} {
+		payload := []byte("launcher-" + platform)
+		digest := sha256.Sum256(payload)
+		fileName := "launcher"
+		if platform == "windows-x64" {
+			fileName = "launcher.exe"
+		}
+		file := models.LauncherReleaseFile{
+			ID: newID(), ReleaseID: release.ID, Platform: platform, FileName: fileName,
+			HashSHA256: hex.EncodeToString(digest[:]), Size: int64(len(payload)), SignatureEd25519: strings.Repeat("a", 128),
+		}
+		release.Files = append(release.Files, file)
+		path := filepath.Join(service.launcherRoot, release.Version, platform, fileName)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, payload, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&release).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Profiles != 1 || plan.ProfileFiles != 1 || plan.LauncherReleases != 1 || plan.LauncherFiles != 2 || plan.RequiredBytes == 0 {
+		t.Fatalf("migration plan = %+v", plan)
+	}
+	var deliveryRows int64
+	if err := db.Model(&models.DeliveryBlob{}).Count(&deliveryRows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if deliveryRows != 0 {
+		t.Fatalf("read-only inspection created %d delivery rows", deliveryRows)
+	}
+
+	corrupt := filepath.Join(service.launcherRoot, release.Version, "linux-x64", "launcher")
+	if err := os.WriteFile(corrupt, []byte("corrupt-payload"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSources(context.Background(), db, service.profileRoot, service.launcherRoot); err == nil {
+		t.Fatal("corrupt launcher source passed migration inspection")
+	}
+	linuxPayload := []byte("launcher-linux-x64")
+	if err := os.WriteFile(corrupt, linuxPayload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.publishProfile(context.Background(), profile.ID, filepath.Join(service.profileRoot, profile.Slug, "files"), func(_, _ int) {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ImportLauncherRelease(context.Background(), release); err != nil {
+		t.Fatal(err)
+	}
+	audit, err := service.AuditMigration(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if audit.ProfileReleases != 1 || audit.ProfileFiles != 1 || audit.LauncherReleases != 1 || audit.LauncherFiles != 2 || audit.VerifiedBytes == 0 {
+		t.Fatalf("migration audit = %+v", audit)
+	}
+	var blob models.DeliveryBlob
+	if err := db.First(&blob).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(service.blobPath(blob.HashSHA256), bytes.Repeat([]byte("x"), int(blob.Size)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AuditMigration(context.Background()); err == nil {
+		t.Fatal("corrupt CAS blob passed migration audit")
+	}
+}

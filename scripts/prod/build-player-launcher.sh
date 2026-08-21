@@ -12,8 +12,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 API_URL="${LAUNCHER_DEFAULT_API_URL:-}"
-OUT_DIR="$ROOT_DIR/dist/releases"
+OUT_DIR="$ROOT_DIR/release-artifacts"
 BUILD=1
+TARGET_TRIPLE=""
 # Ключ подписи и публичный ключ можно задать флагом или переменной окружения.
 SIGNING_KEY="${LAUNCHER_SIGNING_KEY:-}"
 PUBKEY="${LAUNCHER_UPDATE_PUBKEY:-}"
@@ -30,7 +31,8 @@ Options:
                       Можно вместо флага задать переменную LAUNCHER_SIGNING_KEY.
   --manifest-pubkey HEX  Публичный Ed25519-ключ подписи delivery manifest.
                          Можно задать DELIVERY_MANIFEST_PUBKEY.
-  --out-dir DIR       Output directory (default: dist/releases)
+  --out-dir DIR       Output directory (default: release-artifacts, outside Vite dist)
+  --target TRIPLE     Rust target; Windows MSVC automatically uses cargo-xwin
   --no-build          Package the existing release binary without rebuilding
   -h, --help          Show this help
 
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --out-dir)
       OUT_DIR="${2:-}"
+      shift
+      ;;
+    --target)
+      TARGET_TRIPLE="${2:-}"
       shift
       ;;
     --no-build)
@@ -135,7 +141,9 @@ if [[ ! "$PUBKEY" =~ ^[0-9a-f]{64}$ ]]; then
 fi
 
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT_DIR/src-tauri/Cargo.toml")"
-TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+if [[ -z "$TARGET_TRIPLE" ]]; then
+  TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+fi
 PLATFORM="linux-x64"
 case "$TARGET_TRIPLE" in
   *aarch64*linux*) PLATFORM="linux-arm64" ;;
@@ -149,21 +157,32 @@ if (( BUILD == 1 )); then
   # Важно собирать через Tauri CLI, а не через голый `cargo build`: CLI переключает
   # WebView с devUrl (Vite на 127.0.0.1:1420) на встроенный frontendDist. Иначе Rust
   # бинарник формально release, но у игроков открывает недоступный dev-сервер.
+  build_args=(build --no-bundle --target "$TARGET_TRIPLE")
+  if [[ "$TARGET_TRIPLE" == *windows-msvc ]]; then
+    if ! command -v cargo-xwin >/dev/null 2>&1 && ! cargo xwin --version >/dev/null 2>&1; then
+      echo "ERROR: Windows MSVC build requires cargo-xwin." >&2
+      exit 1
+    fi
+    build_args=(build --no-bundle --runner cargo-xwin --target "$TARGET_TRIPLE")
+  fi
   (
     cd "$ROOT_DIR"
     npm ci
     LAUNCHER_DEFAULT_API_URL="$API_URL" \
       LAUNCHER_UPDATE_PUBKEY="$PUBKEY" \
       DELIVERY_MANIFEST_PUBKEY="$MANIFEST_PUBKEY" \
-      npm run tauri -- build --no-bundle
+      npm run tauri -- "${build_args[@]}"
   )
 fi
 
 BIN_NAME="project-minecraft-launcher"
 [[ "$PLATFORM" == windows-* ]] && BIN_NAME="project-minecraft-launcher.exe"
-SOURCE_BIN="$ROOT_DIR/src-tauri/target/release/$BIN_NAME"
+SOURCE_BIN="$ROOT_DIR/src-tauri/target/$TARGET_TRIPLE/release/$BIN_NAME"
+if [[ "$TARGET_TRIPLE" == "$(rustc -vV | sed -n 's/^host: //p')" && ! -f "$SOURCE_BIN" ]]; then
+  SOURCE_BIN="$ROOT_DIR/src-tauri/target/release/$BIN_NAME"
+fi
 
-if [[ ! -x "$SOURCE_BIN" ]]; then
+if [[ ! -f "$SOURCE_BIN" ]] || [[ "$PLATFORM" != windows-* && ! -x "$SOURCE_BIN" ]]; then
   echo "ERROR: release binary not found: $SOURCE_BIN" >&2
   exit 1
 fi
@@ -206,8 +225,17 @@ PLAYER_BIN="$PACKAGE_DIR/project-minecraft-launcher"
 
 # Updater заменяет ровно один бинарник, поэтому Windows-сборка не может
 # зависеть от WebView2Loader.dll или Visual C++ Runtime рядом с .exe.
-if [[ "$PLATFORM" == windows-* ]] && command -v objdump >/dev/null 2>&1; then
-  IMPORTS="$(objdump -p "$PLAYER_BIN")"
+if [[ "$PLATFORM" == windows-* ]]; then
+  OBJDUMP=""
+  if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
+    OBJDUMP="x86_64-w64-mingw32-objdump"
+  elif command -v objdump >/dev/null 2>&1; then
+    OBJDUMP="objdump"
+  else
+    echo "[launcher] ОШИБКА: objdump обязателен для проверки Windows imports." >&2
+    exit 1
+  fi
+  IMPORTS="$($OBJDUMP -p "$PLAYER_BIN")"
   if grep -Eiq 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS"; then
     echo "[launcher] ОШИБКА: Windows-бинарник зависит от внешней DLL:" >&2
     grep -Ei 'DLL Name: (WebView2Loader|VCRUNTIME|MSVCP)[^ ]*\.dll' <<<"$IMPORTS" >&2

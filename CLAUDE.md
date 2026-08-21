@@ -10,7 +10,7 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.5` (в `Cargo.toml`).
+- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.7` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
 - `src/` + React/Vite — production-интерфейс десктоп-лаунчера.
@@ -74,6 +74,8 @@ scripts/prod/build-player-launcher.sh --api-url https://launcher.likonchik.xyz
 ```
 Release-сборка также требует `LAUNCHER_UPDATE_PUBKEY` (либо `--signing-key`) и
 `DELIVERY_MANIFEST_PUBKEY`; без любого из ключей сборка fail-closed.
+Windows MSVC-кандидат собирается воспроизводимо через
+`scripts/prod/build-player-launcher-windows.sh` (cargo-xwin 0.23.1 + LLVM 18).
 Версия бампится одновременно в `src-tauri/Cargo.toml` и `src-tauri/tauri.conf.json` →
 обязательно `cargo update -p project-minecraft-launcher` после правки.
 
@@ -217,6 +219,9 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
   только при временном `DELIVERY_V1_BRIDGE=true` и до обязательного
   RFC3339-cutoff `DELIVERY_V1_BRIDGE_UNTIL`; по умолчанию bridge выключен. Подробности —
   `docs/MANIFEST_PIPELINE.md`.
+  Первый production rollout и rollback выполнять только по
+  `docs/DELIVERY_V2_ROLLOUT.md`; operator binaries встроены в backend image, но
+  migration/GC никогда не запускаются автоматически.
 - `profiles` — CRUD конфигурации проектов и общий SSE/WebSocket change-signal.
   Долговечный snapshot профилей/заданий находится в HTTP API v2.
 - `news` — новости из Telegram-канала.

@@ -4744,6 +4744,7 @@ fn fetch_sha1_bytes(
 
 fn ensure_executable(
     #[cfg_attr(not(unix), allow(unused_variables))] path: &Path,
+    #[cfg_attr(not(unix), allow(unused_variables))]
     executable: bool,
 ) -> Result<(), String> {
     if !executable {
@@ -4765,6 +4766,7 @@ fn ensure_executable(
 
 fn set_manifest_executable(
     #[cfg_attr(not(unix), allow(unused_variables))] path: &Path,
+    #[cfg_attr(not(unix), allow(unused_variables))]
     executable: bool,
 ) -> Result<(), String> {
     #[cfg(unix)]

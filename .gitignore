@@ -1,5 +1,7 @@
 node_modules/
 dist/
+release-artifacts/
+src-tauri/gen/schemas/windows-schema.json
 
 backend/data/
 backend/tmp/

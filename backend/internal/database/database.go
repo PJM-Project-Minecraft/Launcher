@@ -15,7 +15,13 @@ import (
 
 func Open(cfg config.Config) (*gorm.DB, error) {
 	if cfg.DatabaseURL != "" {
-		db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
+		// AutoMigrate may change a result column type while pgx still holds an
+		// implicit prepared plan for the same table. PostgreSQL then rejects the
+		// first post-migration query with "cached plan must not change result
+		// type". Simple protocol keeps schema migration + immediate startup safe
+		// and also works through transaction-pooling proxies.
+		dialect := postgres.New(postgres.Config{DSN: cfg.DatabaseURL, PreferSimpleProtocol: true})
+		db, err := gorm.Open(dialect, &gorm.Config{})
 		if err != nil {
 			return nil, err
 		}

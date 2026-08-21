@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"os"
@@ -177,7 +178,8 @@ func (c Config) Validate() error {
 	if devSecrets[c.JWTSecret] {
 		return errors.New("APP_ENV=production требует настоящий JWT_SECRET (сейчас дев-заглушка)")
 	}
-	if len(c.DeliveryManifestSigningKey) != 64 {
+	deliverySeed, deliverySeedErr := hex.DecodeString(c.DeliveryManifestSigningKey)
+	if deliverySeedErr != nil || len(deliverySeed) != 32 || strings.ToLower(c.DeliveryManifestSigningKey) != c.DeliveryManifestSigningKey {
 		return errors.New("APP_ENV=production требует DELIVERY_MANIFEST_SIGNING_KEY: 32-byte Ed25519 seed в hex")
 	}
 	// Античит-секрет (подпись launch-token) в проде должен быть задан ЯВНО и отличаться

@@ -164,3 +164,18 @@ func TestV1BridgeRequiresAndHonorsCutoff(t *testing.T) {
 		t.Fatal("bridge remained enabled after cutoff")
 	}
 }
+
+func TestProductionRejectsMalformedDeliverySigningKey(t *testing.T) {
+	cfg := Config{
+		AppEnv:                     "production",
+		JWTSecret:                  "a-real-jwt-secret-value",
+		AnticheatSecret:            "a-distinct-anticheat-secret-value",
+		GameAPISecret:              "a-distinct-game-api-secret-value",
+		SiteOrderSecret:            "a-distinct-site-secret-value",
+		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		DeliveryManifestSigningKey: strings.Repeat("z", 64),
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DELIVERY_MANIFEST_SIGNING_KEY") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}

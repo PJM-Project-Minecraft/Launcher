@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+dist
+release-artifacts
+src
+src-tauri
+dashboard
+anticheat-agent
+anticheat-native
+anticheat-neoforge
+backend/data
+backend/storage
+backend/tmp
+backend/bin
+*.log

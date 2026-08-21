@@ -142,6 +142,9 @@ binaries, metadata и завершённый job.
 
 ## Проверка до rollout
 
+Полный production-порядок, canary и rollback описаны в
+[`DELIVERY_V2_ROLLOUT.md`](DELIVERY_V2_ROLLOUT.md).
+
 Минимальный gate:
 
 ```bash

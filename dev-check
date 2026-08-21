@@ -1,2 +1,50 @@
 #!/usr/bin/env bash
-exec /home/liko/Разработка/Qdrant/qdrant.sh check launcher "$@"
+# Repository-local verification. It intentionally resolves the current
+# worktree instead of the Qdrant index root, so feature worktrees are tested.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FULL=0
+if [[ "${1:-}" == "--full" ]]; then
+  FULL=1
+elif [[ $# -gt 0 ]]; then
+  echo "Usage: ./dev-check [--full]" >&2
+  exit 2
+fi
+
+GO_IMAGE="golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36"
+TEST_PUBKEY="d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+
+echo "[1/3] backend vet + tests"
+docker run --rm \
+  -v "$ROOT_DIR/backend:/src" -w /src \
+  -v launcher_gomodcache:/go/pkg/mod -v launcher_gocache:/root/.cache/go-build \
+  "$GO_IMAGE" sh -c 'go vet ./... && go test ./...'
+
+echo "[2/3] launcher web build"
+(cd "$ROOT_DIR" && npm run build:web)
+
+echo "[3/3] launcher Rust tests"
+(cd "$ROOT_DIR/src-tauri" && cargo test --locked)
+
+if (( FULL == 1 )); then
+  echo "[full 1/4] release fail-closed compile"
+  (
+    cd "$ROOT_DIR/src-tauri"
+    LAUNCHER_UPDATE_PUBKEY="$TEST_PUBKEY" \
+      DELIVERY_MANIFEST_PUBKEY="$TEST_PUBKEY" \
+      cargo check --release --locked
+  )
+  echo "[full 2/4] backend production image"
+  docker build -q -t launcher-backend:delivery-v2-check "$ROOT_DIR/backend" >/dev/null
+  echo "[full 3/4] compose and production scripts"
+  (cd "$ROOT_DIR" && docker compose config -q)
+  bash -n "$ROOT_DIR/deploy.sh" "$ROOT_DIR/scripts/prod/backup-db.sh" \
+    "$ROOT_DIR/scripts/prod/build-player-launcher.sh" \
+    "$ROOT_DIR/scripts/prod/build-player-launcher-windows.sh" \
+    "$ROOT_DIR/scripts/prod/delivery-v2-preflight.sh" \
+    "$ROOT_DIR/scripts/prod/verify-player-launcher-artifacts.sh"
+  echo "[full 4/4] git whitespace"
+  (cd "$ROOT_DIR" && git diff --check)
+fi
