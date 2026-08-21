@@ -41,8 +41,13 @@ Delivery v2 — единый контур доставки профилей Mine
 Статус находится в `delivery_jobs`, а WEB читает его через
 `GET /api/v2/admin/delivery/jobs`. Ошибка публикации сохраняется и generation
 переименовывается в `.failed`; успешная — в `.published`.
-Привязка generation к release пименяется в той же DB-транзакции, поэтому
+Привязка generation к release применяется в той же DB-транзакции, поэтому
 restart между commit и rename лишь завершает job, а не создаёт второй release.
+
+Launcher multipart-upload сначала сохраняется как inactive source и возвращает
+`202` с durable job. Отдельный watcher чанкует artifacts, фиксирует descriptors
+и активирует channel в одной финальной DB-транзакции. `queued/running` job
+возобновляется после restart; failed job можно повторить через WEB.
 
 ## API v2
 
@@ -69,6 +74,7 @@ Admin:
 - `GET /api/v2/admin/delivery/jobs`
 - `POST /api/v2/admin/delivery/profiles/:id/drafts`
 - `/api/v2/admin/launcher-releases/*`
+- `POST /api/v2/admin/launcher-releases/:id/retry`
 
 ## Конфигурация и ключи
 
@@ -78,6 +84,7 @@ Backend:
 DELIVERY_ROOT=storage/delivery-v2
 DELIVERY_MANIFEST_SIGNING_KEY=<32-byte Ed25519 seed, 64 hex>
 DELIVERY_V1_BRIDGE=true
+DELIVERY_V1_BRIDGE_UNTIL=<UTC RFC3339 cutoff, например 2026-09-21T00:00:00Z>
 ```
 
 В production signing key обязателен. Публичный ключ выводится мигратором и
@@ -108,7 +115,9 @@ artifacts, затем печатает `DELIVERY_MANIFEST_PUBKEY`.
 Порядок rollout:
 
 1. Сделать backup БД и storage.
-2. Задать signing key и оставить `DELIVERY_V1_BRIDGE=true`.
+2. Задать signing key, `DELIVERY_V1_BRIDGE=true` и близкий
+   `DELIVERY_V1_BRIDGE_UNTIL`. После cutoff legacy routes отключатся
+   автоматически, даже если boolean забыли снять.
 3. Запустить мигратор вручную и проверить manifests/chunks на тестовом клиенте.
 4. Выпустить mandatory launcher v2.
 5. После подтверждённого перехода клиентов установить
@@ -128,6 +137,8 @@ go run ./cmd/delivery-gc --keep-profile-releases 3 --grace 168h
 Rollback профиля — повторная публикация нужного полного дерева как новой
 generation. Immutable release не редактируется на месте. До запуска GC старые
 manifest/chunks продолжают обслуживать клиентов, которые уже получили snapshot.
+Launcher GC после того же grace удаляет CAS references, исходные full
+binaries, metadata и завершённый job.
 
 ## Проверка до rollout
 

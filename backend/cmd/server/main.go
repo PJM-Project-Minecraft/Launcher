@@ -127,13 +127,17 @@ func main() {
 		os.Exit(1)
 	}
 	delivery.NewHandler(deliveryService).RegisterRoutes(app, authService.RequireAuth())
-	delivery.NewWatcher(deliveryService, profilesBroker).Start()
-	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot, cfg.ProfileCDNBase), profilesBroker).
-		RegisterRoutesWithV1Bridge(app, authService.RequireAuth(), cfg.DeliveryV1Bridge)
 	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot).RequireSignatures()
+	delivery.NewWatcher(deliveryService, profilesBroker, releaseService.InvalidateDeliveryChannel).Start()
+	v1BridgeUntil := time.Time{}
+	if cfg.DeliveryV1Bridge {
+		v1BridgeUntil = cfg.DeliveryV1BridgeUntil
+	}
+	profiles.NewHandler(profiles.NewService(db, cfg.ProfileStorageRoot, cfg.ProfileCDNBase), profilesBroker).
+		RegisterRoutesWithV1BridgeUntil(app, authService.RequireAuth(), v1BridgeUntil)
 	launcherrelease.SetLogger(slog.Warn)
 	launcherrelease.NewHandler(releaseService, profilesBroker, deliveryService).
-		RegisterRoutesWithV1Bridge(app, authService.RequireAuth(), cfg.DeliveryV1Bridge)
+		RegisterRoutesWithV1BridgeUntil(app, authService.RequireAuth(), v1BridgeUntil)
 	news.NewHandler(news.NewService(cfg.TelegramChannel)).
 		RegisterRoutes(app, authService.RequireAuth())
 

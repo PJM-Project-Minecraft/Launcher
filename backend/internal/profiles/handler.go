@@ -48,16 +48,25 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 }
 
 func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber.Handler, v1Bridge bool) {
+	until := time.Time{}
+	if v1Bridge {
+		until = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	h.RegisterRoutesWithV1BridgeUntil(app, authMiddleware, until)
+}
+
+func (h Handler) RegisterRoutesWithV1BridgeUntil(app *fiber.App, authMiddleware fiber.Handler, until time.Time) {
 	group := app.Group("/api/profiles")
 	group.Use(authMiddleware)
 	// Статический /events регистрируем до параметрических маршрутов.
 	group.Get("/events", h.events)
-	if v1Bridge {
-		group.Get("/", h.listActive)
-		group.Get("/:id/manifest", h.manifest)
-		group.Get("/:id/bundles/:version", h.bundle)
-		group.Get("/:id/objects/:hash", h.object)
-		group.Get("/:id/files/*", h.download)
+	if !until.IsZero() {
+		legacy := app.Group("/api/profiles", authMiddleware, bridgeDeadline(until))
+		legacy.Get("/", h.listActive)
+		legacy.Get("/:id/manifest", h.manifest)
+		legacy.Get("/:id/bundles/:version", h.bundle)
+		legacy.Get("/:id/objects/:hash", h.object)
+		legacy.Get("/:id/files/*", h.download)
 	}
 
 	// Браузерный WebSocket не умеет Authorization header. Админ сначала получает
@@ -80,16 +89,26 @@ func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber
 	admin.Post("/", h.create)
 	admin.Patch("/:id", h.update)
 	admin.Delete("/:id", h.delete)
-	if v1Bridge {
+	if !until.IsZero() {
 		// Эти маршруты существуют только на один миграционный цикл. Delivery v2
 		// использует durable jobs и атомарный SFTP rename .upload -> .ready.
-		admin.Get("/builds", h.buildSnapshots)
-		admin.Get("/:id/manifest", h.manifest)
-		admin.Post("/:id/prepare-client", h.prepareClient)
-		admin.Post("/:id/scan", h.scan)
-		admin.Post("/:id/publish", h.scan)
-		admin.Get("/:id/build", h.buildStatus)
-		admin.Get("/:id/drift", h.drift)
+		legacyAdmin := app.Group("/api/admin/profiles", authMiddleware, auth.RequireAdmin, bridgeDeadline(until))
+		legacyAdmin.Get("/builds", h.buildSnapshots)
+		legacyAdmin.Get("/:id/manifest", h.manifest)
+		legacyAdmin.Post("/:id/prepare-client", h.prepareClient)
+		legacyAdmin.Post("/:id/scan", h.scan)
+		legacyAdmin.Post("/:id/publish", h.scan)
+		legacyAdmin.Get("/:id/build", h.buildStatus)
+		legacyAdmin.Get("/:id/drift", h.drift)
+	}
+}
+
+func bridgeDeadline(until time.Time) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if !time.Now().UTC().Before(until) {
+			return c.SendStatus(http.StatusNotFound)
+		}
+		return c.Next()
 	}
 }
 

@@ -214,7 +214,8 @@ scp backend/data/anticheat-agent.jar srv-129:/root/Launcher/backend/data/
 - `delivery` — единый v2-контур профилей и самообновления: immutable manifest,
   FastCDC 1/4/8 МиБ, SHA-256 CAS, durable jobs и атомарный SFTP rename
   `.upload → .ready`. Ручные scan/drift, bundle и прямые file routes доступны
-  только при временном `DELIVERY_V1_BRIDGE=true`. Подробности —
+  только при временном `DELIVERY_V1_BRIDGE=true` и до обязательного
+  RFC3339-cutoff `DELIVERY_V1_BRIDGE_UNTIL`; по умолчанию bridge выключен. Подробности —
   `docs/MANIFEST_PIPELINE.md`.
 - `profiles` — CRUD конфигурации проектов и общий SSE/WebSocket change-signal.
   Долговечный snapshot профилей/заданий находится в HTTP API v2.

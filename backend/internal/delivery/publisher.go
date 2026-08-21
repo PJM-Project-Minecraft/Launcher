@@ -27,12 +27,17 @@ var defaultPreservePaths = []string{
 }
 
 type Watcher struct {
-	service *Service
-	broker  *events.Broker
+	service           *Service
+	broker            *events.Broker
+	launcherActivated func()
 }
 
-func NewWatcher(service *Service, broker *events.Broker) *Watcher {
-	return &Watcher{service: service, broker: broker}
+func NewWatcher(service *Service, broker *events.Broker, launcherActivated ...func()) *Watcher {
+	watcher := &Watcher{service: service, broker: broker}
+	if len(launcherActivated) > 0 {
+		watcher.launcherActivated = launcherActivated[0]
+	}
+	return watcher
 }
 
 func (w *Watcher) Start() {
@@ -54,6 +59,11 @@ func (w *Watcher) Start() {
 }
 
 func (w *Watcher) reconcile() {
+	w.reconcileProfiles()
+	w.reconcileLauncherJobs()
+}
+
+func (w *Watcher) reconcileProfiles() {
 	profiles, err := os.ReadDir(w.service.incomingRoot())
 	if err != nil {
 		return
@@ -105,30 +115,37 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".failed"))
 		return
 	}
-	if job.ReleaseID != "" {
+	if job.ReleaseID != nil {
 		ended := time.Now().UTC()
-		w.updateJob(&job, map[string]any{"status": "succeeded", "phase": "done", "message": "Immutable release активирован", "progress": 1.0, "ended_at": &ended})
+		if err := w.updateJob(&job, map[string]any{"status": "succeeded", "phase": "done", "message": "Immutable release активирован", "progress": 1.0, "ended_at": &ended}); err != nil {
+			return
+		}
 		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))
 		return
 	}
 	started := time.Now().UTC()
-	w.updateJob(&job, map[string]any{"status": "running", "phase": "scan", "message": "Проверяем и чанкуем файлы", "started_at": &started, "error": ""})
+	if err := w.updateJob(&job, map[string]any{"status": "running", "phase": "scan", "message": "Проверяем и чанкуем файлы", "started_at": &started, "error": ""}); err != nil {
+		return
+	}
 	releaseID, publishErr := w.service.publishProfileForJob(context.Background(), profileID, processing, job.ID, generation, func(current, total int) {
 		progress := 0.05
 		if total > 0 {
 			progress = 0.05 + 0.80*float64(current)/float64(total)
 		}
-		w.updateJob(&job, map[string]any{"phase": "chunks", "message": fmt.Sprintf("Обработано файлов: %d / %d", current, total), "progress": progress})
+		_ = w.updateJob(&job, map[string]any{"phase": "chunks", "message": fmt.Sprintf("Обработано файлов: %d / %d", current, total), "progress": progress})
 	})
 	ended := time.Now().UTC()
 	if publishErr != nil {
-		w.updateJob(&job, map[string]any{"status": "failed", "phase": "failed", "message": "Публикация отклонена", "error": publishErr.Error(), "ended_at": &ended})
+		_ = w.updateJob(&job, map[string]any{"status": "failed", "phase": "failed", "message": "Публикация отклонена", "error": publishErr.Error(), "ended_at": &ended})
 		failed := filepath.Join(filepath.Dir(processing), generation+".failed")
 		_ = os.Rename(processing, failed)
 		slog.Error("delivery v2 publication failed", "profile", profileID, "generation", generation, "error", publishErr)
 		return
 	}
-	w.updateJob(&job, map[string]any{"status": "succeeded", "phase": "done", "message": "Immutable release активирован", "progress": 1.0, "release_id": releaseID, "ended_at": &ended})
+	if err := w.updateJob(&job, map[string]any{"status": "succeeded", "phase": "done", "message": "Immutable release активирован", "progress": 1.0, "release_id": releaseID, "ended_at": &ended}); err != nil {
+		slog.Error("delivery v2 job finalize failed", "profile", profileID, "generation", generation, "error", err)
+		return
+	}
 	consumed := filepath.Join(filepath.Dir(processing), generation+".published")
 	_ = os.Rename(processing, consumed)
 	if w.broker != nil {
@@ -136,12 +153,15 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 	}
 }
 
-func (w *Watcher) updateJob(job *models.DeliveryJob, changes map[string]any) {
+func (w *Watcher) updateJob(job *models.DeliveryJob, changes map[string]any) error {
 	changes["updated_at"] = time.Now().UTC()
-	_ = w.service.db.Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(changes).Error
+	if err := w.service.db.Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(changes).Error; err != nil {
+		return err
+	}
 	if w.broker != nil {
 		w.broker.Publish(deliveryEvent)
 	}
+	return nil
 }
 
 func (s *Service) CreateDraft(ctx context.Context, profileID string) (string, string, error) {
@@ -158,7 +178,7 @@ func (s *Service) CreateDraft(ctx context.Context, profileID string) (string, st
 		return "", "", err
 	}
 	job := models.DeliveryJob{
-		ID: newID(), Kind: "profile", ProfileID: profileID, Generation: generation,
+		ID: newID(), Kind: "profile", ProfileID: &profileID, Generation: generation,
 		Status: "waiting", Phase: "upload", Message: "Ожидаем atomic rename .upload -> .ready",
 	}
 	if err := s.db.WithContext(ctx).Create(&job).Error; err != nil {
@@ -250,17 +270,85 @@ func (s *Service) publishProfileForJob(ctx context.Context, profileID, source, j
 	return releaseID, nil
 }
 
-// ImportLauncherRelease publishes already validated upload sources into CAS and
-// persists one immutable signed descriptor per platform.
-func (s *Service) ImportLauncherRelease(ctx context.Context, release models.LauncherRelease) (resultErr error) {
+func (w *Watcher) reconcileLauncherJobs() {
+	var jobs []models.DeliveryJob
+	if err := w.service.db.Where("kind = ? AND status IN ?", "launcher", []string{"queued", "running"}).Order("created_at asc").Find(&jobs).Error; err != nil {
+		return
+	}
+	for index := range jobs {
+		job := &jobs[index]
+		var release models.LauncherRelease
+		if err := w.service.db.Preload("Files").First(&release, "id = ?", job.Generation).Error; err != nil {
+			ended := time.Now().UTC()
+			_ = w.updateJob(job, map[string]any{"status": "failed", "phase": "failed", "message": "Launcher source не найден", "error": err.Error(), "ended_at": &ended})
+			continue
+		}
+		if err := w.service.publishLauncherJob(context.Background(), job, release, w.updateJob); err != nil {
+			slog.Error("launcher delivery v2 publication failed", "release", release.ID, "version", release.Version, "error", err)
+			continue
+		}
+		if w.launcherActivated != nil {
+			w.launcherActivated()
+		}
+		if w.broker != nil {
+			w.broker.Publish(deliveryEvent)
+		}
+	}
+}
+
+// QueueLauncherRelease persists work before returning from the multipart
+// request. The watcher can resume queued/running jobs after a process restart.
+func (s *Service) QueueLauncherRelease(ctx context.Context, release models.LauncherRelease) (models.DeliveryJob, error) {
+	var job models.DeliveryJob
+	err := s.db.WithContext(ctx).Where("kind = ? AND generation = ?", "launcher", release.ID).First(&job).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		job = models.DeliveryJob{
+			ID: newID(), Kind: "launcher", Generation: release.ID,
+			Status: "queued", Phase: "queued", Message: "Launcher release поставлен в очередь",
+		}
+		return job, s.db.WithContext(ctx).Create(&job).Error
+	}
+	if err != nil {
+		return job, err
+	}
+	if job.Status == "succeeded" {
+		return job, nil
+	}
+	err = s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
+		"status": "queued", "phase": "queued", "message": "Launcher release повторно поставлен в очередь",
+		"progress": 0.0, "error": "", "started_at": nil, "ended_at": nil,
+	}).Error
+	if err != nil {
+		return job, err
+	}
+	err = s.db.WithContext(ctx).First(&job, "id = ?", job.ID).Error
+	return job, err
+}
+
+// ImportLauncherRelease is the synchronous operator path used by the explicit
+// migration command. Normal admin uploads use QueueLauncherRelease + watcher.
+func (s *Service) ImportLauncherRelease(ctx context.Context, release models.LauncherRelease) error {
+	job, err := s.QueueLauncherRelease(ctx, release)
+	if err != nil {
+		return err
+	}
+	return s.publishLauncherJob(ctx, &job, release, nil)
+}
+
+func (s *Service) publishLauncherJob(
+	ctx context.Context,
+	job *models.DeliveryJob,
+	release models.LauncherRelease,
+	notify func(*models.DeliveryJob, map[string]any) error,
+) (resultErr error) {
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
-	job := models.DeliveryJob{
-		ID: newID(), Kind: "launcher", Generation: release.ID,
-		Status: "queued", Phase: "queued", Message: "Launcher release принят",
-	}
-	if err := s.db.WithContext(ctx).Where("kind = ? AND profile_id = ? AND generation = ?", "launcher", "", release.ID).FirstOrCreate(&job).Error; err != nil {
-		return err
+	update := func(changes map[string]any) error {
+		if notify != nil {
+			return notify(job, changes)
+		}
+		changes["updated_at"] = time.Now().UTC()
+		return s.db.WithContext(ctx).Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(changes).Error
 	}
 	var readyArtifacts int64
 	if job.Status == "succeeded" {
@@ -273,10 +361,10 @@ func (s *Service) ImportLauncherRelease(ctx context.Context, release models.Laun
 		}
 	}
 	started := time.Now().UTC()
-	if err := s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
+	if err := update(map[string]any{
 		"status": "running", "phase": "chunks", "message": "Чанкуем launcher artifacts",
 		"progress": 0.0, "error": "", "started_at": &started, "ended_at": nil,
-	}).Error; err != nil {
+	}); err != nil {
 		return err
 	}
 	defer func() {
@@ -284,10 +372,10 @@ func (s *Service) ImportLauncherRelease(ctx context.Context, release models.Laun
 			return
 		}
 		ended := time.Now().UTC()
-		_ = s.db.WithContext(context.Background()).Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(map[string]any{
+		_ = update(map[string]any{
 			"status": "failed", "phase": "failed", "message": "Launcher publication отклонена",
 			"error": resultErr.Error(), "ended_at": &ended,
-		}).Error
+		})
 	}()
 	for index, file := range release.Files {
 		path := filepath.Join(s.launcherRoot, release.Version, file.Platform, file.FileName)
@@ -349,15 +437,29 @@ func (s *Service) ImportLauncherRelease(ctx context.Context, release models.Laun
 			return err
 		}
 		progress := float64(index+1) / float64(len(release.Files))
-		if err := s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
+		if err := update(map[string]any{
 			"phase": "descriptor", "message": fmt.Sprintf("Опубликован %s", file.Platform), "progress": progress,
-		}).Error; err != nil {
+		}); err != nil {
 			return err
 		}
 	}
 	ended := time.Now().UTC()
-	return s.db.WithContext(ctx).Model(&job).Updates(map[string]any{
-		"status": "succeeded", "phase": "done", "message": "Immutable launcher descriptors активированы",
-		"progress": 1.0, "release_id": release.ID, "ended_at": &ended,
-	}).Error
+	resultErr = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.LauncherRelease{}).Where("id = ?", release.ID).
+			Updates(map[string]any{"is_active": true, "published_at": &ended}).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&models.DeliveryJob{}).Where("id = ? AND kind = ? AND generation = ?", job.ID, "launcher", release.ID).Updates(map[string]any{
+			"status": "succeeded", "phase": "done", "message": "Immutable launcher descriptors активированы",
+			"progress": 1.0, "release_id": release.ID, "ended_at": &ended, "updated_at": ended,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("launcher delivery job disappeared during activation")
+		}
+		return nil
+	})
+	return resultErr
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"time"
 
 	"launcher-backend/internal/models"
@@ -15,6 +16,7 @@ import (
 // operator-run cleanup. Garbage collection is never started by the server.
 type GCResult struct {
 	ProfileReleases   int `json:"profileReleases"`
+	LauncherReleases  int `json:"launcherReleases"`
 	LauncherArtifacts int `json:"launcherArtifacts"`
 	Blobs             int `json:"blobs"`
 }
@@ -34,6 +36,7 @@ func (s *Service) GarbageCollect(ctx context.Context, keepPerProfile int, grace 
 	cutoff := time.Now().UTC().Add(-grace)
 	result := GCResult{}
 	manifestPaths := make([]string, 0)
+	launcherSourcePaths := make([]string, 0)
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var profileIDs []string
 		if err := tx.Model(&models.ProfileRelease{}).Distinct().Pluck("profile_id", &profileIDs).Error; err != nil {
@@ -76,6 +79,7 @@ func (s *Service) GarbageCollect(ctx context.Context, keepPerProfile int, grace 
 			Scan(&artifacts).Error; err != nil {
 			return err
 		}
+		launcherCandidates := make(map[string]struct{})
 		for _, artifact := range artifacts {
 			if !artifact.CreatedAt.Before(cutoff) {
 				continue
@@ -86,7 +90,35 @@ func (s *Service) GarbageCollect(ctx context.Context, keepPerProfile int, grace 
 			if err := tx.Delete(&models.LauncherDeliveryArtifact{}, "id = ?", artifact.ID).Error; err != nil {
 				return err
 			}
+			launcherCandidates[artifact.ReleaseID] = struct{}{}
 			result.LauncherArtifacts++
+		}
+		for releaseID := range launcherCandidates {
+			var remaining int64
+			if err := tx.Model(&models.LauncherDeliveryArtifact{}).Where("release_id = ?", releaseID).Count(&remaining).Error; err != nil {
+				return err
+			}
+			if remaining != 0 {
+				continue
+			}
+			var release models.LauncherRelease
+			if err := tx.Where("id = ? AND is_active = ? AND ((published_at IS NOT NULL AND published_at < ?) OR (published_at IS NULL AND created_at < ?))", releaseID, false, cutoff, cutoff).First(&release).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return err
+			}
+			if err := tx.Where("release_id = ?", release.ID).Delete(&models.LauncherReleaseFile{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("kind = ? AND generation = ?", "launcher", release.ID).Delete(&models.DeliveryJob{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Delete(&models.LauncherRelease{}, "id = ?", release.ID).Error; err != nil {
+				return err
+			}
+			launcherSourcePaths = append(launcherSourcePaths, filepath.Join(s.launcherRoot, release.Version))
+			result.LauncherReleases++
 		}
 		return nil
 	})
@@ -95,6 +127,9 @@ func (s *Service) GarbageCollect(ctx context.Context, keepPerProfile int, grace 
 	}
 	for _, path := range manifestPaths {
 		_ = os.Remove(path)
+	}
+	for _, path := range launcherSourcePaths {
+		_ = os.RemoveAll(path)
 	}
 
 	referenced := make(map[string]struct{})

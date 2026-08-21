@@ -24,7 +24,8 @@ type Config struct {
 	DeliveryRoot       string
 	// DeliveryV1Bridge temporarily exposes legacy profile/update routes while
 	// the mandatory v2 launcher release is being adopted.
-	DeliveryV1Bridge bool
+	DeliveryV1Bridge      bool
+	DeliveryV1BridgeUntil time.Time
 	// DeliveryManifestSigningKey is a 32-byte Ed25519 seed encoded as hex.
 	// Production requires it; development may publish unsigned manifests.
 	DeliveryManifestSigningKey string
@@ -99,7 +100,8 @@ func Load() Config {
 			filepath.Join("storage", "profiles"),
 		),
 		DeliveryRoot:               env("DELIVERY_ROOT", filepath.Join("storage", "delivery-v2")),
-		DeliveryV1Bridge:           env("DELIVERY_V1_BRIDGE", "true") == "true",
+		DeliveryV1Bridge:           env("DELIVERY_V1_BRIDGE", "false") == "true",
+		DeliveryV1BridgeUntil:      parseRFC3339(os.Getenv("DELIVERY_V1_BRIDGE_UNTIL")),
 		DeliveryManifestSigningKey: strings.TrimSpace(os.Getenv("DELIVERY_MANIFEST_SIGNING_KEY")),
 		ProfileCDNBase:             strings.TrimRight(env("PROFILE_CDN_BASE", ""), "/"),
 		LauncherReleaseRoot: env(
@@ -166,6 +168,9 @@ var devSecrets = map[string]bool{
 
 // Validate отклоняет конфигурацию, с которой опасно стартовать в production.
 func (c Config) Validate() error {
+	if c.DeliveryV1Bridge && c.DeliveryV1BridgeUntil.IsZero() {
+		return errors.New("DELIVERY_V1_BRIDGE=true требует DELIVERY_V1_BRIDGE_UNTIL в RFC3339")
+	}
 	if c.AppEnv != "production" {
 		return nil
 	}
@@ -212,6 +217,15 @@ func (c Config) Validate() error {
 		return errors.New("APP_ENV=production требует DATABASE_URL (Postgres): тихий SQLite-fallback запрещён")
 	}
 	return nil
+}
+
+func (c Config) V1BridgeEnabled(now time.Time) bool {
+	return c.DeliveryV1Bridge && !c.DeliveryV1BridgeUntil.IsZero() && now.Before(c.DeliveryV1BridgeUntil)
+}
+
+func parseRFC3339(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339, strings.TrimSpace(value))
+	return parsed
 }
 
 // SlogLevel переводит LOG_LEVEL в slog.Level (debug/info/warn/error).

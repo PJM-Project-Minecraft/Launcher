@@ -6,14 +6,15 @@ import "time"
 // Mandatory: клиенты ниже этой версии не получают launch-token (форс-апдейт).
 // IsActive=false снимает релиз с раздачи (откат публикации).
 type LauncherRelease struct {
-	ID        string                `gorm:"type:uuid;primaryKey" json:"id"`
-	Version   string                `gorm:"size:32;uniqueIndex;not null" json:"version"`
-	Changelog string                `json:"changelog"`
-	Mandatory bool                  `gorm:"not null;default:false" json:"mandatory"`
-	IsActive  bool                  `gorm:"not null;default:true" json:"isActive"`
-	Files     []LauncherReleaseFile `gorm:"foreignKey:ReleaseID" json:"files"`
-	CreatedAt time.Time             `json:"createdAt"`
-	UpdatedAt time.Time             `json:"updatedAt"`
+	ID          string                `gorm:"type:uuid;primaryKey" json:"id"`
+	Version     string                `gorm:"size:32;uniqueIndex;not null" json:"version"`
+	Changelog   string                `json:"changelog"`
+	Mandatory   bool                  `gorm:"not null;default:false" json:"mandatory"`
+	IsActive    bool                  `gorm:"not null;default:false" json:"isActive"`
+	Files       []LauncherReleaseFile `gorm:"foreignKey:ReleaseID" json:"files"`
+	CreatedAt   time.Time             `json:"createdAt"`
+	UpdatedAt   time.Time             `json:"updatedAt"`
+	PublishedAt *time.Time            `json:"publishedAt,omitempty"`
 }
 
 // LauncherReleaseFile — бинарник релиза под конкретную платформу.

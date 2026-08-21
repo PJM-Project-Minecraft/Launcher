@@ -81,6 +81,8 @@ func (s Service) invalidateReleaseCache() {
 	s.cache.mu.Unlock()
 }
 
+func (s Service) InvalidateDeliveryChannel() { s.invalidateReleaseCache() }
+
 // StorageRoot возвращает корень каталога релизов; пустая строка — сервис не
 // сконфигурирован (бот скрывает кнопки скачивания по платформам).
 func (s Service) StorageRoot() string { return s.storageRoot }
@@ -145,13 +147,18 @@ func (s Service) create(ctx context.Context, req CreateRequest, files []Uploaded
 		return models.LauncherRelease{}, errors.New("прикрепите бинарник хотя бы для одной платформы")
 	}
 
-	var count int64
-	if err := s.db.WithContext(ctx).Model(&models.LauncherRelease{}).
-		Where("version = ?", version).Count(&count).Error; err != nil {
-		return models.LauncherRelease{}, err
-	}
-	if count > 0 {
-		return models.LauncherRelease{}, fmt.Errorf("релиз %s уже существует", version)
+	var existing models.LauncherRelease
+	existingErr := s.db.WithContext(ctx).Where("version = ?", version).First(&existing).Error
+	if existingErr == nil {
+		if !active && !existing.IsActive && existing.PublishedAt == nil {
+			if err := s.PurgeStaged(ctx, existing.ID); err != nil {
+				return models.LauncherRelease{}, err
+			}
+		} else {
+			return models.LauncherRelease{}, fmt.Errorf("релиз %s уже существует", version)
+		}
+	} else if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
+		return models.LauncherRelease{}, existingErr
 	}
 
 	release := models.LauncherRelease{
@@ -160,6 +167,10 @@ func (s Service) create(ctx context.Context, req CreateRequest, files []Uploaded
 		Changelog: strings.TrimSpace(req.Changelog),
 		Mandatory: req.Mandatory,
 		IsActive:  active,
+	}
+	if active {
+		publishedAt := time.Now().UTC()
+		release.PublishedAt = &publishedAt
 	}
 
 	seen := map[string]bool{}
@@ -262,6 +273,57 @@ func (s Service) List(ctx context.Context) ([]models.LauncherRelease, error) {
 	return releases, err
 }
 
+func (s Service) Get(ctx context.Context, id string) (models.LauncherRelease, error) {
+	var release models.LauncherRelease
+	err := s.db.WithContext(ctx).Preload("Files").First(&release, "id = ?", id).Error
+	return release, err
+}
+
+// PurgeStaged removes only a release which has never entered the public
+// channel. Published/tombstoned releases are immutable and belong to GC.
+func (s Service) PurgeStaged(ctx context.Context, id string) error {
+	var release models.LauncherRelease
+	if err := s.db.WithContext(ctx).First(&release, "id = ?", id).Error; err != nil {
+		return err
+	}
+	if release.IsActive || release.PublishedAt != nil {
+		return errors.New("опубликованный launcher release удаляется только через delivery GC")
+	}
+	var activeJobs int64
+	if err := s.db.WithContext(ctx).Model(&models.DeliveryJob{}).
+		Where("kind = ? AND generation = ? AND status IN ?", "launcher", release.ID, []string{"queued", "running"}).Count(&activeJobs).Error; err != nil {
+		return err
+	}
+	if activeJobs != 0 {
+		return errors.New("нельзя удалить launcher source пока delivery job выполняется")
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var artifactIDs []string
+		if err := tx.Model(&models.LauncherDeliveryArtifact{}).Where("release_id = ?", release.ID).Pluck("id", &artifactIDs).Error; err != nil {
+			return err
+		}
+		if len(artifactIDs) > 0 {
+			if err := tx.Where("artifact_id IN ?", artifactIDs).Delete(&models.LauncherDeliveryArtifactChunk{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("release_id = ?", release.ID).Delete(&models.LauncherDeliveryArtifact{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("kind = ? AND generation = ?", "launcher", release.ID).Delete(&models.DeliveryJob{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("release_id = ?", release.ID).Delete(&models.LauncherReleaseFile{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&models.LauncherRelease{}, "id = ?", release.ID).Error
+	}); err != nil {
+		return err
+	}
+	s.invalidateReleaseCache()
+	return os.RemoveAll(filepath.Join(s.storageRoot, release.Version))
+}
+
 func (s Service) Update(ctx context.Context, id string, req PatchRequest) (models.LauncherRelease, error) {
 	var release models.LauncherRelease
 	if err := s.db.WithContext(ctx).Preload("Files").First(&release, "id = ?", id).Error; err != nil {
@@ -271,6 +333,9 @@ func (s Service) Update(ctx context.Context, id string, req PatchRequest) (model
 		release.Mandatory = *req.Mandatory
 	}
 	if req.IsActive != nil {
+		if *req.IsActive && release.PublishedAt == nil {
+			return models.LauncherRelease{}, errors.New("нельзя активировать launcher release до завершения delivery job")
+		}
 		release.IsActive = *req.IsActive
 	}
 	if err := s.db.WithContext(ctx).Model(&models.LauncherRelease{ID: release.ID}).
@@ -285,6 +350,9 @@ func (s Service) Delete(ctx context.Context, id string) error {
 	var release models.LauncherRelease
 	if err := s.db.WithContext(ctx).First(&release, "id = ?", id).Error; err != nil {
 		return err
+	}
+	if !release.IsActive && release.PublishedAt == nil {
+		return s.PurgeStaged(ctx, release.ID)
 	}
 	// Admin DELETE is a channel tombstone. Immutable artifacts already handed to
 	// clients remain readable by release ID until explicit delivery-gc + grace.

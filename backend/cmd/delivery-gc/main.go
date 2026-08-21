@@ -30,5 +30,5 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("removed profile_releases=%d launcher_artifacts=%d blobs=%d\n", result.ProfileReleases, result.LauncherArtifacts, result.Blobs)
+	fmt.Printf("removed profile_releases=%d launcher_releases=%d launcher_artifacts=%d blobs=%d\n", result.ProfileReleases, result.LauncherReleases, result.LauncherArtifacts, result.Blobs)
 }

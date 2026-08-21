@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 const testDeliverySigningKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -143,5 +147,20 @@ func TestValidateRejectsWeakSiteOrderSecret(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("SITE_ORDER_SECRET (%s) должен отклоняться в проде", name)
 		}
+	}
+}
+
+func TestV1BridgeRequiresAndHonorsCutoff(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	cfg := Config{DeliveryV1Bridge: true}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DELIVERY_V1_BRIDGE_UNTIL") {
+		t.Fatalf("missing cutoff error = %v", err)
+	}
+	cfg.DeliveryV1BridgeUntil = now.Add(time.Hour)
+	if !cfg.V1BridgeEnabled(now) {
+		t.Fatal("bridge disabled before cutoff")
+	}
+	if cfg.V1BridgeEnabled(now.Add(2 * time.Hour)) {
+		t.Fatal("bridge remained enabled after cutoff")
 	}
 }

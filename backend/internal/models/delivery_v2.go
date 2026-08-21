@@ -57,15 +57,15 @@ type LauncherDeliveryArtifactChunk struct {
 }
 type DeliveryJob struct {
 	ID         string     `gorm:"type:uuid;primaryKey" json:"id"`
-	Kind       string     `gorm:"size:24;index;not null;uniqueIndex:ux_delivery_job_generation" json:"kind"`
-	ProfileID  string     `gorm:"type:uuid;index;uniqueIndex:ux_delivery_job_generation" json:"profileId,omitempty"`
-	Generation string     `gorm:"size:160;index;uniqueIndex:ux_delivery_job_generation" json:"generation,omitempty"`
+	Kind       string     `gorm:"size:24;index;not null" json:"kind"`
+	ProfileID  *string    `gorm:"type:uuid;index" json:"profileId,omitempty"`
+	Generation string     `gorm:"size:160;uniqueIndex;not null" json:"generation"`
 	Status     string     `gorm:"size:24;index;not null" json:"status"`
 	Phase      string     `gorm:"size:48;not null" json:"phase"`
 	Message    string     `json:"message"`
 	Progress   float64    `gorm:"not null;default:0" json:"progress"`
 	Error      string     `json:"error,omitempty"`
-	ReleaseID  string     `gorm:"type:uuid" json:"releaseId,omitempty"`
+	ReleaseID  *string    `gorm:"type:uuid" json:"releaseId,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	StartedAt  *time.Time `json:"startedAt,omitempty"`
 	EndedAt    *time.Time `json:"endedAt,omitempty"`

@@ -11,7 +11,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"launcher-backend/internal/models"
 
@@ -237,11 +239,82 @@ func TestProcessingRecoveryFinalizesCommittedGenerationWithoutRepublish(t *testi
 	if err := db.First(&job, "id = ?", job.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if job.Status != "succeeded" || job.ReleaseID == "" {
+	if job.Status != "succeeded" || job.ReleaseID == nil {
 		t.Fatalf("recovered job = %+v", job)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(upload), generation+".published")); err != nil {
 		t.Fatalf("published generation missing: %v", err)
+	}
+}
+
+func TestLauncherJobResumesAndActivatesOutsideUploadRequest(t *testing.T) {
+	service, db := testService(t)
+	payload := []byte("launcher-worker-payload")
+	digest := sha256.Sum256(payload)
+	release := models.LauncherRelease{
+		ID: newID(), Version: "2.0.0", IsActive: false,
+		Files: []models.LauncherReleaseFile{{
+			ID: newID(), Platform: "linux-x64", FileName: "launcher",
+			HashSHA256: hex.EncodeToString(digest[:]), Size: int64(len(payload)), SignatureEd25519: strings.Repeat("a", 128),
+		}},
+	}
+	release.Files[0].ReleaseID = release.ID
+	path := filepath.Join(service.launcherRoot, release.Version, "linux-x64", "launcher")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&release).Error; err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.QueueLauncherRelease(context.Background(), release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ProfileID != nil || job.ReleaseID != nil || job.Status != "queued" {
+		t.Fatalf("queued launcher job = %+v", job)
+	}
+	// A restarted process turns running back into queued; either state is
+	// recoverable by the same durable worker.
+	if err := db.Model(&job).Update("status", "running").Error; err != nil {
+		t.Fatal(err)
+	}
+	NewWatcher(service, nil).reconcileLauncherJobs()
+	if err := db.First(&job, "id = ?", job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "succeeded" || job.ReleaseID == nil {
+		t.Fatalf("completed launcher job = %+v", job)
+	}
+	if err := db.First(&release, "id = ?", release.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !release.IsActive || release.PublishedAt == nil {
+		t.Fatalf("launcher release was not atomically activated: %+v", release)
+	}
+}
+
+func TestFailedLauncherJobCanBeRequeued(t *testing.T) {
+	service, db := testService(t)
+	release := models.LauncherRelease{ID: newID(), Version: "2.1.0"}
+	if err := db.Create(&release).Error; err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.QueueLauncherRelease(context.Background(), release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&job).Updates(map[string]any{"status": "failed", "error": "temporary"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.QueueLauncherRelease(context.Background(), release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "queued" || job.Error != "" {
+		t.Fatalf("requeued job = %+v", job)
 	}
 }
 
@@ -296,5 +369,52 @@ func TestGarbageCollectRetainsNewestReleaseAndReferencedBlobs(t *testing.T) {
 	}
 	if _, err := os.Stat(service.blobPath(oldBlob)); !os.IsNotExist(err) {
 		t.Fatalf("old blob was not removed: %v", err)
+	}
+}
+
+func TestGarbageCollectRemovesTombstonedLauncherSourceAfterGrace(t *testing.T) {
+	service, db := testService(t)
+	payload := []byte("old-launcher")
+	digest := sha256.Sum256(payload)
+	release := models.LauncherRelease{
+		ID: newID(), Version: "3.0.0", IsActive: true,
+		Files: []models.LauncherReleaseFile{{
+			ID: newID(), Platform: "linux-x64", FileName: "launcher",
+			HashSHA256: hex.EncodeToString(digest[:]), Size: int64(len(payload)), SignatureEd25519: strings.Repeat("b", 128),
+		}},
+	}
+	release.Files[0].ReleaseID = release.ID
+	path := filepath.Join(service.launcherRoot, release.Version, "linux-x64", "launcher")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&release).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ImportLauncherRelease(context.Background(), release); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	if err := db.Model(&models.LauncherRelease{}).Where("id = ?", release.ID).Updates(map[string]any{"is_active": false, "published_at": old}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.LauncherDeliveryArtifact{}).Where("release_id = ?", release.ID).Update("created_at", old).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.GarbageCollect(context.Background(), 1, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.LauncherReleases != 1 || result.LauncherArtifacts != 1 {
+		t.Fatalf("launcher GC result = %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(service.launcherRoot, release.Version)); !os.IsNotExist(err) {
+		t.Fatalf("launcher source survived GC: %v", err)
+	}
+	if err := db.First(&models.LauncherRelease{}, "id = ?", release.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("launcher metadata survived GC: %v", err)
 	}
 }

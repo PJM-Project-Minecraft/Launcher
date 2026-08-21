@@ -19,7 +19,10 @@ func newTestService(t *testing.T) Service {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.LauncherRelease{}, &models.LauncherReleaseFile{}); err != nil {
+	if err := db.AutoMigrate(
+		&models.LauncherRelease{}, &models.LauncherReleaseFile{},
+		&models.DeliveryJob{}, &models.LauncherDeliveryArtifact{}, &models.LauncherDeliveryArtifactChunk{},
+	); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)
 	}
 	return NewService(db, t.TempDir())
@@ -47,6 +50,35 @@ func TestRequiredSignatureRejectsUnsignedArtifact(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "обязательна") {
 		t.Fatalf("unsigned artifact error = %v", err)
+	}
+}
+
+func TestFailedStagedVersionCanBeReuploadedButPublishedVersionCannot(t *testing.T) {
+	s := newTestService(t)
+	first, err := s.CreateStaged(context.Background(), CreateRequest{Version: "1.2.3"}, []UploadedFile{{
+		Platform: "linux-x64", FileName: "launcher", Reader: bytes.NewReader([]byte("broken")),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateStaged(context.Background(), CreateRequest{Version: "1.2.3"}, []UploadedFile{{
+		Platform: "linux-x64", FileName: "launcher", Reader: bytes.NewReader([]byte("replacement")),
+	}})
+	if err != nil {
+		t.Fatalf("replace unpublished staged release: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatal("staged replacement reused release identity")
+	}
+	published := createRelease(t, s, "1.2.4", false)
+	off := false
+	if _, err := s.Update(context.Background(), published.ID, PatchRequest{IsActive: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateStaged(context.Background(), CreateRequest{Version: "1.2.4"}, []UploadedFile{{
+		Platform: "linux-x64", FileName: "launcher", Reader: bytes.NewReader([]byte("replacement")),
+	}}); err == nil {
+		t.Fatal("published tombstone was destructively replaced")
 	}
 }
 

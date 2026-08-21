@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 
 	"launcher-backend/internal/auth"
 	"launcher-backend/internal/events"
@@ -26,7 +27,7 @@ type Handler struct {
 }
 
 type V2Publisher interface {
-	ImportLauncherRelease(context.Context, models.LauncherRelease) error
+	QueueLauncherRelease(context.Context, models.LauncherRelease) (models.DeliveryJob, error)
 }
 
 type ErrorResponse struct {
@@ -46,9 +47,17 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 }
 
 func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber.Handler, v1Bridge bool) {
-	// Публичные: проверка и скачивание обновления работают до логина.
+	until := time.Time{}
 	if v1Bridge {
-		group := app.Group("/api/launcher")
+		until = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	h.RegisterRoutesWithV1BridgeUntil(app, authMiddleware, until)
+}
+
+func (h Handler) RegisterRoutesWithV1BridgeUntil(app *fiber.App, authMiddleware fiber.Handler, until time.Time) {
+	// Публичные: проверка и скачивание обновления работают до логина.
+	if !until.IsZero() {
+		group := app.Group("/api/launcher", launcherBridgeDeadline(until))
 		group.Get("/update", h.checkUpdate)
 		group.Get("/download/:version/:platform", h.download)
 	}
@@ -57,8 +66,8 @@ func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber
 	app.Get("/download", h.downloadPage)
 	app.Get("/download/pjm.png", h.logo)
 
-	if v1Bridge {
-		admin := app.Group("/api/admin/releases")
+	if !until.IsZero() {
+		admin := app.Group("/api/admin/releases", launcherBridgeDeadline(until))
 		admin.Use(authMiddleware, auth.RequireAdmin)
 		admin.Get("/", h.list)
 		admin.Post("/", h.create)
@@ -70,8 +79,18 @@ func (h Handler) RegisterRoutesWithV1Bridge(app *fiber.App, authMiddleware fiber
 	adminV2.Use(authMiddleware, auth.RequireAdmin)
 	adminV2.Get("/", h.list)
 	adminV2.Post("/", h.create)
+	adminV2.Post("/:id/retry", h.retry)
 	adminV2.Patch("/:id", h.patch)
 	adminV2.Delete("/:id", h.delete)
+}
+
+func launcherBridgeDeadline(until time.Time) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if !time.Now().UTC().Before(until) {
+			return c.SendStatus(http.StatusNotFound)
+		}
+		return c.Next()
+	}
 }
 
 func (h Handler) notifyReleaseChanged() {
@@ -146,18 +165,32 @@ func (h Handler) create(c fiber.Ctx) error {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: err.Error()})
 	}
 	if h.v2 != nil {
-		if err := h.v2.ImportLauncherRelease(c.Context(), release); err != nil {
-			_ = h.service.Delete(c.Context(), release.ID)
-			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Delivery v2 отклонил релиз: " + err.Error()})
+		job, queueErr := h.v2.QueueLauncherRelease(c.Context(), release)
+		if queueErr != nil {
+			_ = h.service.PurgeStaged(c.Context(), release.ID)
+			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Delivery v2 не принял job: " + queueErr.Error()})
 		}
-		active := true
-		release, err = h.service.Update(c.Context(), release.ID, PatchRequest{IsActive: &active})
-		if err != nil {
-			return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Delivery v2 готов, но channel activation не удалась"})
-		}
+		h.notifyReleaseChanged()
+		return c.Status(http.StatusAccepted).JSON(job)
 	}
 	h.notifyReleaseChanged()
 	return c.Status(http.StatusCreated).JSON(release)
+}
+
+func (h Handler) retry(c fiber.Ctx) error {
+	if h.v2 == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(ErrorResponse{Message: "Delivery v2 не настроен"})
+	}
+	release, err := h.service.Get(c.Context(), c.Params("id"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	job, err := h.v2.QueueLauncherRelease(c.Context(), release)
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	h.notifyReleaseChanged()
+	return c.Status(http.StatusAccepted).JSON(job)
 }
 
 func (h Handler) patch(c fiber.Ctx) error {
