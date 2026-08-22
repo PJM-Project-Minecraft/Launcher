@@ -208,14 +208,17 @@ func (s *Service) publishProfileForJob(ctx context.Context, profileID, source, j
 	if len(files) == 0 {
 		return "", errors.New("ready generation is empty")
 	}
-	var maxSequence int
-	_ = s.db.WithContext(ctx).Model(&models.ProfileRelease{}).Where("profile_id = ?", profileID).Select("COALESCE(MAX(sequence), 0)").Scan(&maxSequence).Error
-	releaseID := newID()
-	createdAt := time.Now().UTC()
 	config := s.profileConfig(profile)
 	if len(config.PreservePaths) == 0 {
 		config.PreservePaths = append([]string(nil), defaultPreservePaths...)
 	}
+	if preservePath, managedPath, ok := preserveManagedConflict(files, config.PreservePaths); ok {
+		return "", fmt.Errorf("preserve path %s conflicts with managed file %s", preservePath, managedPath)
+	}
+	var maxSequence int
+	_ = s.db.WithContext(ctx).Model(&models.ProfileRelease{}).Where("profile_id = ?", profileID).Select("COALESCE(MAX(sequence), 0)").Scan(&maxSequence).Error
+	releaseID := newID()
+	createdAt := time.Now().UTC()
 	manifest := ProfileManifest{SchemaVersion: SchemaVersion, Kind: "profile", ReleaseID: releaseID, Sequence: maxSequence + 1, CreatedAt: createdAt, Profile: config, Files: files, FileCount: len(files), TotalSize: total}
 	manifestBytes, manifestHash, err := encodeManifest(manifest)
 	if err != nil {
@@ -272,6 +275,20 @@ func (s *Service) publishProfileForJob(ctx context.Context, profileID, source, j
 		return "", err
 	}
 	return releaseID, nil
+}
+
+func preserveManagedConflict(files []ReleaseFile, preservePaths []string) (string, string, bool) {
+	for _, preservePath := range preservePaths {
+		if preservePath == "" {
+			continue
+		}
+		for _, file := range files {
+			if pathMatchesPreserve(file.Path, []string{preservePath}) {
+				return preservePath, file.Path, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func (w *Watcher) reconcileLauncherJobs() {

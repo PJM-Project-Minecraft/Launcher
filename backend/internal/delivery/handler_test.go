@@ -1,11 +1,13 @@
 package delivery
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,6 +18,52 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 )
+
+func TestCreateDraftFromActiveViaAdminAPI(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "client.jar"), []byte("current client"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := fiber.New()
+	NewHandler(service).RegisterRoutes(app, func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
+		return c.Next()
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/api/v2/admin/delivery/profiles/"+profile.ID+"/drafts/from-active", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var body struct {
+		Generation      string `json:"generation"`
+		SFTPPath        string `json:"sftpPath"`
+		SourceReleaseID string `json:"sourceReleaseId"`
+		SeededFileCount int    `json:"seededFileCount"`
+		SeededTotalSize int64  `json:"seededTotalSize"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Generation == "" || body.SourceReleaseID == "" || body.SeededFileCount != 1 || body.SeededTotalSize != int64(len("current client")) {
+		t.Fatalf("response = %+v", body)
+	}
+	if data, err := os.ReadFile(filepath.Join(body.SFTPPath, "client.jar")); err != nil || string(data) != "current client" {
+		t.Fatalf("seeded client = %q, err=%v", data, err)
+	}
+}
 
 func TestLauncherDescriptorIsSigned(t *testing.T) {
 	service, db := testService(t)

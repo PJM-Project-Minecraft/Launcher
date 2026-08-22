@@ -33,6 +33,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/jobs", h.jobs)
 	admin.Post("/profiles/:id/drafts", h.createDraft)
+	admin.Post("/profiles/:id/drafts/from-active", h.createDraftFromActive)
 }
 
 func (h Handler) profiles(c fiber.Ctx) error {
@@ -115,6 +116,21 @@ func (h Handler) createDraft(c fiber.Ctx) error {
 		return h.writeError(c, err)
 	}
 	return c.Status(http.StatusCreated).JSON(fiber.Map{"generation": generation, "sftpPath": path, "completeBy": "atomic-rename-to-" + generation + ".ready"})
+}
+
+func (h Handler) createDraftFromActive(c fiber.Ctx) error {
+	draft, err := h.service.CreateDraftFromActive(c.Context(), c.Params("id"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	return c.Status(http.StatusCreated).JSON(fiber.Map{
+		"generation":      draft.Generation,
+		"sftpPath":        draft.Path,
+		"completeBy":      "atomic-rename-to-" + draft.Generation + ".ready",
+		"sourceReleaseId": draft.SourceReleaseID,
+		"seededFileCount": draft.SeededFiles,
+		"seededTotalSize": draft.SeededSize,
+	})
 }
 
 func sendImmutable(c fiber.Ctx, path, hash string, size int64, public bool) error {

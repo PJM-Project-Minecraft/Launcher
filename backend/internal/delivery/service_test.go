@@ -173,6 +173,109 @@ func TestPublishRepairsCorruptCASBlobWithSameSize(t *testing.T) {
 	}
 }
 
+func TestPublishProfileRejectsManagedFilesInsidePreservePaths(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{
+		ID: newID(), Name: "Test", Slug: "test", Loader: "fabric",
+		GameVersion: "1.21.1", JavaVersion: 21, IsActive: true,
+		PreservePaths: []string{".voxy/"},
+	}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, ".voxy", "saves"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".voxy", "saves", "cache.db"), []byte("player cache"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err == nil || !strings.Contains(err.Error(), ".voxy/") {
+		t.Fatalf("publish error = %v, want preserve-path collision", err)
+	}
+	var releases int64
+	if err := db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if releases != 0 {
+		t.Fatalf("published releases = %d, want 0", releases)
+	}
+}
+
+func TestCreateDraftFromActiveMaterializesManagedFilesAndSkipsCurrentPreservePaths(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{
+		ID: newID(), Name: "Test", Slug: "test", Loader: "fabric",
+		GameVersion: "1.21.1", JavaVersion: 21, IsActive: true,
+		PreservePaths: []string{"options.txt"},
+	}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(source, ".voxy", "saves"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	modPayload := []byte("managed mod")
+	if err := os.WriteFile(filepath.Join(source, "mods", "current.jar"), modPayload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".voxy", "saves", "cache.db"), []byte("old cache"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.PreservePaths = []string{".voxy/"}
+	if err := db.Save(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	draft, err := service.CreateDraftFromActive(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.SourceReleaseID != releaseID || draft.SeededFiles != 1 || draft.SeededSize != int64(len(modPayload)) {
+		t.Fatalf("seeded draft = %+v", draft)
+	}
+	seededMod := filepath.Join(draft.Path, "mods", "current.jar")
+	data, err := os.ReadFile(seededMod)
+	if err != nil || !bytes.Equal(data, modPayload) {
+		t.Fatalf("seeded mod = %q, err=%v", data, err)
+	}
+	if info, err := os.Stat(seededMod); err != nil || info.Mode().Perm()&0111 == 0 {
+		t.Fatalf("seeded executable mode = %v, err=%v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(draft.Path, ".voxy")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preserved .voxy was copied into draft: %v", err)
+	}
+	var job models.DeliveryJob
+	if err := db.Where("profile_id = ? AND generation = ?", profile.ID, draft.Generation).First(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "waiting" || job.Phase != "upload" {
+		t.Fatalf("draft job = %+v", job)
+	}
+
+	if err := os.WriteFile(seededMod, []byte("replacement"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.CreateDraftFromActive(context.Background(), profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondData, err := os.ReadFile(filepath.Join(second.Path, "mods", "current.jar"))
+	if err != nil || !bytes.Equal(secondData, modPayload) {
+		t.Fatalf("second seeded mod = %q, err=%v; first draft mutated immutable source", secondData, err)
+	}
+}
+
 func TestReadyRenameIsTheOnlyPublicationSignal(t *testing.T) {
 	service, db := testService(t)
 	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}

@@ -25,12 +25,17 @@ Delivery v2 — единый контур доставки профилей Mine
 ## Публикация профиля
 
 1. Администратор сохраняет профиль в WEB.
-2. Кнопка «Создать SFTP generation» вызывает
-   `POST /api/v2/admin/delivery/profiles/:id/drafts`.
-3. Backend создаёт
-   `storage/delivery-v2/incoming/profiles/<profile-id>/<generation>.upload`.
-4. В `.upload` загружается полный managed-клиент с путями в том виде, в котором
-   они должны оказаться внутри `files/` игрока.
+2. Для первой сборки кнопка «Создать пустую generation» вызывает
+   `POST /api/v2/admin/delivery/profiles/:id/drafts`; в полученный `.upload`
+   загружается полный managed-клиент.
+3. Для обычного обновления кнопка «Создать из текущей сборки» вызывает
+   `POST /api/v2/admin/delivery/profiles/:id/drafts/from-active`. Backend сам
+   материализует активный immutable release из CAS в новый `.upload`, исключая
+   текущие `preservePaths`. Администратор заменяет или удаляет только изменённые
+   файлы; полный клиент повторно по SFTP не передаётся.
+4. Пути внутри `.upload` должны соответствовать их будущему расположению внутри
+   `files/` игрока. Черновик независим от исходного release: его изменение не
+   меняет уже опубликованный manifest или CAS-данные.
 5. После завершения загрузки каталог одной SFTP-операцией переименовывается в
    `<generation>.ready`.
 6. Watcher атомарно забирает generation в `.processing`, проверяет переносимость
@@ -73,6 +78,7 @@ Admin:
 
 - `GET /api/v2/admin/delivery/jobs`
 - `POST /api/v2/admin/delivery/profiles/:id/drafts`
+- `POST /api/v2/admin/delivery/profiles/:id/drafts/from-active`
 - `/api/v2/admin/launcher-releases/*`
 - `POST /api/v2/admin/launcher-releases/:id/retry`
 
