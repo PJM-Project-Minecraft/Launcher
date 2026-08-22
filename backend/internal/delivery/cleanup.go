@@ -205,6 +205,15 @@ func (s *Service) GarbageCollect(ctx context.Context, keepPerProfile int, grace 
 				if index < keepPerProfile || release.IsActive || !release.CreatedAt.Before(cutoff) {
 					continue
 				}
+				var seedReferences int64
+				if err := tx.Model(&models.DeliveryJob{}).
+					Where("source_release_id = ? AND status IN ?", release.ID, []string{"queued", "running"}).
+					Count(&seedReferences).Error; err != nil {
+					return err
+				}
+				if seedReferences > 0 {
+					continue
+				}
 				manifest := s.manifestPath(release.ID)
 				move, moved, err := stageGCPath(manifest, manifest+gcFileSuffix, false)
 				if err != nil {

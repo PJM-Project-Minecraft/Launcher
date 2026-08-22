@@ -65,6 +65,43 @@ func TestCreateDraftFromActiveViaAdminAPI(t *testing.T) {
 	}
 }
 
+func TestAdminProfilesIncludesInactiveProfileWithActiveRelease(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Inactive", Slug: "inactive", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: false}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&profile).Update("is_active", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	release := models.ProfileRelease{ID: newID(), ProfileID: profile.ID, Sequence: 1, ManifestSHA256: strings.Repeat("a", 64), IsActive: true}
+	if err := db.Create(&release).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	app := fiber.New()
+	NewHandler(service).RegisterRoutes(app, func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
+		return c.Next()
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/admin/delivery/profiles", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var profiles []ProfileSummary
+	if err := json.NewDecoder(response.Body).Decode(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || profiles[0].ID != profile.ID || profiles[0].ActiveReleaseID != release.ID || profiles[0].IsActive {
+		t.Fatalf("admin profiles = %+v", profiles)
+	}
+}
+
 func TestLauncherDescriptorIsSigned(t *testing.T) {
 	service, db := testService(t)
 	payload := []byte("signed-launcher-binary")

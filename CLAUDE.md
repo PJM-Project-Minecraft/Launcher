@@ -299,8 +299,10 @@ URL бэкенда: env `LAUNCHER_API_URL` или зашитый при сбор
 **Гоча команды запуска профиля:** для модовых загрузчиков (NeoForge/Forge) команда
 должна быть сгенерирована до публикации v2 generation и попасть в immutable profile config.
 Ручной шаблон `-jar client.jar` — это ванильный паттерн → `Unable to access jarfile client.jar`,
-MC мгновенно выходит. Админ создаёт draft, загружает полную managed-сборку в
-`<generation>.upload` и атомарно переименовывает её в `<generation>.ready`; quiet-time и
+MC мгновенно выходит. Для первой сборки админ загружает полное managed-дерево в
+`<generation>.upload`. Для обычного обновления admin API создаёт durable seed-job, материализует активный release из CAS в server-owned `.seeding`, затем атомарно открывает готовый `.upload` без
+`preservePaths`, после чего админ заменяет/удаляет только изменённые файлы. Оба потока завершаются атомарным
+rename в `<generation>.ready`; quiet-time и
 автоподготовки по неполному дереву нет.
 
 **В backend-образе есть Temurin 21 JRE** (нужен для `PrepareClient` — headless-установщик

@@ -32,6 +32,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	admin := app.Group("/api/v2/admin/delivery")
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/jobs", h.jobs)
+	admin.Get("/profiles", h.adminProfiles)
 	admin.Post("/profiles/:id/drafts", h.createDraft)
 	admin.Post("/profiles/:id/drafts/from-active", h.createDraftFromActive)
 }
@@ -108,6 +109,14 @@ func (h Handler) jobs(c fiber.Ctx) error {
 		return h.writeError(c, err)
 	}
 	return c.JSON(jobs)
+}
+
+func (h Handler) adminProfiles(c fiber.Ctx) error {
+	items, err := h.service.AdminProfiles(c.Context())
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	return c.JSON(items)
 }
 
 func (h Handler) createDraft(c fiber.Ctx) error {

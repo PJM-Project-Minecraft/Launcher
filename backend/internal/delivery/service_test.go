@@ -174,33 +174,48 @@ func TestPublishRepairsCorruptCASBlobWithSameSize(t *testing.T) {
 }
 
 func TestPublishProfileRejectsManagedFilesInsidePreservePaths(t *testing.T) {
-	service, db := testService(t)
-	profile := models.Profile{
-		ID: newID(), Name: "Test", Slug: "test", Loader: "fabric",
-		GameVersion: "1.21.1", JavaVersion: 21, IsActive: true,
-		PreservePaths: []string{".voxy/"},
+	tests := []struct {
+		name         string
+		preservePath string
+		managedPath  string
+	}{
+		{name: "directory descendant", preservePath: ".voxy/", managedPath: ".voxy/saves/cache.db"},
+		{name: "windows case folding", preservePath: ".voxy/", managedPath: ".VOXY/saves/cache.db"},
+		{name: "managed descendant of preserved file", preservePath: "options.txt", managedPath: "options.txt/child"},
+		{name: "managed ancestor of preserved file", preservePath: "config/player.json", managedPath: "config"},
 	}
-	if err := db.Create(&profile).Error; err != nil {
-		t.Fatal(err)
-	}
-	source := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(source, ".voxy", "saves"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, ".voxy", "saves", "cache.db"), []byte("player cache"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, db := testService(t)
+			profile := models.Profile{
+				ID: newID(), Name: "Test", Slug: "test", Loader: "fabric",
+				GameVersion: "1.21.1", JavaVersion: 21, IsActive: true,
+				PreservePaths: []string{test.preservePath},
+			}
+			if err := db.Create(&profile).Error; err != nil {
+				t.Fatal(err)
+			}
+			source := t.TempDir()
+			managed := filepath.Join(source, filepath.FromSlash(test.managedPath))
+			if err := os.MkdirAll(filepath.Dir(managed), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(managed, []byte("managed collision"), 0644); err != nil {
+				t.Fatal(err)
+			}
 
-	_, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
-	if err == nil || !strings.Contains(err.Error(), ".voxy/") {
-		t.Fatalf("publish error = %v, want preserve-path collision", err)
-	}
-	var releases int64
-	if err := db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases).Error; err != nil {
-		t.Fatal(err)
-	}
-	if releases != 0 {
-		t.Fatalf("published releases = %d, want 0", releases)
+			_, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+			if err == nil || !strings.Contains(err.Error(), test.preservePath) {
+				t.Fatalf("publish error = %v, want preserve-path collision", err)
+			}
+			var releases int64
+			if err := db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases).Error; err != nil {
+				t.Fatal(err)
+			}
+			if releases != 0 {
+				t.Fatalf("published releases = %d, want 0", releases)
+			}
+		})
 	}
 }
 
@@ -273,6 +288,203 @@ func TestCreateDraftFromActiveMaterializesManagedFilesAndSkipsCurrentPreservePat
 	secondData, err := os.ReadFile(filepath.Join(second.Path, "mods", "current.jar"))
 	if err != nil || !bytes.Equal(secondData, modPayload) {
 		t.Fatalf("second seeded mod = %q, err=%v; first draft mutated immutable source", secondData, err)
+	}
+}
+
+func TestCreateDraftFromActivePersistsFailureBeforeMaterialization(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "client.jar"), []byte("current client"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chunk models.ProfileReleaseFileChunk
+	if err := db.Joins("JOIN profile_release_files ON profile_release_files.id = profile_release_file_chunks.file_id").
+		Where("profile_release_files.release_id = ?", releaseID).First(&chunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(service.blobPath(chunk.HashSHA256)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.CreateDraftFromActive(context.Background(), profile.ID); err == nil {
+		t.Fatal("CreateDraftFromActive succeeded with a missing CAS chunk")
+	}
+	var job models.DeliveryJob
+	if err := db.Where("profile_id = ? AND source_release_id = ?", profile.ID, releaseID).First(&job).Error; err != nil {
+		t.Fatalf("durable seed job missing: %v", err)
+	}
+	if job.Status != "failed" || job.Phase != "failed" || job.EndedAt == nil || job.Error == "" {
+		t.Fatalf("failed seed job = %+v", job)
+	}
+	if _, err := os.Stat(filepath.Join(service.incomingRoot(), profile.ID, job.Generation+".upload")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed seed directory was not removed: %v", err)
+	}
+}
+
+func TestWatcherRecoversInterruptedSeedDraft(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	payload := []byte("current client")
+	if err := os.WriteFile(filepath.Join(source, "client.jar"), payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := "seed-recovery-" + newID()
+	started := time.Now().UTC().Add(-time.Minute)
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "profile", ProfileID: &profile.ID, Generation: generation,
+		Status: "queued", Phase: "recovery", Message: "resume", SourceReleaseID: &releaseID, StartedAt: &started,
+	}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	upload := filepath.Join(service.incomingRoot(), profile.ID, generation+".upload")
+	if err := os.MkdirAll(upload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upload, "partial"), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	NewWatcher(service, nil).reconcile()
+	if err := db.First(&job, "id = ?", job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "waiting" || job.Phase != "upload" || job.SourceReleaseID != nil {
+		t.Fatalf("recovered seed job = %+v", job)
+	}
+	data, err := os.ReadFile(filepath.Join(upload, "client.jar"))
+	if err != nil || !bytes.Equal(data, payload) {
+		t.Fatalf("recovered client = %q, err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(upload, "partial")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial seed survived recovery: %v", err)
+	}
+}
+
+func TestWatcherRejectsReadyWhileSeedJobIsStillRunning(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	releaseID := newID()
+	generation := "early-ready-" + newID()
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "profile", ProfileID: &profile.ID, Generation: generation,
+		Status: "running", Phase: "seeding", Message: "seeding", SourceReleaseID: &releaseID,
+	}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(service.incomingRoot(), profile.ID, generation+".ready")
+	if err := os.MkdirAll(ready, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ready, "partial.jar"), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	NewWatcher(service, nil).reconcileProfiles()
+	var releases int64
+	if err := db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if releases != 0 {
+		t.Fatalf("published releases = %d, want 0", releases)
+	}
+	if _, err := os.Stat(ready); err != nil {
+		t.Fatalf("early ready was claimed: %v", err)
+	}
+}
+
+func TestWatcherRejectsReadyCreatedBesideUpload(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	generation := "fake-ready-" + newID()
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "profile", ProfileID: &profile.ID, Generation: generation,
+		Status: "waiting", Phase: "upload", Message: "upload",
+	}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(service.incomingRoot(), profile.ID)
+	upload := filepath.Join(root, generation+".upload")
+	ready := filepath.Join(root, generation+".ready")
+	if err := os.MkdirAll(upload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ready, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ready, "partial.jar"), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	NewWatcher(service, nil).reconcileProfiles()
+	var releases int64
+	if err := db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if releases != 0 {
+		t.Fatalf("published releases = %d, want 0", releases)
+	}
+	if _, err := os.Stat(ready); err != nil {
+		t.Fatalf("fake ready was claimed: %v", err)
+	}
+}
+
+func TestWatcherRejectsManuallyCreatedProcessingDirectory(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	generation := "fake-processing-" + newID()
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "profile", ProfileID: &profile.ID, Generation: generation,
+		Status: "waiting", Phase: "upload", Message: "upload",
+	}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	processing := filepath.Join(service.incomingRoot(), profile.ID, generation+".processing")
+	if err := os.MkdirAll(processing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(processing, "partial.jar"), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	NewWatcher(service, nil).reconcileProfiles()
+	var releases int64
+	if err := db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if releases != 0 {
+		t.Fatalf("published releases = %d, want 0", releases)
+	}
+	if _, err := os.Stat(processing); err != nil {
+		t.Fatalf("manual processing directory was claimed: %v", err)
 	}
 }
 

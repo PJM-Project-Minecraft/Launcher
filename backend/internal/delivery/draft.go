@@ -27,60 +27,114 @@ type SeededProfileDraft struct {
 
 func (s *Service) CreateDraftFromActive(ctx context.Context, profileID string) (SeededProfileDraft, error) {
 	s.publishMu.Lock()
-	defer s.publishMu.Unlock()
-
 	var profile models.Profile
 	if err := s.db.WithContext(ctx).First(&profile, "id = ?", profileID).Error; err != nil {
+		s.publishMu.Unlock()
 		return SeededProfileDraft{}, err
+	}
+	var release models.ProfileRelease
+	if err := s.db.WithContext(ctx).
+		Where("profile_id = ? AND is_active = ?", profileID, true).
+		First(&release).Error; err != nil {
+		s.publishMu.Unlock()
+		return SeededProfileDraft{}, err
+	}
+	generation := time.Now().UTC().Format("20060102T150405Z") + "-" + newID()
+	started := time.Now().UTC()
+	job := models.DeliveryJob{
+		ID: newID(), Kind: "profile", ProfileID: &profileID, Generation: generation,
+		Status: "running", Phase: "seeding", Message: "Материализуем активный release из CAS", Progress: 0,
+		SourceReleaseID: &release.ID, StartedAt: &started,
+	}
+	if err := s.db.WithContext(ctx).Create(&job).Error; err != nil {
+		s.publishMu.Unlock()
+		return SeededProfileDraft{}, err
+	}
+	// The source release is now pinned by the durable job, so CAS materialization
+	// does not need to block unrelated publication or explicit GC.
+	s.publishMu.Unlock()
+	return s.materializeSeedDraft(ctx, &job)
+}
+
+func (s *Service) materializeSeedDraft(ctx context.Context, job *models.DeliveryJob) (SeededProfileDraft, error) {
+	if job.ProfileID == nil || job.SourceReleaseID == nil {
+		return SeededProfileDraft{}, errors.New("seed job is missing profile or source release")
+	}
+	profileID := *job.ProfileID
+	sourceReleaseID := *job.SourceReleaseID
+	var profile models.Profile
+	if err := s.db.WithContext(ctx).First(&profile, "id = ?", profileID).Error; err != nil {
+		return s.failSeedDraft(job, err)
 	}
 	var release models.ProfileRelease
 	if err := s.db.WithContext(ctx).
 		Preload("Files", func(db *gorm.DB) *gorm.DB { return db.Order("path ASC") }).
 		Preload("Files.Chunks", func(db *gorm.DB) *gorm.DB { return db.Order("ordinal ASC") }).
-		Where("profile_id = ? AND is_active = ?", profileID, true).
+		Where("id = ? AND profile_id = ?", sourceReleaseID, profileID).
 		First(&release).Error; err != nil {
-		return SeededProfileDraft{}, err
+		return s.failSeedDraft(job, err)
 	}
-
 	preservePaths := append([]string(nil), profile.PreservePaths...)
 	if len(preservePaths) == 0 {
 		preservePaths = append([]string(nil), defaultPreservePaths...)
 	}
-	generation := time.Now().UTC().Format("20060102T150405Z") + "-" + newID()
-	path := filepath.Join(s.incomingRoot(), profileID, generation+".upload")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return SeededProfileDraft{}, err
+	root := filepath.Join(s.incomingRoot(), profileID)
+	path := filepath.Join(root, job.Generation+".upload")
+	seedingPath := filepath.Join(root, job.Generation+".seeding")
+	if err := os.RemoveAll(path); err != nil {
+		return s.failSeedDraft(job, err)
 	}
-	if err := os.Mkdir(path, 0755); err != nil {
-		return SeededProfileDraft{}, err
+	if err := os.RemoveAll(seedingPath); err != nil {
+		return s.failSeedDraft(job, err)
 	}
-	keep := false
-	defer func() {
-		if !keep {
-			_ = os.RemoveAll(path)
-		}
-	}()
-
-	result := SeededProfileDraft{Generation: generation, Path: path, SourceReleaseID: release.ID}
+	if err := os.MkdirAll(seedingPath, 0755); err != nil {
+		return s.failSeedDraft(job, err)
+	}
+	result := SeededProfileDraft{Generation: job.Generation, Path: path, SourceReleaseID: sourceReleaseID}
 	for _, file := range release.Files {
 		if pathMatchesPreserve(file.Path, preservePaths) {
 			continue
 		}
-		if err := s.materializeProfileReleaseFile(path, file); err != nil {
-			return SeededProfileDraft{}, fmt.Errorf("seed draft %s: %w", file.Path, err)
+		if err := s.materializeProfileReleaseFile(seedingPath, file); err != nil {
+			return s.failSeedDraft(job, fmt.Errorf("seed draft %s: %w", file.Path, err))
 		}
 		result.SeededFiles++
 		result.SeededSize += file.Size
 	}
-	job := models.DeliveryJob{
-		ID: newID(), Kind: "profile", ProfileID: &profileID, Generation: generation,
-		Status: "waiting", Phase: "upload", Message: "Черновик заполнен из активного release; ожидаем atomic rename .upload -> .ready",
+	for _, suffix := range []string{".ready", ".processing"} {
+		if _, err := os.Lstat(filepath.Join(root, job.Generation+suffix)); err == nil {
+			return s.failSeedDraft(job, fmt.Errorf("generation %s was completed before seeding finished", job.Generation))
+		} else if !os.IsNotExist(err) {
+			return s.failSeedDraft(job, err)
+		}
 	}
-	if err := s.db.WithContext(ctx).Create(&job).Error; err != nil {
-		return SeededProfileDraft{}, err
+	if err := os.Rename(seedingPath, path); err != nil {
+		return s.failSeedDraft(job, err)
 	}
-	keep = true
+	updates := map[string]any{
+		"status": "waiting", "phase": "upload", "message": "Черновик заполнен из активного release; ожидаем atomic rename .upload -> .ready",
+		"progress": 0.0, "error": "", "source_release_id": nil,
+	}
+	if err := s.db.WithContext(ctx).Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(updates).Error; err != nil {
+		return s.failSeedDraft(job, err)
+	}
+	job.Status = "waiting"
+	job.Phase = "upload"
+	job.SourceReleaseID = nil
 	return result, nil
+}
+
+func (s *Service) failSeedDraft(job *models.DeliveryJob, seedErr error) (SeededProfileDraft, error) {
+	if job.ProfileID != nil {
+		root := filepath.Join(s.incomingRoot(), *job.ProfileID)
+		_ = os.RemoveAll(filepath.Join(root, job.Generation+".upload"))
+		_ = os.RemoveAll(filepath.Join(root, job.Generation+".seeding"))
+	}
+	ended := time.Now().UTC()
+	_ = s.db.WithContext(context.Background()).Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(map[string]any{
+		"status": "failed", "phase": "failed", "message": "Создание черновика отклонено", "error": seedErr.Error(), "ended_at": &ended,
+	}).Error
+	return SeededProfileDraft{}, seedErr
 }
 
 func (s *Service) materializeProfileReleaseFile(root string, file models.ProfileReleaseFile) error {
@@ -150,14 +204,10 @@ func (s *Service) materializeProfileReleaseFile(root string, file models.Profile
 }
 
 func pathMatchesPreserve(managedPath string, preservePaths []string) bool {
+	managedKey := strings.ToLower(strings.TrimSuffix(managedPath, "/"))
 	for _, preservePath := range preservePaths {
-		if strings.HasSuffix(preservePath, "/") {
-			if managedPath == strings.TrimSuffix(preservePath, "/") || strings.HasPrefix(managedPath, preservePath) {
-				return true
-			}
-			continue
-		}
-		if managedPath == preservePath {
+		preserveKey := strings.ToLower(strings.TrimSuffix(preservePath, "/"))
+		if preserveKey != "" && (managedKey == preserveKey || strings.HasPrefix(managedKey, preserveKey+"/") || strings.HasPrefix(preserveKey, managedKey+"/")) {
 			return true
 		}
 	}

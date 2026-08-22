@@ -56,18 +56,19 @@ type LauncherDeliveryArtifactChunk struct {
 	Size       int64  `gorm:"not null" json:"size"`
 }
 type DeliveryJob struct {
-	ID         string     `gorm:"type:uuid;primaryKey" json:"id"`
-	Kind       string     `gorm:"size:24;index;not null" json:"kind"`
-	ProfileID  *string    `gorm:"type:uuid;index" json:"profileId,omitempty"`
-	Generation string     `gorm:"size:160;uniqueIndex;not null" json:"generation"`
-	Status     string     `gorm:"size:24;index;not null" json:"status"`
-	Phase      string     `gorm:"size:48;not null" json:"phase"`
-	Message    string     `json:"message"`
-	Progress   float64    `gorm:"not null;default:0" json:"progress"`
-	Error      string     `json:"error,omitempty"`
-	ReleaseID  *string    `gorm:"type:uuid" json:"releaseId,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	StartedAt  *time.Time `json:"startedAt,omitempty"`
-	EndedAt    *time.Time `json:"endedAt,omitempty"`
-	UpdatedAt  time.Time  `json:"updatedAt"`
+	ID              string     `gorm:"type:uuid;primaryKey" json:"id"`
+	Kind            string     `gorm:"size:24;index;not null" json:"kind"`
+	ProfileID       *string    `gorm:"type:uuid;index" json:"profileId,omitempty"`
+	Generation      string     `gorm:"size:160;uniqueIndex;not null" json:"generation"`
+	Status          string     `gorm:"size:24;index;not null" json:"status"`
+	Phase           string     `gorm:"size:48;not null" json:"phase"`
+	Message         string     `json:"message"`
+	Progress        float64    `gorm:"not null;default:0" json:"progress"`
+	Error           string     `json:"error,omitempty"`
+	ReleaseID       *string    `gorm:"type:uuid" json:"releaseId,omitempty"`
+	SourceReleaseID *string    `gorm:"type:uuid;index" json:"sourceReleaseId,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	StartedAt       *time.Time `json:"startedAt,omitempty"`
+	EndedAt         *time.Time `json:"endedAt,omitempty"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }

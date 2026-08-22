@@ -33,6 +33,9 @@ Delivery v2 — единый контур доставки профилей Mine
    материализует активный immutable release из CAS в новый `.upload`, исключая
    текущие `preservePaths`. Администратор заменяет или удаляет только изменённые
    файлы; полный клиент повторно по SFTP не передаётся.
+   Перед копированием создаётся durable job, закрепляющая source release. Backend собирает дерево в
+   server-owned `.seeding` и только после полной проверки атомарно открывает `.upload`. После restart watcher удаляет
+   только свои незавершённые `.seeding`/`.upload` и заново материализует их из того же release.
 4. Пути внутри `.upload` должны соответствовать их будущему расположению внутри
    `files/` игрока. Черновик независим от исходного release: его изменение не
    меняет уже опубликованный manifest или CAS-данные.
@@ -77,6 +80,7 @@ Launcher multipart-upload сначала сохраняется как inactive 
 Admin:
 
 - `GET /api/v2/admin/delivery/jobs`
+- `GET /api/v2/admin/delivery/profiles` — все профили, включая inactive, с точным `activeReleaseId`
 - `POST /api/v2/admin/delivery/profiles/:id/drafts`
 - `POST /api/v2/admin/delivery/profiles/:id/drafts/from-active`
 - `/api/v2/admin/launcher-releases/*`

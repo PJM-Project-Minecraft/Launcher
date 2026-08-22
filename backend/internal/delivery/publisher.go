@@ -60,8 +60,28 @@ func (w *Watcher) Start() {
 }
 
 func (w *Watcher) reconcile() {
+	w.reconcileSeedDrafts()
 	w.reconcileProfiles()
 	w.reconcileLauncherJobs()
+}
+
+func (w *Watcher) reconcileSeedDrafts() {
+	var jobs []models.DeliveryJob
+	if err := w.service.db.Where(
+		"kind = ? AND source_release_id IS NOT NULL AND status IN ? AND phase = ?",
+		"profile", []string{"queued", "running"}, "recovery",
+	).Order("created_at asc").Find(&jobs).Error; err != nil {
+		return
+	}
+	for index := range jobs {
+		job := &jobs[index]
+		_ = w.service.db.Model(&models.DeliveryJob{}).Where("id = ?", job.ID).Updates(map[string]any{
+			"status": "running", "phase": "seeding", "message": "Возобновляем материализацию из CAS", "error": "",
+		}).Error
+		if _, err := w.service.materializeSeedDraft(context.Background(), job); err != nil {
+			slog.Error("delivery v2 seed recovery failed", "generation", job.Generation, "error", err)
+		}
+	}
 }
 
 func (w *Watcher) reconcileProfiles() {
@@ -104,9 +124,39 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 	}
 	processing := filepath.Join(filepath.Dir(source), generation+".processing")
 	if strings.HasSuffix(source, ".ready") {
-		if err := os.Rename(source, processing); err != nil {
+		waiting := job.Status == "waiting" && job.Phase == "upload"
+		recoveringClaim := job.Status == "queued" && job.Phase == "recovery"
+		if (!waiting && !recoveringClaim) || job.SourceReleaseID != nil {
 			return
 		}
+		upload := filepath.Join(filepath.Dir(source), generation+".upload")
+		if _, err := os.Lstat(upload); err == nil || !os.IsNotExist(err) {
+			return
+		}
+		if waiting {
+			claimed := w.service.db.Model(&models.DeliveryJob{}).
+				Where("id = ? AND status = ? AND phase = ? AND source_release_id IS NULL", job.ID, "waiting", "upload").
+				Updates(map[string]any{"status": "queued", "phase": "claim", "message": "Generation атомарно принята"})
+			if claimed.Error != nil || claimed.RowsAffected != 1 {
+				return
+			}
+			job.Status = "queued"
+			job.Phase = "claim"
+		}
+		if err := os.Rename(source, processing); err != nil {
+			if waiting {
+				_ = w.service.db.Model(&models.DeliveryJob{}).
+					Where("id = ? AND status = ? AND phase = ?", job.ID, "queued", "claim").
+					Updates(map[string]any{"status": "waiting", "phase": "upload", "message": "Ожидаем atomic rename .upload -> .ready"}).Error
+			}
+			return
+		}
+	}
+	if job.SourceReleaseID != nil {
+		return
+	}
+	if strings.HasSuffix(source, ".processing") && job.Status != "queued" && job.Status != "running" && job.Status != "succeeded" && job.Status != "failed" && job.ReleaseID == nil {
+		return
 	}
 	if job.Status == "succeeded" {
 		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))

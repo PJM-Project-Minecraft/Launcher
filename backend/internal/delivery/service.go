@@ -292,8 +292,20 @@ func (s *Service) profileConfig(profile models.Profile) ProfileConfig {
 }
 
 func (s *Service) Profiles(ctx context.Context) ([]ProfileSummary, error) {
+	return s.profileSummaries(ctx, true)
+}
+
+func (s *Service) AdminProfiles(ctx context.Context) ([]ProfileSummary, error) {
+	return s.profileSummaries(ctx, false)
+}
+
+func (s *Service) profileSummaries(ctx context.Context, activeOnly bool) ([]ProfileSummary, error) {
 	var profiles []models.Profile
-	if err := s.db.WithContext(ctx).Where("is_active = ?", true).Order("created_at asc").Find(&profiles).Error; err != nil {
+	query := s.db.WithContext(ctx).Order("created_at asc")
+	if activeOnly {
+		query = query.Where("is_active = ?", true)
+	}
+	if err := query.Find(&profiles).Error; err != nil {
 		return nil, err
 	}
 	result := make([]ProfileSummary, 0, len(profiles))
