@@ -56,19 +56,18 @@ func (s *Service) CheckFiles(ctx context.Context, claims LaunchClaims, files []R
 	// Сначала собираем все посторонние файлы, и только потом пишем ОДИН детект на отчёт.
 	// Иначе один запрос превращался в до maxReportedFiles записей БД и столько же
 	// Telegram-алертов (дедуп по сигнатуре не спасает — сигнатуры разные).
-	var bad []ReportedFile
-	for _, f := range files {
-		hash := strings.ToLower(strings.TrimSpace(f.Sha256))
-		if !f.Missing {
-			if len(hash) != 64 {
-				continue // не хеш — мусор от поддельного клиента
-			}
-			if _, ok := allowed[hash]; ok {
-				continue
-			}
+	bad := unknownReportedFiles(files, allowed)
+	if len(bad) > 0 {
+		// Publication may have happened after the cache was populated. Refresh on
+		// the first apparent mismatch before recording a hard false positive.
+		refreshed, refreshErr := s.refreshAllowedFileHashes(ctx)
+		if refreshErr != nil {
+			// The cached whitelist was already loaded successfully. A transient DB
+			// failure must not turn a known mismatch into a fail-open HTTP error.
+			slog.Warn("anticheat: whitelist refresh failed; enforcing cached mismatch", "error", refreshErr)
+		} else {
+			bad = unknownReportedFiles(files, refreshed)
 		}
-		f.Sha256 = hash
-		bad = append(bad, f)
 	}
 	if len(bad) == 0 {
 		return false, nil
@@ -99,19 +98,55 @@ func (s *Service) CheckFiles(ctx context.Context, claims LaunchClaims, files []R
 	return kick, nil
 }
 
+func unknownReportedFiles(files []ReportedFile, allowed map[string]struct{}) []ReportedFile {
+	bad := make([]ReportedFile, 0)
+	for _, f := range files {
+		hash := strings.ToLower(strings.TrimSpace(f.Sha256))
+		if !f.Missing {
+			if len(hash) != 64 {
+				continue // не хеш — мусор от поддельного клиента
+			}
+			if _, ok := allowed[hash]; ok {
+				continue
+			}
+		}
+		f.Sha256 = hash
+		bad = append(bad, f)
+	}
+	return bad
+}
+
 // allowedFileHashes — множество SHA-256 всех файлов, опубликованных в сборках.
 // Сверяем по хешу, а не по пути: переименованный игроком легальный мод не должен
 // давать ложный детект, а посторонний jar не спрячется под именем легального.
 func (s *Service) allowedFileHashes(ctx context.Context) (map[string]struct{}, error) {
+	return s.loadAllowedFileHashes(ctx, false)
+}
+
+func (s *Service) refreshAllowedFileHashes(ctx context.Context) (map[string]struct{}, error) {
+	return s.loadAllowedFileHashes(ctx, true)
+}
+
+func (s *Service) loadAllowedFileHashes(ctx context.Context, force bool) (map[string]struct{}, error) {
 	s.allowedMu.Lock()
 	defer s.allowedMu.Unlock()
-	if s.allowedHashes != nil && s.now().Sub(s.allowedAt) < allowedHashesTTL {
+	if !force && s.allowedHashes != nil && s.now().Sub(s.allowedAt) < allowedHashesTTL {
 		return s.allowedHashes, nil
 	}
 	var hashes []string
-	if err := s.db.WithContext(ctx).Model(&models.GameFile{}).
+	if err := s.db.WithContext(ctx).Model(&models.ProfileReleaseFile{}).
+		Joins("JOIN profile_releases ON profile_releases.id = profile_release_files.release_id").
+		Where("profile_releases.is_active = ?", true).
 		Distinct().Pluck("hash_sha256", &hashes).Error; err != nil {
 		return nil, err
+	}
+	// During the bounded v1 bridge, installations without a Delivery v2 release
+	// still use GameFile. Once v2 is active it is the authoritative whitelist.
+	if len(hashes) == 0 {
+		if err := s.db.WithContext(ctx).Model(&models.GameFile{}).
+			Distinct().Pluck("hash_sha256", &hashes).Error; err != nil {
+			return nil, err
+		}
 	}
 	set := make(map[string]struct{}, len(hashes))
 	for _, h := range hashes {

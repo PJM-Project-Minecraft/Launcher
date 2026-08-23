@@ -2795,7 +2795,7 @@ fn sync_and_launch(
         0.04,
         true,
     );
-    let release_v2 = delivery_manifest_from_legacy(&manifest);
+    let release_v2 = delivery_manifest_from_legacy(&manifest)?;
     let client = http_client()?;
     delivery::install_profile(
         &client,
@@ -2846,8 +2846,26 @@ fn sync_and_launch(
     launch_profile(app, config, &paths, &manifest, token, &user.login)
 }
 
-fn delivery_manifest_from_legacy(manifest: &Manifest) -> delivery::ProfileManifest {
-    delivery::ProfileManifest {
+fn delivery_manifest_from_legacy(manifest: &Manifest) -> Result<delivery::ProfileManifest, String> {
+    let mut preserve_paths = manifest.preserve_paths.clone();
+    let java_rel = os_value(
+        &manifest.profile.java_path_windows,
+        &manifest.profile.java_path_linux,
+        &manifest.profile.java_path_macos,
+    )
+    .trim();
+    if !java_rel.is_empty() {
+        let java_root = java_runtime_root_rel(
+            java_rel,
+            java_runtime_executable_rel(java_runtime_platform_key()),
+        )?;
+        let normalized_preserve = normalize_preserve_paths(&preserve_paths);
+        if !java_root.is_empty() && !preserve_path_matches(&java_root, &normalized_preserve) {
+            preserve_paths.push(format!("{}/", java_root.trim_end_matches('/')));
+        }
+    }
+
+    Ok(delivery::ProfileManifest {
         schema_version: delivery::SCHEMA_VERSION,
         kind: "profile".to_string(),
         release_id: manifest.release_id.clone(),
@@ -2863,7 +2881,7 @@ fn delivery_manifest_from_legacy(manifest: &Manifest) -> delivery::ProfileManife
             launch_command_windows: manifest.profile.launch_command_windows.clone(),
             launch_command_linux: manifest.profile.launch_command_linux.clone(),
             launch_command_macos: manifest.profile.launch_command_macos.clone(),
-            preserve_paths: manifest.preserve_paths.clone(),
+            preserve_paths,
         },
         files: manifest
             .files
@@ -2878,7 +2896,7 @@ fn delivery_manifest_from_legacy(manifest: &Manifest) -> delivery::ProfileManife
             .collect(),
         file_count: manifest.file_count,
         total_size: manifest.total_size,
-    }
+    })
 }
 
 fn ensure_java_runtime(
@@ -5948,6 +5966,33 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(profile_root);
+    }
+
+    #[test]
+    fn delivery_manifest_preserves_downloaded_java_runtime() {
+        let mut manifest = test_manifest(Vec::new(), vec!["saves/".to_string()]);
+        if cfg!(target_os = "windows") {
+            manifest.profile.java_path_windows = "runtime/windows-x64/bin/java.exe".to_string();
+        } else if cfg!(target_os = "macos") {
+            manifest.profile.java_path_macos =
+                "runtime/mac-os/jre.bundle/Contents/Home/bin/java".to_string();
+        } else {
+            manifest.profile.java_path_linux = "runtime/linux/bin/java".to_string();
+        }
+
+        let delivery = delivery_manifest_from_legacy(&manifest).unwrap();
+
+        assert!(
+            delivery.profile.preserve_paths.iter().any(|path| path
+                == if cfg!(target_os = "windows") {
+                    "runtime/windows-x64/"
+                } else if cfg!(target_os = "macos") {
+                    "runtime/mac-os/"
+                } else {
+                    "runtime/linux/"
+                }),
+            "downloaded Java runtime must survive the delivery staging swap"
+        );
     }
 
     #[cfg(unix)]

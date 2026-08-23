@@ -304,6 +304,8 @@ MC мгновенно выходит. Для первой сборки адми�
 `preservePaths`, после чего админ заменяет/удаляет только изменённые файлы. Оба потока завершаются атомарным
 rename в `<generation>.ready`; quiet-time и
 автоподготовки по неполному дереву нет.
+Скачанный лаунчером Java runtime живёт внутри `files/runtime/`, но не входит в managed manifest:
+клиент добавляет runtime текущей ОС в derived preserve-list перед staging swap, затем строго сверяет SHA-1 его файлов.
 
 **В backend-образе есть Temurin 21 JRE** (нужен для `PrepareClient` — headless-установщик
 NeoForge через `javaBinary()`). NeoForge 1.21.x требует Java 21. Java 8 (старый Forge 1.12) не добавлена.
@@ -329,7 +331,8 @@ Windows использует WebView2. Состояние Rust→React идёт 
 - **Whitelist mods/** (28.07.2026) — закрыта дыра «подкинуть чит-мод в окно между cleanup
   лаунчера и чтением mods/ модлоадером». Java-агент раз в 10с строит инвентарь `mods/*.jar`
   (путь + SHA-256, пересчёт только при смене имени/размера/mtime) и шлёт на
-  `POST /api/anticheat/files`; сервер сверяет хеши с `game_files` ВСЕХ сборок (кэш 60с) →
+  `POST /api/anticheat/files`; сервер сверяет хеши с active Delivery v2 release, а при его отсутствии — с legacy `game_files`.
+  Кэш 60с при первом apparent mismatch принудительно обновляется, чтобы только что опубликованный мод не давал false positive →
   детект `unknown-mod` (severity 9, confidence hard) → kick. Отдельно ловится jar, чьи классы
   загрузились, а файл исчез (self-delete на Linux): трансформер собирает CodeSource-пути,
   пропавшие уходят как `missing:true`. Пустой список хешей = fail-open (не кикать всех).
