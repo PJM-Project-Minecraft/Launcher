@@ -155,11 +155,7 @@ pub fn download_and_stage(
 ) -> Result<PathBuf, String> {
     let exe = exe_path()?;
     let staged = staging_path(&exe);
-    let client = crate::hardened_backend_builder()
-        .connect_timeout(Duration::from_secs(15))
-        .tcp_keepalive(Duration::from_secs(20))
-        .build()
-        .map_err(|_| "Не удалось создать HTTP-клиент.".to_string())?;
+    let client = crate::backend_download_client()?;
     let cache_root = exe
         .parent()
         .unwrap_or_else(|| Path::new("."))

@@ -214,6 +214,7 @@ select { color-scheme: dark; }
 .settings-option-copy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .settings-option-copy strong { font-size: clamp(16px, 1.3vw, 18px); }
 .settings-option-copy span { overflow: hidden; color: var(--muted); font-size: clamp(14px, 1.08vw, 16px); text-overflow: ellipsis; white-space: nowrap; }
+.settings-option-copy small { color: #85817a; font-size: clamp(11px, .84vw, 13px); line-height: 1.35; }
 .pixel-toggle { display: grid; grid-template-columns: 18px auto; align-items: center; gap: 8px; min-width: 70px; height: 34px; padding: 0 10px; color: #7e7c77; background: #101211; border: 1px solid var(--line); }
 .pixel-toggle span { width: 12px; height: 12px; background: #555752; box-shadow: inset 0 0 0 2px #272927; }
 .pixel-toggle b { font-size: 13px; font-weight: 700; letter-spacing: .08em; }
@@ -237,15 +238,21 @@ select { color-scheme: dark; }
 .update-banner.mandatory { background: #2b1b1a; border-color: rgba(239, 98, 94, .44); }
 .update-banner.mandatory > .pixel-icon { color: var(--danger); }
 
-.policy-card, .anticheat-card { width: min(680px, 100%); max-height: 100%; overflow: auto; padding: clamp(24px, 4vw, 38px); background: #1b1d1c; border: 1px solid var(--line-strong); box-shadow: 0 30px 90px rgba(0, 0, 0, .62); }
-.policy-icon, .danger-emblem { display: grid; place-items: center; width: 46px; height: 46px; margin-bottom: 20px; color: #171717; background: var(--amber); }
-.policy-card h2, .anticheat-card h2 { margin: 11px 0 18px; font: 400 clamp(26px, 3vw, 36px) "Minecraft Ten"; }
+.policy-card, .anticheat-card, .folder-alert-card { width: min(680px, 100%); max-height: 100%; overflow: auto; padding: clamp(24px, 4vw, 38px); background: #1b1d1c; border: 1px solid var(--line-strong); box-shadow: 0 30px 90px rgba(0, 0, 0, .62); }
+.policy-icon, .danger-emblem, .folder-emblem { display: grid; place-items: center; width: 46px; height: 46px; margin-bottom: 20px; color: #171717; background: var(--amber); }
+.policy-card h2, .anticheat-card h2, .folder-alert-card h2 { margin: 11px 0 18px; font: 400 clamp(26px, 3vw, 36px) "Minecraft Ten"; }
 .policy-text { max-height: min(280px, 38vh); overflow: auto; padding: 17px; color: #b5b0a8; background: #101211; border: 1px solid var(--line); font-size: 10px; line-height: 1.65; white-space: pre-wrap; }
 .anticheat-card { width: min(520px, 100%); border-color: rgba(239, 98, 94, .38); text-align: center; }
 .danger-emblem { margin-right: auto; margin-left: auto; color: white; background: var(--danger); }
 .anticheat-card .eyebrow { color: var(--danger); }
 .anticheat-card p { color: #bdb8b0; font-size: 11px; line-height: 1.6; white-space: pre-line; }
 .danger-button { color: white; background: var(--danger); }
+.folder-alert-card { width: min(540px, 100%); }
+.folder-alert-card p { margin: 0; color: #bdb8b0; font-size: clamp(13px, 1vw, 15px); line-height: 1.65; }
+.folder-alert-actions { display: grid; gap: 9px; margin-top: 24px; }
+.folder-alert-actions .primary-button { margin-top: 0; }
+.secondary-button { min-height: 42px; color: var(--muted); background: #101211; border: 1px solid var(--line); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.secondary-button:hover { color: var(--paper); border-color: rgba(243, 164, 53, .52); }
 
 .spin { animation: spin 1s steps(8) infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -48,6 +48,7 @@ type LauncherState = {
   discordRpcEnabled: boolean;
   installFolder: string;
   installMigration: InstallMigrationState;
+  installFolderAlert: string;
   newsItems: NewsItem[];
   anticheatAlert: string;
   policyVisible: boolean;
@@ -95,6 +96,7 @@ const emptyState: LauncherState = {
   discordRpcEnabled: true,
   installFolder: "",
   installMigration: { phase: "", source: "", destination: "", error: "", retryable: false },
+  installFolderAlert: "",
   newsItems: [],
   anticheatAlert: "",
   policyVisible: false,
@@ -144,6 +146,7 @@ function browserPreviewState(): LauncherState {
   }
   if (screen === "settings") return { ...browserPreview, settingsVisible: true, discreteGpuAvailable: true, discreteGpuLabel: "NVIDIA GeForce RTX" };
   if (screen === "policy") return { ...browserPreview, policyVisible: true, policyVersionLabel: "Версия 4", policyText: "Project Minecraft обрабатывает данные аккаунта и технические сведения, необходимые для запуска игры и работы системы защиты.\n\nПродолжая, вы подтверждаете согласие с актуальной политикой конфиденциальности." };
+  if (screen === "folder-alert") return { ...browserPreview, installFolderAlert: "Папка Project Minecraft внутри выбранного места уже содержит файлы. Лаунчер не удаляет и не перезаписывает чужие файлы. Выберите другое место." };
   return browserPreview;
 }
 
@@ -423,7 +426,7 @@ function SettingsOverlay({ state }: { state: LauncherState }) {
 
             <section className="settings-group">
               <header className="settings-group-title"><PixelIcon name="folder" /><div><h3>Файлы</h3><p>Расположение установленного клиента.</p></div></header>
-              <div className="settings-option settings-folder-option"><div className="settings-option-copy"><strong>Папка установки</strong><span title={state.installFolder}>{state.installFolder || "Системная папка лаунчера"}</span></div><div className="folder-actions"><button onClick={() => void action("openInstallFolder")}><PixelIcon name="folder" />Открыть</button><button onClick={() => void action("changeInstallFolder")} disabled={state.isSyncing}><PixelIcon name="reload" />Перенести</button></div></div>
+              <div className="settings-option settings-folder-option"><div className="settings-option-copy"><strong>Файлы игры</strong><span title={state.installFolder}>{state.installFolder || "Системная папка лаунчера"}</span><small>Выберите диск или папку — внутри будет создана «Project Minecraft».</small></div><div className="folder-actions"><button onClick={() => void action("openInstallFolder")}><PixelIcon name="folder" />Открыть</button><button onClick={() => void action("changeInstallFolder")} disabled={state.isSyncing}><PixelIcon name="reload" />Сменить</button></div></div>
               {state.installMigration.phase && <div className="settings-option"><div className="settings-option-copy"><strong>{state.installMigration.phase === "failed" ? "Перенос остановлен" : state.installMigration.phase === "running" ? "Перенос выполняется" : "Перенос ожидает продолжения"}</strong><span>{state.installMigration.error || `${state.installMigration.source} → ${state.installMigration.destination}`}</span></div>{state.installMigration.retryable && <button onClick={() => void action("retryInstallMigration")} disabled={state.isSyncing}><PixelIcon name="reload" />Повторить</button>}</div>}
             </section>
 
@@ -467,6 +470,28 @@ function AnticheatOverlay({ message }: { message: string }) {
   );
 }
 
+function InstallFolderAlert({ message }: { message: string }) {
+  if (!message) return null;
+  const chooseAnotherFolder = async () => {
+    await action("dismissInstallFolderAlert");
+    await action("changeInstallFolder");
+  };
+  return (
+    <div className="overlay critical-overlay" role="alertdialog" aria-modal="true" aria-labelledby="install-folder-alert-title">
+      <section className="folder-alert-card">
+        <div className="folder-emblem"><PixelIcon name="folder" /></div>
+        <span className="eyebrow">Место установки</span>
+        <h2 id="install-folder-alert-title">Здесь уже есть файлы</h2>
+        <p>{message}</p>
+        <div className="folder-alert-actions">
+          <button className="primary-button" onClick={() => void chooseAnotherFolder()}><PixelIcon name="folder" />Выбрать другое место</button>
+          <button className="secondary-button" onClick={() => void action("dismissInstallFolderAlert")}>Закрыть</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const state = useLauncherState();
   const [tab, setTab] = useState<"home" | "news">("home");
@@ -486,6 +511,7 @@ export default function App() {
         <SettingsOverlay state={state} />
         <PolicyOverlay state={state} />
         <AnticheatOverlay message={state.anticheatAlert} />
+        <InstallFolderAlert message={state.installFolderAlert} />
       </div>
     </div>
   );

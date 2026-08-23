@@ -120,6 +120,9 @@ func TestPublishProfileActivatesSignedImmutableRelease(t *testing.T) {
 	if manifest.SchemaVersion != 2 || manifest.ReleaseID != releaseID || len(manifest.Files) != 1 || len(manifest.Files[0].Chunks) == 0 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
+	if !pathMatchesPreserve("tacz/runtime-owned-pack/file.json", manifest.Profile.PreservePaths) {
+		t.Fatalf("runtime-owned tacz path missing from preserve paths: %v", manifest.Profile.PreservePaths)
+	}
 	chunk := manifest.Files[0].Chunks[0]
 	path, size, err := service.Blob(context.Background(), profile.ID, chunk.SHA256)
 	if err != nil {
@@ -501,7 +504,10 @@ func TestReadyRenameIsTheOnlyPublicationSignal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(upload, "client.jar"), []byte("complete"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	watcher := NewWatcher(service, nil)
+	broker := events.NewBroker()
+	subscriptionID, eventChannel := broker.Subscribe()
+	defer broker.Unsubscribe(subscriptionID)
+	watcher := NewWatcher(service, broker)
 	watcher.reconcile()
 	var count int64
 	db.Model(&models.ProfileRelease{}).Count(&count)
@@ -516,6 +522,20 @@ func TestReadyRenameIsTheOnlyPublicationSignal(t *testing.T) {
 	db.Model(&models.ProfileRelease{}).Count(&count)
 	if count != 1 {
 		t.Fatalf("release count = %d", count)
+	}
+	profileActivationSeen := false
+	for {
+		select {
+		case event := <-eventChannel:
+			if event == "profiles" {
+				profileActivationSeen = true
+			}
+		default:
+			if !profileActivationSeen {
+				t.Fatal("player profile activation event was not published")
+			}
+			return
+		}
 	}
 }
 
@@ -546,7 +566,10 @@ func TestProcessingRecoveryFinalizesCommittedGenerationWithoutRepublish(t *testi
 
 	// Simulate a crash after the release transaction committed but before the
 	// watcher marked the job succeeded and renamed .processing.
-	NewWatcher(service, nil).reconcile()
+	broker := events.NewBroker()
+	subscriptionID, eventChannel := broker.Subscribe()
+	defer broker.Unsubscribe(subscriptionID)
+	NewWatcher(service, broker).reconcile()
 	var releases int64
 	db.Model(&models.ProfileRelease{}).Where("profile_id = ?", profile.ID).Count(&releases)
 	if releases != 1 {
@@ -560,6 +583,20 @@ func TestProcessingRecoveryFinalizesCommittedGenerationWithoutRepublish(t *testi
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(upload), generation+".published")); err != nil {
 		t.Fatalf("published generation missing: %v", err)
+	}
+	profileActivationSeen := false
+	for {
+		select {
+		case event := <-eventChannel:
+			if event == profileReleaseEvent {
+				profileActivationSeen = true
+			}
+		default:
+			if !profileActivationSeen {
+				t.Fatal("recovered profile activation event was not published")
+			}
+			return
+		}
 	}
 }
 

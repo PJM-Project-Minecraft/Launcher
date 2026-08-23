@@ -137,6 +137,12 @@ func (h Handler) events(c fiber.Ctx) error {
 					if !ok {
 						return nil
 					}
+					// The broker is shared with the admin WebSocket. Delivery job
+					// progress is useful there, but forwarding it to player launchers
+					// starts a full profile verification for every scanned file.
+					if msg != profilesEvent && msg != "launcher-release" {
+						continue
+					}
 					if err := stream.Event(sse.Event{Name: profilesEvent, Data: msg}); err != nil {
 						return err
 					}

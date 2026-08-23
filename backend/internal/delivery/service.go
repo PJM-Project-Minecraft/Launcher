@@ -287,7 +287,7 @@ func (s *Service) profileConfig(profile models.Profile) ProfileConfig {
 		JVMArgs: profile.JVMArgs, JavaPathWindows: profile.JavaPathWindows, JavaPathLinux: profile.JavaPathLinux,
 		JavaPathMacOS: profile.JavaPathMacOS, LaunchCommandWindows: profile.LaunchCommandWindows,
 		LaunchCommandLinux: profile.LaunchCommandLinux, LaunchCommandMacOS: profile.LaunchCommandMacOS,
-		PreservePaths: append([]string(nil), profile.PreservePaths...),
+		PreservePaths: effectivePreservePaths(profile.PreservePaths),
 	}
 }
 

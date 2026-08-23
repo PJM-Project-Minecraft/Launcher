@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 const USERS_DIR: &str = "users";
+const INSTALL_DIR: &str = "Project Minecraft";
 const MIGRATION_DIR: &str = ".pjm-migration";
 const MIGRATION_BACKUP_DIR: &str = ".pjm-migration-old-users";
 const MIGRATION_MARKER: &str = ".pjm-migration-source";
+pub(crate) const NON_EMPTY_DESTINATION_ERROR: &str = "Выберите пустую папку для переноса файлов.";
 
 #[derive(Debug)]
 pub(crate) struct MigrationResult {
@@ -21,11 +23,39 @@ pub(crate) fn configured_root(value: Option<&str>, default_root: &Path) -> Resul
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default_root.to_path_buf());
     };
-    let path = PathBuf::from(value);
+    let path = portable_install_root(Path::new(value));
     if !path.is_absolute() {
         return Err("Папка установки в settings.json должна быть абсолютным путём.".to_string());
     }
     Ok(path)
+}
+
+/// `std::fs::canonicalize` добавляет к Windows-путям verbatim-префикс
+/// `\\?\`. Внутри Rust он полезен, но его нельзя сохранять как путь игры:
+/// он затем попадает в аргументы Java/Minecraft.
+pub(crate) fn portable_install_root(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    let Some(rest) = value.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    if rest
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+    {
+        return PathBuf::from(format!(r"\\{}", &rest[4..]));
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+/// The folder picker selects a parent location. Keeping every managed file in
+/// our own child directory makes choosing a drive root or a populated games
+/// directory safe and predictable.
+pub(crate) fn install_root_in_selected_parent(parent: &Path) -> PathBuf {
+    parent.join(INSTALL_DIR)
 }
 
 /// Копирует все пользовательские профили в НОВУЮ пустую папку на другом диске.
@@ -57,7 +87,7 @@ pub(crate) fn migrate_users(
     }
     let retry = retry_destination_matches(&destination, &source)?;
     if !retry && directory_has_entries(&destination)? {
-        return Err("Выберите пустую папку для переноса файлов.".to_string());
+        return Err(NON_EMPTY_DESTINATION_ERROR.to_string());
     }
 
     // Маркер делает перенос повторяемым. При повторе данные копируются заново:
@@ -336,6 +366,14 @@ mod tests {
         let default = Path::new("/default/data");
         assert_eq!(configured_root(None, default).unwrap(), default);
         assert_eq!(configured_root(Some("  "), default).unwrap(), default);
+    }
+
+    #[test]
+    fn selected_parent_gets_a_dedicated_launcher_folder() {
+        assert_eq!(
+            install_root_in_selected_parent(Path::new(r"D:\Games")),
+            PathBuf::from(r"D:\Games").join("Project Minecraft")
+        );
     }
 
     #[test]

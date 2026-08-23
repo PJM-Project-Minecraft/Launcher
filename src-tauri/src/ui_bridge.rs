@@ -93,6 +93,7 @@ pub struct UiState {
     pub discord_rpc_enabled: bool,
     pub install_folder: String,
     pub install_migration: InstallMigrationViewState,
+    pub install_folder_alert: String,
     pub news_items: Vec<NewsItem>,
     pub anticheat_alert: String,
     pub policy_visible: bool,
@@ -145,6 +146,7 @@ impl Default for UiState {
             discord_rpc_enabled: true,
             install_folder: String::new(),
             install_migration: InstallMigrationViewState::default(),
+            install_folder_alert: String::new(),
             news_items: Vec::new(),
             anticheat_alert: String::new(),
             policy_visible: false,
@@ -298,6 +300,7 @@ impl AppWindow {
     string_setter!(set_memory_label, memory_label);
     string_setter!(set_discrete_gpu_label, discrete_gpu_label);
     string_setter!(set_install_folder, install_folder);
+    string_setter!(set_install_folder_alert, install_folder_alert);
     string_setter!(set_anticheat_alert, anticheat_alert);
     string_setter!(set_policy_text, policy_text);
     string_setter!(set_policy_version_label, policy_version_label);
@@ -472,6 +475,7 @@ macro_rules! no_arg_callback {
 
 no_arg_callback!(on_anticheat_alert_dismiss, "dismissAnticheatAlert");
 no_arg_callback!(on_change_install_folder_requested, "changeInstallFolder");
+no_arg_callback!(on_install_folder_alert_dismiss, "dismissInstallFolderAlert");
 no_arg_callback!(
     on_install_migration_retry_requested,
     "retryInstallMigration"

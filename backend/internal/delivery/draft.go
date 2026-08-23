@@ -74,10 +74,7 @@ func (s *Service) materializeSeedDraft(ctx context.Context, job *models.Delivery
 		First(&release).Error; err != nil {
 		return s.failSeedDraft(job, err)
 	}
-	preservePaths := append([]string(nil), profile.PreservePaths...)
-	if len(preservePaths) == 0 {
-		preservePaths = append([]string(nil), defaultPreservePaths...)
-	}
+	preservePaths := effectivePreservePaths(profile.PreservePaths)
 	root := filepath.Join(s.incomingRoot(), profileID)
 	path := filepath.Join(root, job.Generation+".upload")
 	seedingPath := filepath.Join(root, job.Generation+".seeding")

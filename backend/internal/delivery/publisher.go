@@ -21,10 +21,33 @@ import (
 
 const deliveryEvent = "delivery-v2"
 const launcherReleaseEvent = "launcher-release"
+const profileReleaseEvent = "profiles"
 
 var defaultPreservePaths = []string{
 	"saves/", "resourcepacks/", "shaderpacks/", "screenshots/", "logs/",
 	"crash-reports/", "options.txt", "optionsof.txt", "servers.dat",
+}
+
+var runtimeOwnedPreservePaths = []string{"tacz/"}
+
+func effectivePreservePaths(configured []string) []string {
+	paths := append([]string(nil), configured...)
+	if len(paths) == 0 {
+		paths = append(paths, defaultPreservePaths...)
+	}
+	for _, required := range runtimeOwnedPreservePaths {
+		present := false
+		for _, current := range paths {
+			if strings.EqualFold(strings.TrimRight(current, "/\\"), strings.TrimRight(required, "/\\")) {
+				present = true
+				break
+			}
+		}
+		if !present {
+			paths = append(paths, required)
+		}
+	}
+	return paths
 }
 
 type Watcher struct {
@@ -172,6 +195,9 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 			return
 		}
 		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))
+		if w.broker != nil {
+			w.broker.Publish(profileReleaseEvent)
+		}
 		return
 	}
 	started := time.Now().UTC()
@@ -203,7 +229,7 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 	consumed := filepath.Join(filepath.Dir(processing), generation+".published")
 	_ = os.Rename(processing, consumed)
 	if w.broker != nil {
-		w.broker.Publish(deliveryEvent)
+		w.broker.Publish(profileReleaseEvent)
 	}
 }
 
@@ -259,9 +285,6 @@ func (s *Service) publishProfileForJob(ctx context.Context, profileID, source, j
 		return "", errors.New("ready generation is empty")
 	}
 	config := s.profileConfig(profile)
-	if len(config.PreservePaths) == 0 {
-		config.PreservePaths = append([]string(nil), defaultPreservePaths...)
-	}
 	if preservePath, managedPath, ok := preserveManagedConflict(files, config.PreservePaths); ok {
 		return "", fmt.Errorf("preserve path %s conflicts with managed file %s", preservePath, managedPath)
 	}

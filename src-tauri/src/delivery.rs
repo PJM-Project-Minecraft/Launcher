@@ -1,10 +1,12 @@
 //! Delivery protocol v2. One content-addressed transfer engine is shared by
 //! profile installation and launcher self-update.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -15,6 +17,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: i32 = 2;
+const PROFILE_IO_PARALLELISM: usize = 8;
+static CHUNK_DOWNLOAD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CHUNK_TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -217,7 +223,7 @@ pub fn fetch_launcher_manifest(
 }
 
 pub fn reconstruct_file(
-    client: &Client,
+    client: &crate::DownloadClient,
     api_url: &str,
     token: Option<&str>,
     scope: &Scope,
@@ -295,7 +301,7 @@ pub fn reconstruct_file(
 }
 
 fn ensure_chunk(
-    client: &Client,
+    client: &crate::DownloadClient,
     api_url: &str,
     token: Option<&str>,
     scope: &Scope,
@@ -303,6 +309,17 @@ fn ensure_chunk(
     chunk: &ChunkRef,
 ) -> Result<(), String> {
     let target = chunk_path(cache_root, &chunk.sha256)?;
+    let chunk_lock = {
+        let mut locks = CHUNK_DOWNLOAD_LOCKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Arc::clone(
+            locks
+                .entry(chunk.sha256.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    };
+    let _chunk_guard = chunk_lock.lock().unwrap_or_else(|error| error.into_inner());
     if verify_path(&target, &chunk.sha256, chunk.size).is_ok() {
         return Ok(());
     }
@@ -312,26 +329,43 @@ fn ensure_chunk(
     }
     let mut last_error = String::new();
     for attempt in 0..3 {
-        let mut request = client.get(scope.chunk_url(api_url, &chunk.sha256));
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-        match request.send() {
-            Ok(response) if response.status().is_success() => match response.bytes() {
-                Ok(bytes)
-                    if verify_bytes(&bytes, &chunk.sha256, "chunk").is_ok()
-                        && bytes.len() as i64 == chunk.size =>
-                {
-                    let temp = target.with_extension(format!("{}.part", std::process::id()));
-                    fs::write(&temp, &bytes)
-                        .map_err(|_| "Не удалось записать chunk.".to_string())?;
+        let response = client.get(&scope.chunk_url(api_url, &chunk.sha256), token, None);
+        match response {
+            Ok(response) if response.status().is_success() => {
+                let sequence = CHUNK_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let temp =
+                    target.with_extension(format!("{}.{}.part", std::process::id(), sequence));
+                let attempt_result = (|| {
+                    let mut output = File::create(&temp)
+                        .map_err(|_| "Не удалось подготовить chunk.".to_string())?;
+                    let mut hash = Sha256::new();
+                    let mut received = 0_i64;
+                    response.consume(|bytes| {
+                        output
+                            .write_all(bytes)
+                            .map_err(|_| "Не удалось записать chunk.".to_string())?;
+                        hash.update(bytes);
+                        received += bytes.len() as i64;
+                        Ok(())
+                    })?;
+                    output
+                        .flush()
+                        .map_err(|_| "Не удалось сохранить chunk.".to_string())?;
+                    if received != chunk.size
+                        || format!("{:x}", hash.finalize()) != chunk.sha256.to_lowercase()
+                    {
+                        return Err("Backend вернул повреждённый chunk.".to_string());
+                    }
                     fs::rename(&temp, &target)
                         .map_err(|_| "Не удалось сохранить chunk.".to_string())?;
+                    Ok(())
+                })();
+                if attempt_result.is_ok() {
                     return Ok(());
                 }
-                Ok(_) => last_error = "Backend вернул повреждённый chunk.".to_string(),
-                Err(error) => last_error = format!("Chunk оборван: {error}"),
-            },
+                let _ = fs::remove_file(temp);
+                last_error = attempt_result.unwrap_err();
+            }
             Ok(response) => last_error = format!("Chunk HTTP {}", response.status().as_u16()),
             Err(error) => last_error = format!("Chunk недоступен: {error}"),
         }
@@ -467,7 +501,7 @@ struct SwapJournal {
 }
 
 pub fn install_profile(
-    client: &Client,
+    client: &crate::DownloadClient,
     api_url: &str,
     token: &str,
     profile_root: &Path,
@@ -491,35 +525,61 @@ pub fn install_profile(
     let scope = Scope::Profile {
         profile_id: manifest.profile.id.clone(),
     };
-    let total = manifest.files.len();
-    for (index, file) in manifest.files.iter().enumerate() {
-        let relative = safe_relative(&file.path)?;
-        let existing = files_root.join(&relative);
-        let target = staging.join(&relative);
-        if verify_path(&existing, &file.sha256, file.size).is_ok() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|_| "Не удалось создать staging.".to_string())?;
-            }
-            if fs::hard_link(&existing, &target).is_err() {
-                fs::copy(&existing, &target)
-                    .map_err(|_| format!("Не удалось перенести {}", file.path))?;
-            }
-            set_executable(&target, file.executable)?;
-        } else {
-            reconstruct_file(
-                client,
-                api_url,
-                Some(token),
-                &scope,
-                &cache,
-                file,
-                &target,
-                &|_, _| {},
-            )?;
-        }
-        progress(index + 1, total);
-    }
+    let progress_units = manifest
+        .files
+        .iter()
+        .map(file_progress_units)
+        .collect::<Vec<_>>();
+    let total = progress_units.iter().sum::<usize>();
+    let completed = Mutex::new(0_usize);
+    let report = |delta: usize| {
+        let mut current = completed.lock().unwrap_or_else(|error| error.into_inner());
+        *current += delta;
+        progress(*current, total);
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(PROFILE_IO_PARALLELISM)
+        .thread_name(|index| format!("profile-io-{index}"))
+        .build()
+        .map_err(|_| "Не удалось запустить очередь скачивания.".to_string())?;
+    pool.install(|| {
+        manifest
+            .files
+            .par_iter()
+            .zip(progress_units.par_iter())
+            .try_for_each(|(file, &units)| {
+                let relative = safe_relative(&file.path)?;
+                let existing = files_root.join(&relative);
+                let target = staging.join(&relative);
+                if verify_path(&existing, &file.sha256, file.size).is_ok() {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|_| "Не удалось создать staging.".to_string())?;
+                    }
+                    if fs::hard_link(&existing, &target).is_err() {
+                        fs::copy(&existing, &target)
+                            .map_err(|_| format!("Не удалось перенести {}", file.path))?;
+                    }
+                    set_executable(&target, file.executable)?;
+                    report(units);
+                } else {
+                    reconstruct_file(
+                        client,
+                        api_url,
+                        Some(token),
+                        &scope,
+                        &cache,
+                        file,
+                        &target,
+                        &|_, _| report(1),
+                    )?;
+                    if file.chunks.is_empty() {
+                        report(1);
+                    }
+                }
+                Ok::<(), String>(())
+            })
+    })?;
     let journal_path = profile_root.join("delivery-swap.json");
     write_journal(&journal_path, manifest, "prepared")?;
     if files_root.exists() {
@@ -552,6 +612,15 @@ pub fn install_profile(
     }
     let _ = fs::remove_file(journal_path);
     Ok(())
+}
+
+fn file_progress_units(file: &ReleaseFile) -> usize {
+    file.chunks
+        .iter()
+        .map(|chunk| chunk.sha256.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        .max(1)
 }
 
 fn move_preserved(backup: &Path, staging: &Path, paths: &[String]) -> Result<(), String> {
@@ -673,6 +742,9 @@ fn validate_release_id(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     fn test_root(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -705,6 +777,187 @@ mod tests {
             }],
         };
         assert!(validate_release_files(&[file]).is_err());
+    }
+
+    #[test]
+    fn profile_progress_moves_while_a_multi_chunk_file_downloads() {
+        let chunks = [b"first chunk".as_slice(), b"second chunk".as_slice()];
+        let chunk_refs = chunks
+            .iter()
+            .map(|chunk| ChunkRef {
+                sha256: format!("{:x}", Sha256::digest(chunk)),
+                size: chunk.len() as i64,
+            })
+            .collect::<Vec<_>>();
+        let complete = chunks.concat();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let served_chunks = chunk_refs.clone();
+        let server = thread::spawn(move || {
+            for _ in 0..served_chunks.len() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let payload = served_chunks
+                    .iter()
+                    .enumerate()
+                    .find(|(_, chunk)| request.contains(&chunk.sha256))
+                    .map(|(index, _)| chunks[index])
+                    .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                )
+                .unwrap();
+                stream.write_all(payload).unwrap();
+            }
+        });
+        let root = test_root("progress");
+        let files = root.join("files");
+        let manifest = ProfileManifest {
+            schema_version: SCHEMA_VERSION,
+            kind: "profile".into(),
+            release_id: "11111111-1111-1111-1111-111111111111".into(),
+            sequence: 1,
+            profile: ProfileConfig {
+                id: "profile".into(),
+                name: "Profile".into(),
+                java_version: 21,
+                jvm_args: String::new(),
+                java_path_windows: String::new(),
+                java_path_linux: String::new(),
+                java_path_macos: String::new(),
+                launch_command_windows: String::new(),
+                launch_command_linux: String::new(),
+                launch_command_macos: String::new(),
+                preserve_paths: Vec::new(),
+            },
+            files: vec![ReleaseFile {
+                path: "mods/large.jar".into(),
+                size: complete.len() as i64,
+                sha256: format!("{:x}", Sha256::digest(&complete)),
+                executable: false,
+                chunks: chunk_refs,
+            }],
+            file_count: 1,
+            total_size: complete.len() as i64,
+        };
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let progress_samples = Arc::clone(&samples);
+
+        install_profile(
+            &crate::download_client().unwrap(),
+            &format!("http://{address}"),
+            "token",
+            &root,
+            &files,
+            &manifest,
+            move |done, total| progress_samples.lock().unwrap().push((done, total)),
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        let samples = samples.lock().unwrap();
+        assert!(samples.len() >= 2, "progress samples = {samples:?}");
+        assert!(samples.first().unwrap().0 < samples.first().unwrap().1);
+        assert_eq!(samples.last().unwrap().0, samples.last().unwrap().1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_downloads_chunks_from_different_files_concurrently() {
+        let payloads = [b"alpha".as_slice(), b"bravo".as_slice()];
+        let chunks = payloads
+            .iter()
+            .map(|payload| ChunkRef {
+                sha256: format!("{:x}", Sha256::digest(payload)),
+                size: payload.len() as i64,
+            })
+            .collect::<Vec<_>>();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let served_chunks = chunks.clone();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                requests.push((
+                    stream,
+                    String::from_utf8_lossy(&request[..read]).to_string(),
+                ));
+            }
+            for (mut stream, request) in requests {
+                let payload = served_chunks
+                    .iter()
+                    .enumerate()
+                    .find(|(_, chunk)| request.contains(&chunk.sha256))
+                    .map(|(index, _)| payloads[index])
+                    .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                )
+                .unwrap();
+                stream.write_all(payload).unwrap();
+            }
+        });
+        let root = test_root("parallel-files");
+        let files = root.join("files");
+        let release_files = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| ReleaseFile {
+                path: format!("mods/{index}.jar"),
+                size: chunk.size,
+                sha256: chunk.sha256.clone(),
+                executable: false,
+                chunks: vec![chunk],
+            })
+            .collect::<Vec<_>>();
+        let manifest = ProfileManifest {
+            schema_version: SCHEMA_VERSION,
+            kind: "profile".into(),
+            release_id: "22222222-2222-2222-2222-222222222222".into(),
+            sequence: 1,
+            profile: ProfileConfig {
+                id: "profile".into(),
+                name: "Profile".into(),
+                java_version: 21,
+                jvm_args: String::new(),
+                java_path_windows: String::new(),
+                java_path_linux: String::new(),
+                java_path_macos: String::new(),
+                launch_command_windows: String::new(),
+                launch_command_linux: String::new(),
+                launch_command_macos: String::new(),
+                preserve_paths: Vec::new(),
+            },
+            file_count: release_files.len(),
+            total_size: release_files.iter().map(|file| file.size).sum(),
+            files: release_files,
+        };
+        let client = crate::download_client().unwrap();
+
+        install_profile(
+            &client,
+            &format!("http://{address}"),
+            "token",
+            &root,
+            &files,
+            &manifest,
+            |_, _| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(fs::read(files.join("mods/0.jar")).unwrap(), b"alpha");
+        assert_eq!(fs::read(files.join("mods/1.jar")).unwrap(), b"bravo");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

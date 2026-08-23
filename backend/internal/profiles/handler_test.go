@@ -241,7 +241,7 @@ func TestAdminBuildSnapshotsRestoreProgressAfterPageReload(t *testing.T) {
 //
 // Сырой сокет используется намеренно: net/http-клиент Go буферизует chunked-поток
 // и отдаёт его не сразу, что искажает замер задержки доставки.
-func TestEventsStreamDeliversProfileChange(t *testing.T) {
+func TestEventsStreamDeliversOnlyPlayerFacingProfileChanges(t *testing.T) {
 	broker := events.NewBroker()
 	handler := NewHandler(Service{}, broker)
 
@@ -279,6 +279,10 @@ func TestEventsStreamDeliversProfileChange(t *testing.T) {
 			case <-stop:
 				return
 			case <-ticker.C:
+				// Delivery job progress belongs to the authenticated admin
+				// WebSocket. Forwarding it to players makes every launcher start
+				// another full manifest/file verification for every scanned file.
+				broker.Publish("delivery-v2")
 				broker.Publish("profiles")
 			}
 		}
@@ -296,8 +300,13 @@ func TestEventsStreamDeliversProfileChange(t *testing.T) {
 		switch {
 		case strings.HasPrefix(line, "Content-Type:") && strings.Contains(line, "text/event-stream"):
 			sawEventStream = true
-		case strings.HasPrefix(line, "data:") && strings.Contains(line, "profiles"):
-			sawData = true
+		case strings.HasPrefix(line, "data:"):
+			if strings.Contains(line, "delivery-v2") {
+				t.Fatal("player SSE exposed admin delivery progress")
+			}
+			if strings.Contains(line, "profiles") {
+				sawData = true
+			}
 		}
 	}
 

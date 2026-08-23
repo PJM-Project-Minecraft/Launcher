@@ -1208,6 +1208,7 @@ fn register_settings_handler(
         let Some(app) = change_folder_app.upgrade() else {
             return;
         };
+        app.set_install_folder_alert(SharedString::default());
         if app.get_is_syncing() {
             app.set_message("Дождитесь завершения установки или игры перед сменой диска.".into());
             return;
@@ -1229,13 +1230,14 @@ fn register_settings_handler(
             }
         };
         let selected = rfd::FileDialog::new()
-            .set_title("Выберите пустую папку на новом диске")
-            .set_directory(&source_root)
+            .set_title("Выберите диск или папку для Project Minecraft")
+            .set_directory(source_root.parent().unwrap_or(&source_root))
             .pick_folder();
-        let Some(destination) = selected else {
+        let Some(selected_parent) = selected else {
             change_folder_active.store(false, Ordering::SeqCst);
             return;
         };
+        let destination = install::install_root_in_selected_parent(&selected_parent);
         let migration = new_install_root_migration(&source_root, &destination, false);
         if let Err(message) = update_settings(|settings| {
             settings.install_migration = Some(migration.clone());
@@ -1250,6 +1252,13 @@ fn register_settings_handler(
             migration,
             false,
         );
+    });
+
+    let dismiss_folder_alert_app = app.as_weak();
+    app.on_install_folder_alert_dismiss(move || {
+        if let Some(app) = dismiss_folder_alert_app.upgrade() {
+            app.set_install_folder_alert(SharedString::default());
+        }
     });
 
     let retry_migration_app = app.as_weak();
@@ -1359,6 +1368,7 @@ fn spawn_install_root_migration(
                 app.set_is_syncing(false);
                 match result {
                     Ok(migration) => {
+                        app.set_install_folder_alert(SharedString::default());
                         apply_install_folder_label(&app);
                         let message = if migration.copied_existing_data {
                             format!(
@@ -1372,6 +1382,9 @@ fn spawn_install_root_migration(
                     }
                     Err(message) => {
                         apply_install_folder_label(&app);
+                        if let Some(alert) = install_folder_alert_message(&message) {
+                            app.set_install_folder_alert(alert);
+                        }
                         app.set_message(format!("Перенос не завершён: {message}").into());
                     }
                 }
@@ -1578,7 +1591,12 @@ fn register_play_handler(
                                 mandatory: false,
                                 retryable: true,
                             });
-                            if let Some(alert) = message.strip_prefix(anticheat::kick::KICK_PREFIX) {
+                            if let Some(alert) = install_folder_alert_message(&message) {
+                                app.set_download_panel_visible(false);
+                                app.set_install_folder_alert(alert);
+                            } else if let Some(alert) =
+                                message.strip_prefix(anticheat::kick::KICK_PREFIX)
+                            {
                                 // Игру закрыл античит — полноэкранное уведомление.
                                 app.set_download_panel_visible(false);
                                 app.set_message(SharedString::default());
@@ -1660,12 +1678,13 @@ fn choose_initial_install_root(
     let source = configured_root.unwrap_or(default_root);
 
     let selected = rfd::FileDialog::new()
-        .set_title("Куда установить файлы Minecraft?")
+        .set_title("Выберите диск или папку для Project Minecraft")
         .set_directory(source.parent().unwrap_or(&source))
         .pick_folder();
-    let Some(selected) = selected else {
+    let Some(selected_parent) = selected else {
         return Ok(None);
     };
+    let selected = install::install_root_in_selected_parent(&selected_parent);
     Ok(Some(InitialInstallLocation::Selected(
         new_install_root_migration(&source, &selected, allow_missing_source),
     )))
@@ -2365,6 +2384,24 @@ fn profile_event_connection_needs_catch_up(has_connected: &mut bool) -> bool {
     std::mem::replace(has_connected, true)
 }
 
+fn profile_event_requires_install_check(
+    previous: Option<&ProfileSummary>,
+    current: Option<&ProfileSummary>,
+    is_syncing: bool,
+) -> bool {
+    if is_syncing {
+        return false;
+    }
+    let Some(current) = current else {
+        return false;
+    };
+    previous.is_none_or(|previous| {
+        previous.id != current.id
+            || previous.active_release_id != current.active_release_id
+            || previous.manifest_sha256 != current.manifest_sha256
+    })
+}
+
 /// Перезапрашивает профили и обновляет выбранный профиль в state и UI.
 fn refresh_profiles_now(
     config: &AppConfig,
@@ -2384,6 +2421,8 @@ fn refresh_profiles_now(
         Err(_) => return,
     };
 
+    let previous = state.lock().ok().and_then(|state| selected_profile(&state));
+
     let user_uuid = state
         .lock()
         .ok()
@@ -2400,6 +2439,9 @@ fn refresh_profiles_now(
         .as_ref()
         .and_then(|id| profiles.iter().find(|profile| &profile.id == id))
         .cloned();
+    let is_syncing = app_weak.upgrade().is_some_and(|app| app.get_is_syncing());
+    let should_check =
+        profile_event_requires_install_check(previous.as_ref(), selected.as_ref(), is_syncing);
     let user = state.lock().ok().and_then(|state| state.user.clone());
     let app_weak = app_weak.clone();
     let install_app = app_weak.clone();
@@ -2412,15 +2454,17 @@ fn refresh_profiles_now(
             set_profile_ui(&app, selected.as_ref());
         }
     });
-    if let (Some(user), Some(profile)) = (user, install_profile) {
-        refresh_profile_install_state(
-            install_app,
-            install_runtime,
-            install_config,
-            install_token,
-            user,
-            profile,
-        );
+    if should_check {
+        if let (Some(user), Some(profile)) = (user, install_profile) {
+            refresh_profile_install_state(
+                install_app,
+                install_runtime,
+                install_config,
+                install_token,
+                user,
+                profile,
+            );
+        }
     }
 }
 
@@ -2796,7 +2840,7 @@ fn sync_and_launch(
         true,
     );
     let release_v2 = delivery_manifest_from_legacy(&manifest)?;
-    let client = http_client()?;
+    let client = backend_download_client()?;
     delivery::install_profile(
         &client,
         &config.api_url(),
@@ -2813,7 +2857,7 @@ fn sync_and_launch(
             post_progress(
                 app,
                 "Синхронизация v2",
-                &format!("{} / {} файлов", current, total),
+                &format!("{} / {} блоков", current, total),
                 &format!("{}%", (fraction * 100.0).round() as i32),
                 0.08 + fraction * 0.80,
                 true,
@@ -4803,8 +4847,19 @@ fn perform_install_root_migration(
     result
 }
 
+fn install_folder_alert_message(message: &str) -> Option<String> {
+    (message == install::NON_EMPTY_DESTINATION_ERROR).then(|| {
+        "Папка Project Minecraft внутри выбранного места уже содержит файлы. Лаунчер не удаляет и не перезаписывает чужие файлы. Выберите другое место."
+            .to_string()
+    })
+}
+
 fn commit_install_root_change(settings: &mut LauncherSettings, destination: &Path) {
-    settings.install_root = Some(destination.to_string_lossy().to_string());
+    settings.install_root = Some(
+        install::portable_install_root(destination)
+            .to_string_lossy()
+            .to_string(),
+    );
     settings.install_migration = None;
 }
 
@@ -5621,6 +5676,43 @@ mod tests {
     }
 
     #[test]
+    fn non_empty_install_folder_gets_a_clear_user_alert() {
+        let alert = install_folder_alert_message("Выберите пустую папку для переноса файлов.")
+            .expect("the occupied destination must be shown as an actionable alert");
+
+        assert!(alert.contains("Project Minecraft"));
+        assert!(alert.contains("не удаляет"));
+        assert!(install_folder_alert_message("Диск недоступен").is_none());
+    }
+
+    #[test]
+    fn install_root_commit_strips_windows_verbatim_disk_prefix() {
+        let mut settings = LauncherSettings::default();
+
+        commit_install_root_change(&mut settings, Path::new(r"\\?\D:\Games\Project Minecraft"));
+
+        assert_eq!(
+            settings.install_root.as_deref(),
+            Some(r"D:\Games\Project Minecraft")
+        );
+    }
+
+    #[test]
+    fn install_root_commit_converts_windows_verbatim_unc_prefix() {
+        let mut settings = LauncherSettings::default();
+
+        commit_install_root_change(
+            &mut settings,
+            Path::new(r"\\?\UNC\game-server\players\Project Minecraft"),
+        );
+
+        assert_eq!(
+            settings.install_root.as_deref(),
+            Some(r"\\game-server\players\Project Minecraft")
+        );
+    }
+
+    #[test]
     fn resumed_move_rejects_missing_expected_source_disk() {
         let root = test_root("missing_migration_source");
         let source = root.join("detached-source");
@@ -5816,6 +5908,46 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(profile_root);
+    }
+
+    fn profile_summary(release: &str) -> ProfileSummary {
+        ProfileSummary {
+            id: "profile".to_string(),
+            name: "Profile".to_string(),
+            game_version: "1.21.1".to_string(),
+            is_active: true,
+            active_release_id: release.to_string(),
+            manifest_sha256: format!("{release:0<64}"),
+            manifest_signature: String::new(),
+        }
+    }
+
+    #[test]
+    fn profile_events_only_recheck_when_release_changes() {
+        let old = profile_summary("old");
+        let same = profile_summary("old");
+        let updated = profile_summary("new");
+
+        assert!(!profile_event_requires_install_check(
+            Some(&old),
+            Some(&same),
+            false,
+        ));
+        assert!(profile_event_requires_install_check(
+            Some(&old),
+            Some(&updated),
+            false,
+        ));
+        assert!(profile_event_requires_install_check(
+            None,
+            Some(&updated),
+            false,
+        ));
+        assert!(!profile_event_requires_install_check(
+            Some(&old),
+            Some(&updated),
+            true,
+        ));
     }
 
     #[test]
