@@ -10,7 +10,7 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.7` (в `Cargo.toml`).
+- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.8` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
 - `src/` + React/Vite — production-интерфейс десктоп-лаунчера.
@@ -421,6 +421,9 @@ Windows использует WebView2. Состояние Rust→React идёт 
 ## Релизы лаунчера
 
 Текущие версии:
+- **0.5.8** (Delivery v2 сохраняет скачанный Java runtime текущей ОС при
+  атомарной смене сборки; античит берёт whitelist модов из активного v2 release
+  и перепроверяет кеш перед hard-детектом).
 - **0.5.5** (локальный watcher повторно сверяет поколение manifest непосредственно
   при выполнении отложенного UI-callback, поэтому старый результат не возвращает
   кнопку обновления после успешной синхронизации; неизвестные JAR в `mods/`
