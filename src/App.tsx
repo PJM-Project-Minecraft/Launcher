@@ -313,7 +313,7 @@ function PlayButton({ state }: { state: LauncherState }) {
   const label = state.launcherDelivery.mandatory
     ? "Требуется обновление"
     : state.profileDelivery.phase === "syncing"
-      ? state.downloadPhase || "Подготовка"
+      ? "Синхронизация"
       : state.profileDelivery.phase === "checking"
         ? "Проверяем файлы"
         : state.profileDelivery.phase === "failed"
@@ -350,14 +350,13 @@ function HomeView({ state }: { state: LauncherState }) {
         <button className="quick-settings" onClick={() => void action("openSettings")}><PixelIcon name="cpu" /> Настройки</button>
       </div>
 
-      <div className={`launch-console${state.downloadPanelVisible ? " downloading" : ""}`}>
+      <div className="launch-console">
         <div className="launch-readout" aria-live="polite">
-          <span>{state.isSyncing ? state.downloadCounter || "Синхронизация" : "Состояние игры"}</span>
+          <span>Состояние игры</span>
           <strong>{launchStatus(state)}</strong>
-          {state.downloadPanelVisible && <small>{state.downloadFile}</small>}
+          <small>{state.selectedProfileName || "Project Minecraft"}</small>
         </div>
         <PlayButton state={state} />
-        {state.downloadPanelVisible && <div className="launch-progress" style={{ "--launch-progress": `${Math.round(state.downloadProgress * 100)}%` } as CSSProperties}><span /></div>}
       </div>
     </section>
   );
@@ -452,6 +451,61 @@ function UpdateBanner({ state }: { state: LauncherState }) {
   );
 }
 
+function gameUpdateIsActive(state: LauncherState) {
+  return state.isSyncing || state.profileDelivery.phase === "syncing";
+}
+
+function syncPhaseLabel(state: LauncherState) {
+  const phase = state.downloadPhase || state.profileDelivery.message;
+  if (!phase) return "Подготовка файлов";
+  if (phase === "Готовим папку") return "Подготовка папки";
+  if (phase === "Получаем профиль") return "Получение профиля";
+  return phase;
+}
+
+function SyncOverlay({ state }: { state: LauncherState }) {
+  if (!gameUpdateIsActive(state)) return null;
+  const progress = Math.max(0, Math.min(1, state.downloadProgress));
+  const percent = Math.round(progress * 100);
+  const currentFile = state.downloadFile || state.selectedProfileName || "Подготавливаем файлы игры";
+  const counter = state.downloadCounter || `${percent}%`;
+
+  return (
+    <div className="sync-overlay" role="dialog" aria-modal="true" aria-labelledby="sync-title" aria-describedby="sync-description">
+      <section className="sync-frame">
+        <header className="sync-header">
+          <Brand />
+          <div className="sync-system-status"><StatusDot /><span>Лаунчер активен</span></div>
+        </header>
+
+        <div className="sync-content">
+          <div className="sync-kicker"><PixelIcon name="download" /> Обновление клиента</div>
+          <div className="sync-heading-row">
+            <div>
+              <h1 id="sync-title">Синхронизация игры</h1>
+              <p id="sync-description">Проверяем и загружаем только изменившиеся файлы. Можно будет играть сразу после завершения.</p>
+            </div>
+            <strong className="sync-percent" aria-label={`${percent} процентов`}>{percent}<small>%</small></strong>
+          </div>
+
+          <div className="sync-progress-block" aria-label={`Прогресс обновления: ${percent}%`}>
+            <div className="sync-progress-track"><span style={{ "--sync-progress": `${percent}%` } as CSSProperties} /></div>
+            <div className="sync-progress-meta"><span>{syncPhaseLabel(state)}</span><strong>{counter}</strong></div>
+          </div>
+
+          <div className="sync-file-card">
+            <div className="sync-file-icon"><PixelIcon name="article" /></div>
+            <div><span>Текущий файл</span><strong title={currentFile}>{currentFile}</strong></div>
+            <PixelIcon name="reload" className="sync-file-spinner spin" />
+          </div>
+        </div>
+
+        <footer className="sync-footer"><span>Не закрывайте лаунчер</span><span>Project Minecraft · {state.selectedProfileVersion || "NeoForge"}</span></footer>
+      </section>
+    </div>
+  );
+}
+
 function PolicyOverlay({ state }: { state: LauncherState }) {
   if (!state.policyVisible) return null;
   return (
@@ -508,6 +562,7 @@ export default function App() {
           </div>
         )}
         <UpdateBanner state={state} />
+        <SyncOverlay state={state} />
         <SettingsOverlay state={state} />
         <PolicyOverlay state={state} />
         <AnticheatOverlay message={state.anticheatAlert} />
