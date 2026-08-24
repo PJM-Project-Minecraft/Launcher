@@ -10,7 +10,7 @@ Telegram-бота и yggdrasil-аутентификацию игрового с�
 Компоненты:
 - `backend/` — Go + Fiber v3, GORM. Два бинарника: `cmd/server` (API) и `cmd/bot` (Telegram). Делят одну БД.
 - `dashboard/` — Next.js 15 (App Router) + Tailwind 4. Только админка.
-- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.8` (в `Cargo.toml`).
+- `src-tauri/` — Tauri 2 / Rust-ядро десктоп-лаунчера. Текущая версия: `0.5.10` (в `Cargo.toml`).
 - `anticheat-native/` — JVMTI-агент на C (`.so`/`.dll`), грузится в JVM Minecraft через `-agentpath`.
 - `anticheat-agent/` — Java-агент античита (`-javaagent`), работает в паре с нативным.
 - `src/` + React/Vite — production-интерфейс десктоп-лаунчера.
@@ -131,14 +131,14 @@ release-box и не передаётся в CI.
 - Миграция выполнена rsync `/root/Launcher` + `pg_dump`/restore БД (см. [[launcher-prod-deploy]]).
 
 **Гочи деплоя:**
-- Порты в base `docker-compose.yml` параметризованы: `${POSTGRES_BIND:-5432}`, `${SERVER_BIND:-8080}`. В прод `.env` задано `POSTGRES_BIND=127.0.0.1:5432` и `SERVER_BIND=127.0.0.1:8082`.
+- Порты в base `docker-compose.yml` параметризованы: `${POSTGRES_BIND:-5432}`, `${SERVER_BIND:-8080}`. В прод `.env` задано `POSTGRES_BIND=127.0.0.1:5432` и `SERVER_BIND=127.0.0.1:8080`; `docker-compose.override.yml` дополнительно публикует backend как `127.0.0.1:8081:8080`, и Caddy для `launcher.*` проксирует именно на `:8081`.
 - `docker-compose.override.yml` **добавляет** секции `ports`, а не заменяет — для остального менять в base.
 - `.dockerignore` в `backend/` исключает `storage/` и `data/` — монтируются томами, не копируются в образ.
 - `docker compose build server` **НЕ пересобирает образ бота** — у них отдельные образы.
 - `JWT_SECRET` в base compose только у `server`; боту добавлен через override.
 - **ANTICHEAT_SECRET, GAME_API_SECRET и SITE_ORDER_SECRET:** мало добавить в `.env` — до контейнера значение доходит только при явном passthrough в `environment:` сервиса. Без него server+bot уходят в crash-loop на `Validate()` — все три переменные нужны **обоим** сервисам, `bot` тоже зовёт `Validate()` при старте. `SITE_ORDER_SECRET` совпадает с `SITE_BACKEND_SECRET` проекта WEB.
 - **Диск VPS — только 40G.** При 100% postgres падает (`could not write postmaster.pid`), server/bot — следом (502). После сборок чистить кэш: `docker builder prune -af`.
-- **Nginx лимит на аплоад:** для заливки релизов лаунчера через дашборд нужен `client_max_body_size 512m;` в nginx для location бэкенда (:8082). Иначе nginx обрежет multipart-аплоад (BodyLimit 512МБ уже в Fiber, но nginx отрежет первым).
+- **Лимит на аплоад:** production-цепочка лаунчера сейчас `Caddy → 127.0.0.1:8081 → Fiber`; у Fiber `BodyLimit` равен 512 МБ, а Caddy не задаёт меньший лимит. При добавлении другого reverse-proxy его body limit должен оставаться не ниже 512 МБ, иначе multipart-релиз будет обрезан до backend.
 - Git-деплой: VPS тянет deploy-ключом (`~/.ssh/launcher_deploy`, alias `github-launcher` в `~/.ssh/config`). Нужен `git config --global --add safe.directory /root/Launcher` (файлы uid 1000, git под root).
 - Откат: `git reset --hard <commit>` на VPS + `docker compose up -d --build`.
 

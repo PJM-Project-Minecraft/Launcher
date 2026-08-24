@@ -64,7 +64,8 @@ services:
       APP_ENV: "${APP_ENV:-development}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
-      # dev: 0.0.0.0:8080. prod задаёт SERVER_BIND=127.0.0.1:8082 в .env (за nginx)
+      # dev: 0.0.0.0:8080. prod задаёт SERVER_BIND=127.0.0.1:8080;
+      # override добавляет 127.0.0.1:8081:8080 для Caddy launcher-vhost.
       - "${SERVER_BIND:-8080}:8080"
     volumes:
       - shop_storage:/app/storage/shop
