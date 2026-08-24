@@ -15,8 +15,10 @@ Delivery v2 — единый контур доставки профилей Mine
   Release-сборка клиента без обоих публичных ключей запрещена.
 - Все данные идут через один content-addressed transfer engine. FastCDC режет
   файлы на chunks 1–8 МиБ (цель 4 МиБ), CAS адресуется по SHA-256.
-- Клиент сначала собирает полный staging, затем переключает `files/` через
-  журналируемый swap. При падении процесса предыдущая сборка восстанавливается.
+- Если строгая SHA-256-проверка находит изменения, клиент сначала собирает полный
+  staging, затем переключает `files/` через журналируемый swap. Уже актуальное
+  дерево не перестраивается. При падении процесса предыдущая сборка
+  восстанавливается.
 - WebSocket/SSE является только сигналом изменения. Долговечное состояние
   читается из HTTP snapshot; после reconnect snapshot перечитывается заново.
 - Launcher descriptor фиксируется один раз при CAS-import. Изменяемая
@@ -72,6 +74,18 @@ Launcher multipart-upload сначала сохраняется как inactive 
 - `GET /api/v2/launcher/releases/:release/artifact?platform=linux-x64` — полный
   файл только для браузерной витрины.
 
+CDN origin, только с постоянным заголовком `X-PJM-Delivery-Origin`, который
+Timeweb добавляет на плече CDN → backend:
+
+- `GET /api/v2/cdn/profiles/:id/chunks/:sha256`
+- `GET /api/v2/cdn/launcher/releases/:release/chunks/:sha256`
+
+Публичная CDN-база не входит в подписанные immutable документы: профиль получает
+её в `deliveryBaseUrl` HTTP snapshot, launcher update — в
+`X-Delivery-Base-URL`. Поэтому CDN можно отключить без перепубликации releases.
+Клиент не отправляет JWT на CDN, проверяет размер/SHA-256 каждого chunk и после
+трёх неудачных CDN-попыток использует исходный backend route.
+
 `current` возвращает immutable signed descriptor; рассчитанная для
 текущей версии channel policy приходит отдельно в `X-Update-Mandatory`.
 Деактивация/удаление в admin лишь снимает release с канала: уже
@@ -93,9 +107,15 @@ Backend:
 ```dotenv
 DELIVERY_ROOT=storage/delivery-v2
 DELIVERY_MANIFEST_SIGNING_KEY=<32-byte Ed25519 seed, 64 hex>
+DELIVERY_CDN_BASE=https://cdn.example.com
+DELIVERY_CDN_ORIGIN_SECRET=<random secret, минимум 32 символа>
 DELIVERY_V1_BRIDGE=true
 DELIVERY_V1_BRIDGE_UNTIL=<UTC RFC3339 cutoff, например 2026-09-21T00:00:00Z>
 ```
+
+Обе `DELIVERY_CDN_*` переменные задаются только вместе. CDN base обязан быть
+корневым HTTPS URL. Origin secret хранится в production `.env` и в заголовках
+запросов CDN-ресурса; в launcher, manifest и API snapshot он не попадает.
 
 В production signing key обязателен. Публичный ключ выводится мигратором и
 вшивается в launcher release как `DELIVERY_MANIFEST_PUBKEY`. Отдельный

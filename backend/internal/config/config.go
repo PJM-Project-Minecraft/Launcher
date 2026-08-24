@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,11 @@ type Config struct {
 	DeliveryManifestSigningKey string
 	// Public key used only to verify launcher binaries during operator migration.
 	LauncherUpdatePublicKey string
+	// DeliveryCDNBase is the public edge URL used only for immutable v2 chunks.
+	// DeliveryCDNOriginSecret authenticates Timeweb-to-origin requests; clients
+	// never receive it.
+	DeliveryCDNBase         string
+	DeliveryCDNOriginSecret string
 	// ProfileCDNBase — база публичного зеркала файлов профилей (бакет S3).
 	// Задан → манифест отдаёт absolute download_url на бакет, трафик сборок идёт мимо VPS.
 	// Пусто → файлы качаются с бэкенда по относительному /api/profiles/... (дефолт).
@@ -107,6 +113,8 @@ func Load() Config {
 		DeliveryV1BridgeUntil:      parseRFC3339(os.Getenv("DELIVERY_V1_BRIDGE_UNTIL")),
 		DeliveryManifestSigningKey: strings.TrimSpace(os.Getenv("DELIVERY_MANIFEST_SIGNING_KEY")),
 		LauncherUpdatePublicKey:    strings.TrimSpace(os.Getenv("LAUNCHER_UPDATE_PUBKEY")),
+		DeliveryCDNBase:            strings.TrimRight(strings.TrimSpace(os.Getenv("DELIVERY_CDN_BASE")), "/"),
+		DeliveryCDNOriginSecret:    strings.TrimSpace(os.Getenv("DELIVERY_CDN_ORIGIN_SECRET")),
 		ProfileCDNBase:             strings.TrimRight(env("PROFILE_CDN_BASE", ""), "/"),
 		LauncherReleaseRoot: env(
 			"LAUNCHER_RELEASE_ROOT",
@@ -175,6 +183,9 @@ func (c Config) Validate() error {
 	if c.DeliveryV1Bridge && c.DeliveryV1BridgeUntil.IsZero() {
 		return errors.New("DELIVERY_V1_BRIDGE=true требует DELIVERY_V1_BRIDGE_UNTIL в RFC3339")
 	}
+	if err := c.validateDeliveryCDN(); err != nil {
+		return err
+	}
 	if c.AppEnv == "production" {
 		deliverySeed, deliverySeedErr := hex.DecodeString(c.DeliveryManifestSigningKey)
 		if deliverySeedErr != nil || len(deliverySeed) != 32 || strings.ToLower(c.DeliveryManifestSigningKey) != c.DeliveryManifestSigningKey {
@@ -182,6 +193,25 @@ func (c Config) Validate() error {
 		}
 	}
 	return c.validateCommon()
+}
+
+func (c Config) validateDeliveryCDN() error {
+	base := strings.TrimSpace(c.DeliveryCDNBase)
+	secret := strings.TrimSpace(c.DeliveryCDNOriginSecret)
+	if (base == "") != (secret == "") {
+		return errors.New("DELIVERY_CDN_BASE и DELIVERY_CDN_ORIGIN_SECRET должны задаваться вместе")
+	}
+	if base == "" {
+		return nil
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return errors.New("DELIVERY_CDN_BASE должен быть корневым HTTPS URL без path, query или credentials")
+	}
+	if len(secret) < 32 {
+		return errors.New("DELIVERY_CDN_ORIGIN_SECRET должен содержать минимум 32 символа")
+	}
+	return nil
 }
 
 // ValidateBot applies only the configuration required by the Telegram bot.

@@ -74,6 +74,8 @@ pub struct UpdateInfo {
     pub release_id: String,
     pub changelog: String,
     pub artifact: crate::delivery::ReleaseFile,
+    #[serde(default)]
+    pub delivery_base_url: String,
 }
 
 /// Посегментное сравнение версий "X.Y.Z"; отсутствующие и нечисловые
@@ -131,6 +133,7 @@ pub fn check_update(api_url: &str) -> Result<UpdateInfo, String> {
         release_id: manifest.release_id,
         changelog: manifest.changelog,
         artifact: manifest.artifact,
+        delivery_base_url: manifest.delivery_base_url,
     })
 }
 
@@ -163,6 +166,7 @@ pub fn download_and_stage(
     crate::delivery::reconstruct_file(
         &client,
         api_url,
+        &info.delivery_base_url,
         None,
         &crate::delivery::Scope::Launcher {
             release_id: info.release_id.clone(),
@@ -283,6 +287,8 @@ pub fn cleanup_leftovers() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn compare_versions_orders_numerically() {
@@ -291,6 +297,48 @@ mod tests {
         assert_eq!(compare_versions("0.10.0", "0.9.0"), Ordering::Greater);
         assert_eq!(compare_versions("1.2", "1.2.0"), Ordering::Equal);
         assert_eq!(compare_versions("abc", "0.0.1"), Ordering::Less);
+    }
+
+    #[test]
+    fn update_check_keeps_runtime_delivery_base_outside_signed_descriptor() {
+        let platform = platform();
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "kind": "launcher",
+            "releaseId": "11111111-1111-1111-1111-111111111111",
+            "version": "99.0.0",
+            "platform": platform,
+            "changelog": "CDN",
+            "artifactSignature": "",
+            "artifact": {
+                "path": "launcher",
+                "size": 1,
+                "sha256": "a".repeat(64),
+                "executable": true,
+                "chunks": [{"sha256": "b".repeat(64), "size": 1}]
+            }
+        })
+        .to_string();
+        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Manifest-SHA256: {}\r\nX-Manifest-Signature: \r\nX-Update-Mandatory: false\r\nX-Delivery-Base-URL: https://cdn.example.com\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                digest,
+                body
+            )
+            .unwrap();
+        });
+
+        let info = check_update(&format!("http://{address}")).unwrap();
+        server.join().unwrap();
+        assert_eq!(info.delivery_base_url, "https://cdn.example.com");
     }
 
     // Реплей подписанного старого бинарника под видом новой версии должен отваливаться:

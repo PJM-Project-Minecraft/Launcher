@@ -93,12 +93,19 @@ pub struct LauncherManifest {
     #[serde(default)]
     pub artifact_signature: String,
     pub artifact: ReleaseFile,
+    #[serde(skip)]
+    pub delivery_base_url: String,
 }
 
 #[derive(Clone)]
 pub enum Scope {
     Profile { profile_id: String },
     Launcher { release_id: String },
+}
+
+struct ChunkSource {
+    url: String,
+    uses_bearer: bool,
 }
 
 impl Scope {
@@ -117,6 +124,43 @@ impl Scope {
                 hash
             ),
         }
+    }
+
+    fn cdn_chunk_url(&self, delivery_base_url: &str, hash: &str) -> String {
+        match self {
+            Scope::Profile { profile_id } => format!(
+                "{}/api/v2/cdn/profiles/{}/chunks/{}",
+                delivery_base_url.trim_end_matches('/'),
+                profile_id,
+                hash
+            ),
+            Scope::Launcher { release_id } => format!(
+                "{}/api/v2/cdn/launcher/releases/{}/chunks/{}",
+                delivery_base_url.trim_end_matches('/'),
+                release_id,
+                hash
+            ),
+        }
+    }
+
+    fn chunk_sources(
+        &self,
+        api_url: &str,
+        delivery_base_url: &str,
+        hash: &str,
+    ) -> Vec<ChunkSource> {
+        let mut sources = Vec::with_capacity(2);
+        if !delivery_base_url.trim().is_empty() {
+            sources.push(ChunkSource {
+                url: self.cdn_chunk_url(delivery_base_url, hash),
+                uses_bearer: false,
+            });
+        }
+        sources.push(ChunkSource {
+            url: self.chunk_url(api_url, hash),
+            uses_bearer: matches!(self, Scope::Profile { .. }),
+        });
+        sources
     }
 }
 
@@ -204,6 +248,13 @@ pub fn fetch_launcher_manifest(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let delivery_base_url = response
+        .headers()
+        .get("X-Delivery-Base-URL")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string();
     let body = response
         .bytes()
         .map_err(|error| format!("Ответ обновлений v2 оборван: {error}"))?;
@@ -219,12 +270,14 @@ pub fn fetch_launcher_manifest(
     }
     validate_release_files(std::slice::from_ref(&manifest.artifact))?;
     manifest.mandatory = mandatory;
+    manifest.delivery_base_url = delivery_base_url;
     Ok(Some(manifest))
 }
 
 pub fn reconstruct_file(
     client: &crate::DownloadClient,
     api_url: &str,
+    delivery_base_url: &str,
     token: Option<&str>,
     scope: &Scope,
     cache_root: &Path,
@@ -244,7 +297,15 @@ pub fn reconstruct_file(
     let completed = AtomicUsize::new(0);
     let total = unique_chunks.len();
     unique_chunks.par_iter().try_for_each(|chunk| {
-        ensure_chunk(client, api_url, token, scope, cache_root, chunk)?;
+        ensure_chunk(
+            client,
+            api_url,
+            delivery_base_url,
+            token,
+            scope,
+            cache_root,
+            chunk,
+        )?;
         progress(completed.fetch_add(1, Ordering::Relaxed) + 1, total);
         Ok::<(), String>(())
     })?;
@@ -303,6 +364,7 @@ pub fn reconstruct_file(
 fn ensure_chunk(
     client: &crate::DownloadClient,
     api_url: &str,
+    delivery_base_url: &str,
     token: Option<&str>,
     scope: &Scope,
     cache_root: &Path,
@@ -328,49 +390,52 @@ fn ensure_chunk(
         fs::create_dir_all(parent).map_err(|_| "Не удалось создать chunk-cache.".to_string())?;
     }
     let mut last_error = String::new();
-    for attempt in 0..3 {
-        let response = client.get(&scope.chunk_url(api_url, &chunk.sha256), token, None);
-        match response {
-            Ok(response) if response.status().is_success() => {
-                let sequence = CHUNK_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                let temp =
-                    target.with_extension(format!("{}.{}.part", std::process::id(), sequence));
-                let attempt_result = (|| {
-                    let mut output = File::create(&temp)
-                        .map_err(|_| "Не удалось подготовить chunk.".to_string())?;
-                    let mut hash = Sha256::new();
-                    let mut received = 0_i64;
-                    response.consume(|bytes| {
+    for source in scope.chunk_sources(api_url, delivery_base_url, &chunk.sha256) {
+        let bearer = if source.uses_bearer { token } else { None };
+        for attempt in 0..3 {
+            let response = client.get(&source.url, bearer, None);
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    let sequence = CHUNK_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                    let temp =
+                        target.with_extension(format!("{}.{}.part", std::process::id(), sequence));
+                    let attempt_result = (|| {
+                        let mut output = File::create(&temp)
+                            .map_err(|_| "Не удалось подготовить chunk.".to_string())?;
+                        let mut hash = Sha256::new();
+                        let mut received = 0_i64;
+                        response.consume(|bytes| {
+                            output
+                                .write_all(bytes)
+                                .map_err(|_| "Не удалось записать chunk.".to_string())?;
+                            hash.update(bytes);
+                            received += bytes.len() as i64;
+                            Ok(())
+                        })?;
                         output
-                            .write_all(bytes)
-                            .map_err(|_| "Не удалось записать chunk.".to_string())?;
-                        hash.update(bytes);
-                        received += bytes.len() as i64;
+                            .flush()
+                            .map_err(|_| "Не удалось сохранить chunk.".to_string())?;
+                        if received != chunk.size
+                            || format!("{:x}", hash.finalize()) != chunk.sha256.to_lowercase()
+                        {
+                            return Err("Источник вернул повреждённый chunk.".to_string());
+                        }
+                        fs::rename(&temp, &target)
+                            .map_err(|_| "Не удалось сохранить chunk.".to_string())?;
                         Ok(())
-                    })?;
-                    output
-                        .flush()
-                        .map_err(|_| "Не удалось сохранить chunk.".to_string())?;
-                    if received != chunk.size
-                        || format!("{:x}", hash.finalize()) != chunk.sha256.to_lowercase()
-                    {
-                        return Err("Backend вернул повреждённый chunk.".to_string());
+                    })();
+                    if attempt_result.is_ok() {
+                        return Ok(());
                     }
-                    fs::rename(&temp, &target)
-                        .map_err(|_| "Не удалось сохранить chunk.".to_string())?;
-                    Ok(())
-                })();
-                if attempt_result.is_ok() {
-                    return Ok(());
+                    let _ = fs::remove_file(temp);
+                    last_error = attempt_result.unwrap_err();
                 }
-                let _ = fs::remove_file(temp);
-                last_error = attempt_result.unwrap_err();
+                Ok(response) => last_error = format!("Chunk HTTP {}", response.status().as_u16()),
+                Err(error) => last_error = format!("Chunk недоступен: {error}"),
             }
-            Ok(response) => last_error = format!("Chunk HTTP {}", response.status().as_u16()),
-            Err(error) => last_error = format!("Chunk недоступен: {error}"),
-        }
-        if attempt < 2 {
-            thread::sleep(Duration::from_millis(500_u64 << attempt));
+            if attempt < 2 {
+                thread::sleep(Duration::from_millis(500_u64 << attempt));
+            }
         }
     }
     Err(last_error)
@@ -503,6 +568,7 @@ struct SwapJournal {
 pub fn install_profile(
     client: &crate::DownloadClient,
     api_url: &str,
+    delivery_base_url: &str,
     token: &str,
     profile_root: &Path,
     files_root: &Path,
@@ -511,6 +577,37 @@ pub fn install_profile(
 ) -> Result<(), String> {
     recover_profile_swap(profile_root, files_root)?;
     validate_release_id(&manifest.release_id)?;
+    let progress_units = manifest
+        .files
+        .iter()
+        .map(file_progress_units)
+        .collect::<Vec<_>>();
+    let total = progress_units.iter().sum::<usize>();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(PROFILE_IO_PARALLELISM)
+        .thread_name(|index| format!("profile-io-{index}"))
+        .build()
+        .map_err(|_| "Не удалось запустить очередь скачивания.".to_string())?;
+
+    // The common launch path is a strict SHA-256 audit of an already-current
+    // tree. Do not rebuild, hard-link and atomically swap the whole profile when
+    // every managed file is already valid; that filesystem churn dominated the
+    // visible "Синхронизация v2" phase on large installations.
+    let strictly_current = pool.install(|| {
+        manifest.files.par_iter().all(|file| {
+            let Ok(relative) = safe_relative(&file.path) else {
+                return false;
+            };
+            let existing = files_root.join(relative);
+            verify_path(&existing, &file.sha256, file.size).is_ok()
+                && set_executable(&existing, file.executable).is_ok()
+        })
+    });
+    if strictly_current {
+        progress(total, total);
+        return Ok(());
+    }
+
     let staging = profile_root.join(format!(".delivery-staging-{}", manifest.release_id));
     let backup = profile_root.join(format!(".delivery-backup-{}", manifest.release_id));
     if staging.exists() {
@@ -525,23 +622,12 @@ pub fn install_profile(
     let scope = Scope::Profile {
         profile_id: manifest.profile.id.clone(),
     };
-    let progress_units = manifest
-        .files
-        .iter()
-        .map(file_progress_units)
-        .collect::<Vec<_>>();
-    let total = progress_units.iter().sum::<usize>();
     let completed = Mutex::new(0_usize);
     let report = |delta: usize| {
         let mut current = completed.lock().unwrap_or_else(|error| error.into_inner());
         *current += delta;
         progress(*current, total);
     };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(PROFILE_IO_PARALLELISM)
-        .thread_name(|index| format!("profile-io-{index}"))
-        .build()
-        .map_err(|_| "Не удалось запустить очередь скачивания.".to_string())?;
     pool.install(|| {
         manifest
             .files
@@ -566,6 +652,7 @@ pub fn install_profile(
                     reconstruct_file(
                         client,
                         api_url,
+                        delivery_base_url,
                         Some(token),
                         &scope,
                         &cache,
@@ -780,6 +867,311 @@ mod tests {
     }
 
     #[test]
+    fn chunk_sources_prefer_cdn_without_bearer_and_keep_backend_fallback() {
+        let hash = "a".repeat(64);
+        let profile = Scope::Profile {
+            profile_id: "profile-id".into(),
+        };
+        let sources = profile.chunk_sources(
+            "https://launcher.example.com/",
+            "https://cdn.example.com/",
+            &hash,
+        );
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources[0].url,
+            format!("https://cdn.example.com/api/v2/cdn/profiles/profile-id/chunks/{hash}")
+        );
+        assert!(!sources[0].uses_bearer);
+        assert_eq!(
+            sources[1].url,
+            format!("https://launcher.example.com/api/v2/profiles/profile-id/chunks/{hash}")
+        );
+        assert!(sources[1].uses_bearer);
+
+        let launcher = Scope::Launcher {
+            release_id: "release-id".into(),
+        };
+        let sources = launcher.chunk_sources(
+            "https://launcher.example.com",
+            "https://cdn.example.com",
+            &hash,
+        );
+        assert_eq!(
+            sources[0].url,
+            format!(
+                "https://cdn.example.com/api/v2/cdn/launcher/releases/release-id/chunks/{hash}"
+            )
+        );
+        assert!(!sources[0].uses_bearer);
+        assert!(!sources[1].uses_bearer);
+    }
+
+    #[test]
+    fn cdn_failure_falls_back_to_authenticated_backend() {
+        let payload = b"trusted fallback chunk";
+        let chunk = ChunkRef {
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            size: payload.len() as i64,
+        };
+
+        let cdn_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cdn_address = cdn_listener.local_addr().unwrap();
+        let cdn_server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = cdn_listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                assert!(
+                    !request.contains("authorization:"),
+                    "JWT leaked to CDN: {request}"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+
+        let backend_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let backend_address = backend_listener.local_addr().unwrap();
+        let backend_server = thread::spawn(move || {
+            let (mut stream, _) = backend_listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+            assert!(
+                request.contains("authorization: bearer profile-token"),
+                "backend fallback missed JWT: {request}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            )
+            .unwrap();
+            stream.write_all(payload).unwrap();
+        });
+
+        let cache = test_root("cdn-fallback");
+        ensure_chunk(
+            &crate::download_client().unwrap(),
+            &format!("http://{backend_address}"),
+            &format!("http://{cdn_address}"),
+            Some("profile-token"),
+            &Scope::Profile {
+                profile_id: "profile".into(),
+            },
+            &cache,
+            &chunk,
+        )
+        .unwrap();
+        cdn_server.join().unwrap();
+        backend_server.join().unwrap();
+        assert_eq!(
+            fs::read(chunk_path(&cache, &chunk.sha256).unwrap()).unwrap(),
+            payload
+        );
+        let _ = fs::remove_dir_all(cache);
+    }
+
+    #[test]
+    fn reconstruct_file_uses_advertised_cdn_base() {
+        let payload = b"launcher from CDN";
+        let chunk_hash = format!("{:x}", Sha256::digest(payload));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_hash = chunk_hash.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains(&format!(
+                "/api/v2/cdn/launcher/releases/release/chunks/{expected_hash}"
+            )));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            )
+            .unwrap();
+            stream.write_all(payload).unwrap();
+        });
+
+        let root = test_root("cdn-reconstruct");
+        let destination = root.join("launcher");
+        let spec = ReleaseFile {
+            path: "launcher".into(),
+            size: payload.len() as i64,
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            executable: false,
+            chunks: vec![ChunkRef {
+                sha256: chunk_hash,
+                size: payload.len() as i64,
+            }],
+        };
+        reconstruct_file(
+            &crate::download_client().unwrap(),
+            "http://127.0.0.1:9",
+            &format!("http://{address}"),
+            None,
+            &Scope::Launcher {
+                release_id: "release".into(),
+            },
+            &root.join("cache"),
+            &spec,
+            &destination,
+            &|_, _| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), payload);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_profile_uses_advertised_cdn_base() {
+        let payload = b"profile from CDN";
+        let chunk_hash = format!("{:x}", Sha256::digest(payload));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_hash = chunk_hash.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains(&format!(
+                "/api/v2/cdn/profiles/profile/chunks/{expected_hash}"
+            )));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            )
+            .unwrap();
+            stream.write_all(payload).unwrap();
+        });
+
+        let root = test_root("cdn-profile-install");
+        let files = root.join("files");
+        let manifest = ProfileManifest {
+            schema_version: SCHEMA_VERSION,
+            kind: "profile".into(),
+            release_id: "33333333-3333-3333-3333-333333333333".into(),
+            sequence: 1,
+            profile: ProfileConfig {
+                id: "profile".into(),
+                name: "Profile".into(),
+                java_version: 21,
+                jvm_args: String::new(),
+                java_path_windows: String::new(),
+                java_path_linux: String::new(),
+                java_path_macos: String::new(),
+                launch_command_windows: String::new(),
+                launch_command_linux: String::new(),
+                launch_command_macos: String::new(),
+                preserve_paths: Vec::new(),
+            },
+            files: vec![ReleaseFile {
+                path: "client.jar".into(),
+                size: payload.len() as i64,
+                sha256: format!("{:x}", Sha256::digest(payload)),
+                executable: false,
+                chunks: vec![ChunkRef {
+                    sha256: chunk_hash,
+                    size: payload.len() as i64,
+                }],
+            }],
+            file_count: 1,
+            total_size: payload.len() as i64,
+        };
+        install_profile(
+            &crate::download_client().unwrap(),
+            "http://127.0.0.1:9",
+            &format!("http://{address}"),
+            "profile-token",
+            &root,
+            &files,
+            &manifest,
+            |_, _| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(files.join("client.jar")).unwrap(), payload);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_profile_strict_audit_skips_staging_swap() {
+        let root = test_root("strict-current-fast-path");
+        let files = root.join("files");
+        fs::create_dir_all(&files).unwrap();
+        let payload = b"already installed";
+        fs::write(files.join("client.jar"), payload).unwrap();
+        let hash = format!("{:x}", Sha256::digest(payload));
+        let manifest = ProfileManifest {
+            schema_version: SCHEMA_VERSION,
+            kind: "profile".into(),
+            release_id: "44444444-4444-4444-4444-444444444444".into(),
+            sequence: 1,
+            profile: ProfileConfig {
+                id: "profile".into(),
+                name: "Profile".into(),
+                java_version: 21,
+                jvm_args: String::new(),
+                java_path_windows: String::new(),
+                java_path_linux: String::new(),
+                java_path_macos: String::new(),
+                launch_command_windows: String::new(),
+                launch_command_linux: String::new(),
+                launch_command_macos: String::new(),
+                preserve_paths: Vec::new(),
+            },
+            files: vec![ReleaseFile {
+                path: "client.jar".into(),
+                size: payload.len() as i64,
+                sha256: hash.clone(),
+                executable: false,
+                chunks: vec![ChunkRef {
+                    sha256: hash,
+                    size: payload.len() as i64,
+                }],
+            }],
+            file_count: 1,
+            total_size: payload.len() as i64,
+        };
+        let before = fs::metadata(&root).unwrap().modified().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let samples = Arc::clone(&progress);
+        install_profile(
+            &crate::download_client().unwrap(),
+            "http://127.0.0.1:9",
+            "",
+            "profile-token",
+            &root,
+            &files,
+            &manifest,
+            move |done, total| samples.lock().unwrap().push((done, total)),
+        )
+        .unwrap();
+        let after = fs::metadata(&root).unwrap().modified().unwrap();
+        assert_eq!(
+            before, after,
+            "current profile should not be staged and swapped"
+        );
+        assert_eq!(progress.lock().unwrap().last().copied(), Some((1, 1)));
+        assert_eq!(fs::read(files.join("client.jar")).unwrap(), payload);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn profile_progress_moves_while_a_multi_chunk_file_downloads() {
         let chunks = [b"first chunk".as_slice(), b"second chunk".as_slice()];
         let chunk_refs = chunks
@@ -850,6 +1242,7 @@ mod tests {
         install_profile(
             &crate::download_client().unwrap(),
             &format!("http://{address}"),
+            "",
             "token",
             &root,
             &files,
@@ -946,6 +1339,7 @@ mod tests {
         install_profile(
             &client,
             &format!("http://{address}"),
+            "",
             "token",
             &root,
             &files,

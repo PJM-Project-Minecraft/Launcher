@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -13,9 +14,23 @@ import (
 	"gorm.io/gorm"
 )
 
-type Handler struct{ service *Service }
+const deliveryOriginHeader = "X-PJM-Delivery-Origin"
 
-func NewHandler(service *Service) Handler { return Handler{service: service} }
+type CDNConfig struct {
+	BaseURL      string
+	OriginSecret string
+}
+
+type Handler struct {
+	service *Service
+	cdn     CDNConfig
+}
+
+func NewHandler(service *Service, cdn CDNConfig) Handler {
+	cdn.BaseURL = strings.TrimRight(strings.TrimSpace(cdn.BaseURL), "/")
+	cdn.OriginSecret = strings.TrimSpace(cdn.OriginSecret)
+	return Handler{service: service, cdn: cdn}
+}
 
 func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	profiles := app.Group("/api/v2/profiles")
@@ -29,6 +44,12 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	launcher.Get("/:release/chunks/:hash", h.launcherChunk)
 	launcher.Get("/:release/artifact", h.launcherArtifact)
 
+	if h.cdn.BaseURL != "" && h.cdn.OriginSecret != "" {
+		cdn := app.Group("/api/v2/cdn", h.requireCDNOrigin)
+		cdn.Get("/profiles/:id/chunks/:hash", h.cdnProfileChunk)
+		cdn.Get("/launcher/releases/:release/chunks/:hash", h.cdnLauncherChunk)
+	}
+
 	admin := app.Group("/api/v2/admin/delivery")
 	admin.Use(authMiddleware, auth.RequireAdmin)
 	admin.Get("/jobs", h.jobs)
@@ -41,6 +62,11 @@ func (h Handler) profiles(c fiber.Ctx) error {
 	items, err := h.service.Profiles(c.Context())
 	if err != nil {
 		return h.writeError(c, err)
+	}
+	if h.cdn.BaseURL != "" {
+		for index := range items {
+			items[index].DeliveryBaseURL = h.cdn.BaseURL
+		}
 	}
 	return c.JSON(items)
 }
@@ -81,6 +107,9 @@ func (h Handler) launcherCurrent(c fiber.Ctx) error {
 	c.Set("X-Manifest-SHA256", snapshot.SHA256)
 	c.Set("X-Manifest-Signature", snapshot.Signature)
 	c.Set("X-Update-Mandatory", strconv.FormatBool(snapshot.Mandatory))
+	if h.cdn.BaseURL != "" {
+		c.Set("X-Delivery-Base-URL", h.cdn.BaseURL)
+	}
 	return c.Send(snapshot.Descriptor)
 }
 
@@ -101,6 +130,30 @@ func (h Handler) launcherArtifact(c fiber.Ctx) error {
 	c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
 	c.Set(fiber.HeaderETag, `"`+file.HashSHA256+`"`)
 	return c.SendFile(path)
+}
+
+func (h Handler) requireCDNOrigin(c fiber.Ctx) error {
+	provided := c.Get(deliveryOriginHeader)
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(h.cdn.OriginSecret)) != 1 {
+		return c.SendStatus(http.StatusForbidden)
+	}
+	return c.Next()
+}
+
+func (h Handler) cdnProfileChunk(c fiber.Ctx) error {
+	path, size, err := h.service.Blob(c.Context(), c.Params("id"), c.Params("hash"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	return sendImmutable(c, path, c.Params("hash"), size, true)
+}
+
+func (h Handler) cdnLauncherChunk(c fiber.Ctx) error {
+	path, size, err := h.service.LauncherBlob(c.Context(), c.Params("release"), c.Params("hash"))
+	if err != nil {
+		return h.writeError(c, err)
+	}
+	return sendImmutable(c, path, c.Params("hash"), size, true)
 }
 
 func (h Handler) jobs(c fiber.Ctx) error {

@@ -60,6 +60,7 @@ type ProfileSummary struct {
 	FileCount         int        `json:"fileCount"`
 	TotalSize         int64      `json:"totalSize"`
 	IsActive          bool       `json:"isActive"`
+	DeliveryBaseURL   string     `json:"deliveryBaseUrl,omitempty"`
 }
 
 type LauncherManifest struct {

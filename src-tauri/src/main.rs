@@ -505,6 +505,8 @@ struct ProfileSummary {
     manifest_sha256: String,
     #[serde(default)]
     manifest_signature: String,
+    #[serde(default)]
+    delivery_base_url: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -2844,6 +2846,7 @@ fn sync_and_launch(
     delivery::install_profile(
         &client,
         &config.api_url(),
+        &profile.delivery_base_url,
         token,
         &paths.profile_root,
         &paths.files_root,
@@ -4543,9 +4546,9 @@ fn download_client_stops_when_response_body_stalls() {
         thread::sleep(Duration::from_millis(400));
     });
 
+    let client = download_client().expect("build download client");
     let started = Instant::now();
-    let result = download_client()
-        .expect("build download client")
+    let result = client
         .get(&format!("http://{address}/stalled-file"), None, None)
         .and_then(|response| response.consume(|_| Ok(())));
     let elapsed = started.elapsed();
@@ -4573,12 +4576,9 @@ fn download_client_stops_when_response_headers_stall() {
         thread::sleep(Duration::from_millis(400));
     });
 
+    let client = download_client().expect("build download client");
     let started = Instant::now();
-    let result = download_client().expect("build download client").get(
-        &format!("http://{address}/stalled-headers"),
-        None,
-        None,
-    );
+    let result = client.get(&format!("http://{address}/stalled-headers"), None, None);
     let elapsed = started.elapsed();
 
     server.join().expect("stalled header server");
@@ -5919,7 +5919,22 @@ mod tests {
             active_release_id: release.to_string(),
             manifest_sha256: format!("{release:0<64}"),
             manifest_signature: String::new(),
+            delivery_base_url: String::new(),
         }
+    }
+
+    #[test]
+    fn profile_summary_reads_runtime_delivery_base_url() {
+        let profile: ProfileSummary = serde_json::from_str(
+            r#"{
+                "id":"profile",
+                "name":"Profile",
+                "gameVersion":"1.21.1",
+                "deliveryBaseUrl":"https://cdn.example.com"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(profile.delivery_base_url, "https://cdn.example.com");
     }
 
     #[test]
@@ -5969,6 +5984,7 @@ mod tests {
             active_release_id: "release".to_string(),
             manifest_sha256: "a".repeat(64),
             manifest_signature: String::new(),
+            delivery_base_url: String::new(),
         };
         let paths = profile_paths_at_root(&user, &profile.id, &install_root).unwrap();
         let hash = hex_hash(Sha256::digest(b"official").as_slice());

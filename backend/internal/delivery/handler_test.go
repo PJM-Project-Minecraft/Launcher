@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -19,6 +20,13 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
+const testCDNBase = "https://cdn.example.com"
+const testCDNOriginSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func testCDNConfig() CDNConfig {
+	return CDNConfig{BaseURL: testCDNBase, OriginSecret: testCDNOriginSecret}
+}
+
 func TestCreateDraftFromActiveViaAdminAPI(t *testing.T) {
 	service, db := testService(t)
 	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
@@ -34,7 +42,7 @@ func TestCreateDraftFromActiveViaAdminAPI(t *testing.T) {
 	}
 
 	app := fiber.New()
-	NewHandler(service).RegisterRoutes(app, func(c fiber.Ctx) error {
+	NewHandler(service, CDNConfig{}).RegisterRoutes(app, func(c fiber.Ctx) error {
 		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
 		return c.Next()
 	})
@@ -80,7 +88,7 @@ func TestAdminProfilesIncludesInactiveProfileWithActiveRelease(t *testing.T) {
 	}
 
 	app := fiber.New()
-	NewHandler(service).RegisterRoutes(app, func(c fiber.Ctx) error {
+	NewHandler(service, CDNConfig{}).RegisterRoutes(app, func(c fiber.Ctx) error {
 		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
 		return c.Next()
 	})
@@ -130,7 +138,7 @@ func TestLauncherDescriptorIsSigned(t *testing.T) {
 	}
 
 	app := fiber.New()
-	NewHandler(service).RegisterRoutes(app, func(c fiber.Ctx) error { return c.Next() })
+	NewHandler(service, testCDNConfig()).RegisterRoutes(app, func(c fiber.Ctx) error { return c.Next() })
 	response, err := app.Test(httptest.NewRequest("GET", "/api/v2/launcher/releases/current?platform=linux-x64&from=1.0.0", nil))
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +153,9 @@ func TestLauncherDescriptorIsSigned(t *testing.T) {
 	}
 	if !ed25519.Verify(service.signingKey.Public().(ed25519.PublicKey), body, signature) {
 		t.Fatal("launcher descriptor signature is invalid")
+	}
+	if response.Header.Get("X-Delivery-Base-URL") != testCDNBase {
+		t.Fatalf("delivery base header = %q", response.Header.Get("X-Delivery-Base-URL"))
 	}
 	var descriptor LauncherManifest
 	if err := json.Unmarshal(body, &descriptor); err != nil {
@@ -172,9 +183,82 @@ func TestLauncherDescriptorIsSigned(t *testing.T) {
 	if err != nil || chunkResponse.StatusCode != 200 {
 		t.Fatalf("immutable chunk after deactivation: status=%d err=%v", chunkResponse.StatusCode, err)
 	}
+	cdnChunkRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v2/cdn/launcher/releases/"+release.ID+"/chunks/"+descriptor.Artifact.Chunks[0].SHA256,
+		nil,
+	)
+	cdnChunkRequest.Header.Set("X-PJM-Delivery-Origin", testCDNOriginSecret)
+	cdnChunkResponse, err := app.Test(cdnChunkRequest)
+	if err != nil || cdnChunkResponse.StatusCode != http.StatusOK {
+		t.Fatalf("CDN launcher chunk after deactivation: status=%d err=%v", cdnChunkResponse.StatusCode, err)
+	}
 	artifactURL := "/api/v2/launcher/releases/" + release.ID + "/artifact?platform=linux-x64"
 	artifactResponse, err := app.Test(httptest.NewRequest("GET", artifactURL, nil))
 	if err != nil || artifactResponse.StatusCode != 200 {
 		t.Fatalf("immutable artifact after deactivation: status=%d err=%v", artifactResponse.StatusCode, err)
+	}
+}
+
+func TestCDNProfileChunkRequiresOriginSecretAndAdvertisesBase(t *testing.T) {
+	service, db := testService(t)
+	profile := models.Profile{ID: newID(), Name: "CDN", Slug: "cdn", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("immutable-cdn-profile-chunk")
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "client.jar"), payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	releaseID, err := service.publishProfile(context.Background(), profile.ID, source, func(_, _ int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, _, err := service.Manifest(context.Background(), profile.ID, releaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest ProfileManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	hash := manifest.Files[0].Chunks[0].SHA256
+
+	app := fiber.New()
+	NewHandler(service, testCDNConfig()).RegisterRoutes(app, func(c fiber.Ctx) error { return c.Next() })
+	profilesResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/profiles/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profiles []ProfileSummary
+	if err := json.NewDecoder(profilesResponse.Body).Decode(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || profiles[0].DeliveryBaseURL != testCDNBase {
+		t.Fatalf("profiles = %+v", profiles)
+	}
+
+	path := "/api/v2/cdn/profiles/" + profile.ID + "/chunks/" + hash
+	denied, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.StatusCode != http.StatusForbidden {
+		t.Fatalf("request without origin secret status = %d", denied.StatusCode)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.Header.Set("X-PJM-Delivery-Origin", testCDNOriginSecret)
+	allowed, err := app.Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(allowed.Body)
+	if allowed.StatusCode != http.StatusOK || !bytes.Equal(body, payload) {
+		t.Fatalf("allowed response status=%d body=%q", allowed.StatusCode, body)
+	}
+	if got := allowed.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("Cache-Control = %q", got)
 	}
 }

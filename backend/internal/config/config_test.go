@@ -26,6 +26,42 @@ func TestValidateAllowsDevSecretsInDevelopment(t *testing.T) {
 	}
 }
 
+func TestValidateDeliveryCDNConfiguration(t *testing.T) {
+	validSecret := strings.Repeat("a", 64)
+	for name, cfg := range map[string]Config{
+		"base without origin secret": {
+			AppEnv: "development", JWTSecret: "dev-only-change-me",
+			DeliveryCDNBase: "https://cdn.example.com",
+		},
+		"origin secret without base": {
+			AppEnv: "development", JWTSecret: "dev-only-change-me",
+			DeliveryCDNOriginSecret: validSecret,
+		},
+		"insecure base": {
+			AppEnv: "development", JWTSecret: "dev-only-change-me",
+			DeliveryCDNBase: "http://cdn.example.com", DeliveryCDNOriginSecret: validSecret,
+		},
+		"weak origin secret": {
+			AppEnv: "development", JWTSecret: "dev-only-change-me",
+			DeliveryCDNBase: "https://cdn.example.com", DeliveryCDNOriginSecret: "short",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DELIVERY_CDN") {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+
+	valid := Config{
+		AppEnv: "development", JWTSecret: "dev-only-change-me",
+		DeliveryCDNBase: "https://cdn.example.com", DeliveryCDNOriginSecret: validSecret,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid CDN config rejected: %v", err)
+	}
+}
+
 func TestValidateAllowsRealSecretInProduction(t *testing.T) {
 	cfg := Config{
 		AppEnv:                     "production",

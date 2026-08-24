@@ -126,7 +126,9 @@ func main() {
 		slog.Error("delivery v2 initialization failed", "error", err)
 		os.Exit(1)
 	}
-	delivery.NewHandler(deliveryService).RegisterRoutes(app, authService.RequireAuth())
+	delivery.NewHandler(deliveryService, delivery.CDNConfig{
+		BaseURL: cfg.DeliveryCDNBase, OriginSecret: cfg.DeliveryCDNOriginSecret,
+	}).RegisterRoutes(app, authService.RequireAuth())
 	releaseService := launcherrelease.NewService(db, cfg.LauncherReleaseRoot).RequireSignatures()
 	delivery.NewWatcher(deliveryService, profilesBroker, releaseService.InvalidateDeliveryChannel).Start()
 	v1BridgeUntil := time.Time{}
