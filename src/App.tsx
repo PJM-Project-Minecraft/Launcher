@@ -268,6 +268,9 @@ function LoginScreen({ state }: { state: LauncherState }) {
           <PixelIcon name={state.isLoading ? "reload" : "corner"} className={state.isLoading ? "spin" : ""} />
           {state.isLoading ? "Проверяем аккаунт" : "Войти"}
         </button>
+        <p className="login-feedback" role="status" aria-live="polite">
+          {state.message}
+        </p>
       </form>
     </main>
   );
