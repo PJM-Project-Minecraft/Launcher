@@ -53,7 +53,7 @@ services:
       LAUNCHER_RELEASE_ROOT: "${LAUNCHER_RELEASE_ROOT:-/app/storage/releases}"
       DELIVERY_ROOT: "${DELIVERY_ROOT:-/app/storage/delivery-v2}"
       DELIVERY_MANIFEST_SIGNING_KEY: "${DELIVERY_MANIFEST_SIGNING_KEY:-}"
-      # Delivery v2 CDN: публичная база и секретный заголовок Timeweb → origin.
+      # Delivery v2 CDN: публичная база и секретный заголовок edge → origin.
       DELIVERY_CDN_BASE: "${DELIVERY_CDN_BASE:-}"
       DELIVERY_CDN_ORIGIN_SECRET: "${DELIVERY_CDN_ORIGIN_SECRET:-}"
       # Public only: operator migration verifies each legacy launcher signature.

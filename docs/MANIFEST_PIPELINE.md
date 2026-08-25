@@ -75,7 +75,7 @@ Launcher multipart-upload сначала сохраняется как inactive 
   файл только для браузерной витрины.
 
 CDN origin, только с постоянным заголовком `X-PJM-Delivery-Origin`, который
-Timeweb добавляет на плече CDN → backend:
+CDN-провайдер добавляет на плече edge → backend:
 
 - `GET /api/v2/cdn/profiles/:id/chunks/:sha256`
 - `GET /api/v2/cdn/launcher/releases/:release/chunks/:sha256`

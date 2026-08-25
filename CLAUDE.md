@@ -110,10 +110,10 @@ release-box и не передаётся в CI.
 - **⚠️ admin идёт через МОСТ на Latvia:** A-запись `admin` (за оранжевым облаком) указывает на Latvia `13.140.17.105`, там nginx (`/etc/nginx/sites-enabled/admin.likonchik.xyz`) проксирует на прод-origin. Цепочка: CF/Access → Latvia → Caddy → dashboard. При смене прод-IP мост надо перевести руками (16.07.2026 ловили 502: мост смотрел на остановленный `77.239.125.67`). Анонимный `curl` эту поломку НЕ видит — Access режет на edge до origin. Правильный фикс: перевести A-запись `admin` на прод-IP и снести мост.
 - **Гоча wildcard-cert + auto-HTTPS:** wildcard CF Origin cert (`*.likonchik.xyz`), загруженный для pjm/admin, «покрывает» launcher → Caddy пропускает выпуск LE («skipping automatic certificate management…»). Фикс: глобальная опция `auto_https ignore_loaded_certs` в Caddyfile. Побочка: Caddy фоново пытается выпустить LE и для pjm/admin — через CF challenge не проходит (`challenge failed` в логе с backoff), это ожидаемый шум, сайты продолжают отдавать origin cert.
 - **Зеркало** `mirror.likonchik.xyz` (nginx на Latvia) переключено `proxy_pass` → `176.108.254.89`.
-- **Delivery CDN** `cdn.likonchik.xyz` — DNS-only CNAME на Timeweb CDN. Backend
+- **Delivery CDN** `cdn-yandex.likonchik.xyz` — DNS-only CNAME на Yandex Cloud CDN. Backend
   рекламирует его только при паре `DELIVERY_CDN_BASE` +
   `DELIVERY_CDN_ORIGIN_SECRET`; origin routes `/api/v2/cdn/*` требуют постоянный
-  `X-PJM-Delivery-Origin`, добавляемый Timeweb. JWT на CDN не уходит, каждый chunk
+  `X-PJM-Delivery-Origin`, добавляемый Yandex CDN. JWT на CDN не уходит, каждый chunk
   сверяется по signed manifest/SHA-256, после трёх промахов edge клиент падает
   обратно на авторизованный backend route.
 - **Старый сервер** `root@77.239.125.67` (Debian 13, Caddy на хосте): весь стек `docker compose stop`, тома/storage оставлены для отката — **не удалять**.
@@ -428,7 +428,7 @@ Windows использует WebView2. Состояние Rust→React идёт 
 
 Текущие версии:
 - **0.5.10** (Delivery v2 раздаёт profile/launcher chunks через настраиваемый
-  Timeweb CDN с backend fallback и без JWT; строгая SHA-256-проверка уже актуального
+  CDN с backend fallback и без JWT; строгая SHA-256-проверка уже актуального
   профиля больше не строит и не swaps полную staging-копию дерева).
 - **0.5.8** (Delivery v2 сохраняет скачанный Java runtime текущей ОС при
   атомарной смене сборки; античит берёт whitelist модов из активного v2 release

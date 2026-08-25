@@ -134,10 +134,10 @@ descriptor, читает каждый CAS chunk и реконструирует 
 
 ## CDN transport rollout (launcher 0.5.10+)
 
-1. Создать `cdn.likonchik.xyz` как DNS-only CNAME на технический домен Timeweb,
+1. Создать `cdn-yandex.likonchik.xyz` как DNS-only CNAME на технический домен Yandex Cloud CDN,
    выпустить сертификат и проверить HTTPS без `-k`.
 2. Сгенерировать отдельный случайный `DELIVERY_CDN_ORIGIN_SECRET` (минимум 32
-   символа). В Timeweb добавить request header
+   символа). В Yandex CDN добавить заголовок запроса к источнику
    `X-PJM-Delivery-Origin: <secret>`; CORS, gzip, query string и обработку
    изображений/видео не включать.
 3. Сначала выкатить backend-код с пустыми `DELIVERY_CDN_*`: старые и новые
@@ -145,14 +145,14 @@ descriptor, читает каждый CAS chunk и реконструирует 
 4. Затем одновременно задать в production `.env`:
 
    ```dotenv
-   DELIVERY_CDN_BASE=https://cdn.likonchik.xyz
-   DELIVERY_CDN_ORIGIN_SECRET=<тот же secret, что в Timeweb>
+   DELIVERY_CDN_BASE=https://cdn-yandex.likonchik.xyz
+   DELIVERY_CDN_ORIGIN_SECRET=<тот же secret, что в Yandex CDN>
    ```
 
    и пересоздать только `server`. Bot эти переменные и секрет не получает.
 5. Взять существующий hash из активного signed manifest. Прямой запрос к
    `/api/v2/cdn/...` без origin-заголовка обязан дать `403`, а тот же URL через
-   `cdn.likonchik.xyz` — `200`, правильные size/SHA-256 и
+   `cdn-yandex.likonchik.xyz` — `200`, правильные size/SHA-256 и
    `Cache-Control: public, max-age=31536000, immutable`.
 6. Выпустить 0.5.10 сначала как optional. Проверить пустой cache, повторный HIT,
    отсутствие `Authorization` на CDN и fallback на backend при временном `503`.
