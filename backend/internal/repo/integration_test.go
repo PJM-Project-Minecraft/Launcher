@@ -2,6 +2,7 @@ package repo_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"launcher-backend/internal/auth"
@@ -25,6 +26,50 @@ func newTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
+}
+
+func TestConsumeTOTPStepIsAtomic(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("s3cretpass"), 10)
+	uid, err := repo.RegisterNewUser(ctx, db, "AtomicTOTP", "atomic@example.com", string(hash))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan bool, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, err := repo.ConsumeTOTPStep(ctx, db, uid, 12345)
+			results <- ok
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("consume: %v", err)
+		}
+	}
+	succeeded := 0
+	for ok := range results {
+		if ok {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("same TOTP step consumed %d times, want exactly once", succeeded)
+	}
 }
 
 // TestRegisterAndLocalLogin проверяет сквозной путь: регистрация (как в боте) →

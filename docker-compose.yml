@@ -7,8 +7,8 @@ services:
       POSTGRES_USER: launcher
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-launcher_dev_password}"
     ports:
-      # dev: открыт на 5432 (нужно dev.sh). prod задаёт POSTGRES_BIND=127.0.0.1:5432 в .env
-      - "${POSTGRES_BIND:-5432}:5432"
+      # По умолчанию доступен только локально; внешний bind задаётся явно для отдельного dev-хоста.
+      - "${POSTGRES_BIND:-127.0.0.1:5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Схема БД создаётся приложением через GORM AutoMigrate при старте server/bot.
@@ -64,9 +64,9 @@ services:
       APP_ENV: "${APP_ENV:-development}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
-      # dev: 0.0.0.0:8080. prod задаёт SERVER_BIND=127.0.0.1:8080;
+      # По умолчанию только loopback. prod задаёт SERVER_BIND=127.0.0.1:8080;
       # override добавляет 127.0.0.1:8081:8080 для Caddy launcher-vhost.
-      - "${SERVER_BIND:-8080}:8080"
+      - "${SERVER_BIND:-127.0.0.1:8080}:8080"
     volumes:
       - shop_storage:/app/storage/shop
     depends_on:
@@ -105,6 +105,8 @@ services:
       BOT_BRAND_LINE: "${BOT_BRAND_LINE:-}"
       DONATE_SHOP_URL: "${DONATE_SHOP_URL:-https://shop.likonchik.xyz}"
       LAUNCHER_EXE_PATH: "${LAUNCHER_EXE_PATH:-}"
+      # Отдельная публичная витрина скачивания; не обязана совпадать с API-доменом.
+      LAUNCHER_DOWNLOAD_URL: "${LAUNCHER_DOWNLOAD_URL:-}"
       # Баннер inline-меню (link-preview). Пусто — меню без картинки.
       BOT_BANNER_URL: "${BOT_BANNER_URL:-}"
       # Страница /privacy для кнопки «Читать полностью» в гейте политики.

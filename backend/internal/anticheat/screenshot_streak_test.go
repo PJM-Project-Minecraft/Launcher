@@ -80,7 +80,7 @@ func TestScreenshotSuccessResetsStreak(t *testing.T) {
 		t.Fatalf("request: %v", err)
 	}
 	jpegData := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00}
-	if err := shots.CompleteScreenshot(t.Context(), rec.ID, jpegData, 4, 4); err != nil {
+	if err := shots.CompleteScreenshot(t.Context(), rec.ID, jpegData, 4, 4, "x11"); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 

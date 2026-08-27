@@ -323,6 +323,17 @@ func (s *Store) SessionByNonce(nonce string) (Session, bool) {
 	return sess, true
 }
 
+// SessionOwnerByNonce exposes only the server-authoritative identity bound to a
+// live nonce. Anti-cheat uses it to reject otherwise valid signed claims that
+// borrow another player's nonce.
+func (s *Store) SessionOwnerByNonce(nonce string) (string, string, bool) {
+	sess, ok := s.SessionByNonce(nonce)
+	if !ok {
+		return "", "", false
+	}
+	return sess.UUID, sess.Name, true
+}
+
 // VerifiedSessionsByName возвращает ВСЕ живые Verified-сессии игрока по нику. Для P5:
 // игровой сервер знает ник входящего игрока, а не nonce.
 //

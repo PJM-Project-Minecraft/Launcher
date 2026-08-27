@@ -19,10 +19,6 @@ import (
 // Порог per-account анти-брутфорса — repo.LoginFailWindow / repo.LoginFailMax (общий
 // с Telegram-ботом, который тоже проверяет пароль при привязке аккаунта).
 //
-// ponytail: жёсткий лок на окно (при ≥Max корректный пароль тоже даёт 429). Порог
-// высокий, чтобы опечатки не триггерили; griefing-лок максимум на окно и авто-истекает,
-// т.к. на 429 мы НЕ пишем новую неудачу (иначе атакующий держал бы лок вечно).
-//
 // totpPeriod — период TOTP (сек), как в totp.Validate по умолчанию.
 const totpPeriod = 30
 
@@ -37,7 +33,7 @@ var dummyBcryptHash = func() []byte {
 // validateTOTPWithStep проверяет код TOTP (period 30, skew ±1, 6 цифр, SHA1 — как
 // totp.Validate) и возвращает номер сработавшего шага (unix/30). Шаг нужен для анти-
 // replay: код с шагом ≤ последнего принятого отклоняется. Сравнение — constant-time.
-func validateTOTPWithStep(secret, code string, now time.Time) (bool, int64) {
+func ValidateTOTPWithStep(secret, code string, now time.Time) (bool, int64) {
 	curStep := now.Unix() / totpPeriod
 	opts := totp.ValidateOpts{Period: totpPeriod, Skew: 1, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1}
 	for delta := int64(-1); delta <= 1; delta++ {
@@ -85,20 +81,20 @@ func (p LocalProvider) SignIn(ctx context.Context, login, password, totpCode str
 		return ProviderSignInResponse{}, ProviderError{StatusCode: http.StatusForbidden, Message: "Аккаунт заблокирован"}
 	}
 
-	// Per-account анти-брутфорс: при слишком многих недавних неудачах отклоняем ДО bcrypt.
-	// На этой ветке auth_log НЕ пишем — иначе счётчик не истечёт и лок стал бы вечным.
-	if repo.LoginLocked(ctx, p.db, user.Login) {
-		return ProviderSignInResponse{}, ProviderError{
-			StatusCode: http.StatusTooManyRequests, Message: "Слишком много неудачных попыток входа. Попробуйте позже.",
-		}
-	}
-
 	if user.PasswordHash == "" {
 		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(password)) // тайминг как у реальной проверки
 		_ = repo.InsertAuthLog(ctx, p.db, &uid, user.Login, "launcher", false, strptr("bad_password"))
 		return ProviderSignInResponse{}, badCreds
 	}
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		// Счётчик защищает дорогой invalid-password путь, но не является проверкой
+		// владения аккаунтом: правильный пароль всегда должен пройти, иначе любой
+		// посторонний может целенаправленно заблокировать владельца.
+		if repo.LoginLocked(ctx, p.db, user.Login) {
+			return ProviderSignInResponse{}, ProviderError{
+				StatusCode: http.StatusTooManyRequests, Message: "Слишком много неудачных попыток входа. Попробуйте позже.",
+			}
+		}
 		_ = repo.InsertAuthLog(ctx, p.db, &uid, user.Login, "launcher", false, strptr("bad_password"))
 		return ProviderSignInResponse{}, badCreds
 	}
@@ -111,16 +107,20 @@ func (p LocalProvider) SignIn(ctx context.Context, login, password, totpCode str
 				StatusCode: http.StatusUnauthorized, Message: twoFactorMessage, RequiresTwoFactor: true,
 			}
 		}
-		ok, step := validateTOTPWithStep(user.TOTPSecret, code, time.Now().UTC())
-		// step <= TOTPLastStep — код уже использовался в этом окне (replay): отклоняем
-		// тем же сообщением, что и неверный код (не выдаём, что код был правильным).
-		if !ok || step <= user.TOTPLastStep {
+		ok, step := ValidateTOTPWithStep(user.TOTPSecret, code, time.Now().UTC())
+		if ok {
+			ok, err = repo.ConsumeTOTPStep(ctx, p.db, user.ID, step)
+			if err != nil {
+				return ProviderSignInResponse{}, err
+			}
+		}
+		// Conditional update losing the race is indistinguishable from a bad code.
+		if !ok {
 			_ = repo.InsertAuthLog(ctx, p.db, &uid, user.Login, "launcher", false, strptr("invalid_totp"))
 			return ProviderSignInResponse{}, ProviderError{
 				StatusCode: http.StatusUnauthorized, Message: "Неверный код двухфакторной аутентификации", RequiresTwoFactor: true,
 			}
 		}
-		_ = repo.SetTOTPLastStep(ctx, p.db, user.ID, step)
 	}
 
 	_ = repo.InsertAuthLog(ctx, p.db, &uid, user.Login, "launcher", true, strptr("OK"))

@@ -2,8 +2,10 @@ package anticheat
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +40,9 @@ func TestScreenshotRequestAndPending(t *testing.T) {
 	}
 	if rec.Status != "pending" || rec.ID == "" || rec.Nonce != "nonce-1" {
 		t.Fatalf("неверная запись: %+v", rec)
+	}
+	if rec.Trust != "client_untrusted" || rec.CaptureChannel != "native_signed" {
+		t.Fatalf("screenshot trust metadata is misleading: %+v", rec)
 	}
 
 	// Лаунчер опрашивает — получает pending, статус переходит в capturing.
@@ -76,7 +81,7 @@ func TestScreenshotComplete(t *testing.T) {
 	_, _, _ = svc.PendingScreenshot(ctx, "nonce-1") // → capturing
 
 	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'} // фейковый JPEG-заголовок
-	if err := svc.CompleteScreenshot(ctx, rec.ID, jpeg, 1920, 1080); err != nil {
+	if err := svc.CompleteScreenshot(ctx, rec.ID, jpeg, 1920, 1080, "x11"); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 
@@ -124,7 +129,7 @@ func TestScreenshotRejectsOversize(t *testing.T) {
 
 	rec, _ := svc.RequestScreenshot(ctx, "uuid-1", "Liko", "nonce-1", "admin")
 	big := make([]byte, MaxScreenshotBytes+1)
-	if err := svc.CompleteScreenshot(ctx, rec.ID, big, 1, 1); err == nil {
+	if err := svc.CompleteScreenshot(ctx, rec.ID, big, 1, 1, "x11"); err == nil {
 		t.Fatal("ожидалась ошибка превышения размера")
 	}
 }
@@ -139,7 +144,7 @@ func TestScreenshotReapOldDeletesFiles(t *testing.T) {
 	// Готовый скриншот + файл на диске.
 	rec, _ := svc.RequestScreenshot(ctx, "uuid-old", "Liko", "nonce-old", "admin")
 	jpeg := []byte{0xFF, 0xD8, 0xFF}
-	if err := svc.CompleteScreenshot(ctx, rec.ID, jpeg, 1, 1); err != nil {
+	if err := svc.CompleteScreenshot(ctx, rec.ID, jpeg, 1, 1, "x11"); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	path, _ := svc.ScreenshotFile(ctx, rec.ID)
@@ -179,28 +184,20 @@ func TestScreenshotFailScreenshot(t *testing.T) {
 	}
 }
 
-// Регрессия (RE-отчёт 26.07.2026): X-Launch-Token скриншот-эндпоинтов совпадал с
-// -Dac.token, который читает любой мод внутри JVM (System.getProperty). Мод
-// опрашивал /screenshot/pending и заливал «чистый» кадр вместо реального экрана.
-// Теперь скриншот-токен — отдельный (aud=shot) и в JVM не передаётся: launch-token
-// на скриншот-роутах обязан отлетать, а скриншот-токен — не работать на /detect.
-func TestScreenshotTokenIsSeparateFromLaunchToken(t *testing.T) {
+// Удалённый legacy-канал позволял процессу лаунчера загрузить неподписанный JPEG.
+// Init больше не должен выдавать отдельный screenshot-token: единственный путь
+// завершения — PNG с HMAC нативного агента.
+func TestLegacyUnsignedScreenshotTokenIsNotIssued(t *testing.T) {
 	svc := NewService(newTestDB(t), "secret", false, nil, "")
 	res, err := svc.InitHandshake(context.Background(), "uuid-shot", "Liko", "", nil)
 	if err != nil || !res.Allowed {
 		t.Fatalf("init: %v %+v", err, res)
 	}
-	if res.ScreenshotToken == "" || res.ScreenshotToken == res.LaunchToken {
-		t.Fatalf("скриншот-токен не выдан или совпал с launch-token")
+	payload, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal init result: %v", err)
 	}
-	if _, err := svc.VerifyScreenshotToken(res.LaunchToken); err == nil {
-		t.Fatal("launch-token принят на скриншот-эндпоинте — мод сможет подменить кадр")
-	}
-	if _, err := svc.VerifySessionToken(res.ScreenshotToken); err == nil {
-		t.Fatal("скриншот-токен принят на in-game эндпоинте")
-	}
-	claims, err := svc.VerifyScreenshotToken(res.ScreenshotToken)
-	if err != nil || claims.Nonce != res.Nonce {
-		t.Fatalf("скриншот-токен не проходит свою же проверку: %v %+v", err, claims)
+	if strings.Contains(string(payload), "screenshotToken") {
+		t.Fatalf("legacy unsigned screenshot-token is still exposed: %s", payload)
 	}
 }

@@ -38,6 +38,14 @@ repositories {
     mavenCentral()
 }
 
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
 // Подстановка версии в mods.toml.
 tasks.named('processResources') {
     inputs.property 'version', project.version
@@ -54,6 +62,7 @@ tasks.named('processResources') {
 def serverOnly = [
     '**/P5ModServer*.class', '**/P5ServerHandler*.class',
     '**/P5RevokePoller*.class', '**/P5Config*.class',
+    '**/P5LeaseTracker*.class',
 ]
 def clientOnly = [
     '**/P5ModClient*.class', '**/P5ClientHandler*.class', '**/P5Crypto*.class',

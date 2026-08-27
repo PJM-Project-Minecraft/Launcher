@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -23,8 +24,9 @@ import java.util.concurrent.TimeUnit;
  * СЕРВЕРНАЯ сторона P5. На входе игрока: шлём challenge, ждём ответ (или таймаут),
  * валидируем через бэкенд, кикаем в enforce-режиме.
  *
- * enforce на СЕРВЕРЕ не хранится — им управляет бэкенд (ANTICHEAT_P5_ENFORCE): он вернёт
- * allow=false только в enforce, иначе allow=true (репорт-онли). Мод просто исполняет allow.
+ * ANTICHEAT_P5_ENFORCE должен совпадать на игровом сервере и backend. Локальный флаг
+ * определяет, создаётся ли bounded lease; ответ backend дополнительно проверяется и
+ * расхождение конфигурации логируется.
  */
 final class P5ServerHandler {
     private P5ServerHandler() {}
@@ -37,10 +39,14 @@ final class P5ServerHandler {
         t.setDaemon(true);
         return t;
     });
+    // HTTP никогда не блокирует TIMER: иначе очередь 5-секундных timeout задерживает
+    // challenge deadlines и, главное, проверку истечения connection lease.
+    private static final ExecutorService HTTP_WORKERS = Executors.newVirtualThreadPerTaskExecutor();
     // Ник → конкретное подключение и его challenge. ServerPlayer входит в запись,
     // чтобы таймер старого подключения не забрал challenge нового входа с тем же ником.
     private record PendingChallenge(ServerPlayer player, String challenge) {}
     private static final ConcurrentHashMap<String, PendingChallenge> PENDING = new ConcurrentHashMap<>();
+    private static final long VERIFY_RETRY_MS = 30_000L;
 
     /** Общий HTTP-клиент и планировщик — переиспользует поллер отзывов (P5RevokePoller). */
     static HttpClient http() {
@@ -51,9 +57,14 @@ final class P5ServerHandler {
         return TIMER;
     }
 
+    static void executeHttp(Runnable task) {
+        HTTP_WORKERS.submit(task);
+    }
+
     /** Вызывать на входе игрока (PlayerLoggedInEvent). No-op, если P5 не сконфигурен. */
     static void onPlayerJoin(ServerPlayer player) {
         if (!P5Config.active()) return;
+        if (P5Config.ENFORCE) P5RevokePoller.begin(player);
         String name = player.getGameProfile().getName();
         String challenge = randomHex(16);
         PendingChallenge pending = new PendingChallenge(player, challenge);
@@ -81,7 +92,7 @@ final class P5ServerHandler {
                 return;
             }
             if (PENDING.remove(name, expected)) {
-                verifyAndAct(expected.player(), name, expected.challenge(), "");
+                verifyAsync(expected.player(), name, expected.challenge(), "");
             }
         }, P5Config.RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
@@ -94,24 +105,52 @@ final class P5ServerHandler {
         if (pending == null || pending.player() != player || !PENDING.remove(name, pending)) {
             return; // уже обработан таймаутом либо это ответ старого подключения
         }
-        verifyAndAct(player, name, pending.challenge(), msg.proof());
+        verifyAsync(player, name, pending.challenge(), msg.proof());
     }
 
-    private static void verifyAndAct(ServerPlayer player, String name, String challenge, String proof) {
-        boolean allow = verifyWithBackend(name, challenge, proof);
-        if (!allow) {
-            // Кик строго на серверном треде.
-            player.server.execute(() -> {
-                if (player.connection != null) {
-                    player.connection.disconnect(Component.literal("Anticheat: не пройдена проверка защиты."));
-                }
-            });
+    private static void verifyAsync(ServerPlayer player, String name, String challenge, String proof) {
+        executeHttp(() -> {
+            VerifyResult result = verifyWithBackend(name, challenge, proof);
+            player.server.execute(() -> applyVerifyResult(player, name, challenge, proof, result));
+        });
+    }
+
+    private static void applyVerifyResult(ServerPlayer player, String name, String challenge,
+                                          String proof, VerifyResult result) {
+        if (!P5Config.ENFORCE) {
+            if (result.reachable() && result.backendEnforce()) {
+                P5ModServer.LOG.error("[P5] конфигурация расходится: backend enforce=true, игровой сервер=false");
+            }
+            return;
         }
+        if (!P5RevokePoller.isCurrent(player)) return; // replacement уже занял UUID
+        if (!result.reachable()) {
+            scheduleVerifyRetry(player, name, challenge, proof);
+            return;
+        }
+        if (!result.backendEnforce()) {
+            P5ModServer.LOG.error("[P5] конфигурация расходится: backend enforce=false, игровой сервер=true");
+        }
+        if (result.allow() && P5RevokePoller.activate(
+                player, result.nonce(), result.leaseRemainingMillis())) {
+            return;
+        }
+        player.connection.disconnect(Component.literal("Anticheat: не пройдена проверка защиты."));
     }
 
-    /** POST /api/anticheat/p5/verify. Возвращает allow (по умолчанию true при сетевом сбое —
-     *  fail-open, чтобы недоступность бэкенда не кикала игроков). */
-    private static boolean verifyWithBackend(String name, String challenge, String proof) {
+    private static void scheduleVerifyRetry(ServerPlayer player, String name, String challenge, String proof) {
+        TIMER.schedule(() -> {
+            if (!P5RevokePoller.isCurrent(player)) return;
+            verifyAsync(player, name, challenge, proof);
+        }, VERIFY_RETRY_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /** POST /api/anticheat/p5/verify. A network failure is distinguishable from a
+     * report-only allow, so enforce mode can retry within the existing local lease. */
+    private record VerifyResult(boolean reachable, boolean allow, String nonce,
+                                long leaseRemainingMillis, boolean backendEnforce) {}
+
+    private static VerifyResult verifyWithBackend(String name, String challenge, String proof) {
         String body = "{\"playerName\":" + jsonStr(name)
                 + ",\"challenge\":" + jsonStr(challenge)
                 + ",\"proof\":" + jsonStr(proof) + "}";
@@ -126,7 +165,7 @@ final class P5ServerHandler {
             if (resp.statusCode() / 100 != 2) {
                 P5ModServer.LOG.warn("[P5] бэкенд ответил {} на /p5/verify для {} — проверь ANTICHEAT_P5_SECRET",
                         resp.statusCode(), name);
-                return true; // fail-open
+                return new VerifyResult(false, true, "", 0L, false);
             }
             JsonObject o = JsonParser.parseString(resp.body()).getAsJsonObject();
             boolean allow = !o.has("allow") || o.get("allow").getAsBoolean();
@@ -136,9 +175,13 @@ final class P5ServerHandler {
                 P5ModServer.LOG.info("[P5] хэндшейк {}: allow={} reason={} (reportOnly={})",
                         name, allow, reason, o.has("reportOnly"));
             }
-            return allow;
+            String nonce = o.has("nonce") ? o.get("nonce").getAsString() : "";
+            long remainingMillis = o.has("leaseRemainingMillis")
+                    ? o.get("leaseRemainingMillis").getAsLong() : 0L;
+            boolean backendEnforce = o.has("enforce") && o.get("enforce").getAsBoolean();
+            return new VerifyResult(true, allow, nonce, remainingMillis, backendEnforce);
         } catch (Exception e) {
-            return true; // fail-open при недоступности бэкенда
+            return new VerifyResult(false, true, "", 0L, false);
         }
     }
 

@@ -48,6 +48,7 @@ const (
 	FlowAdminAskNewEmail
 	FlowSupportMsg   // игрок пишет обращение в поддержку
 	FlowSupportReply // админ пишет ответ на тикет (id тикета — в payload)
+	FlowLinkTotp     // step-up TOTP перед Telegram OTP при привязке аккаунта
 )
 
 var flowToString = map[FlowState]string{
@@ -60,6 +61,7 @@ var flowToString = map[FlowState]string{
 	FlowAdminSearch: "admin_search", FlowAdminAwaitPick: "admin_pick", FlowAdminManaging: "admin_manage",
 	FlowAdminAskNewEmail: "admin_mail",
 	FlowSupportMsg:       "support_msg", FlowSupportReply: "support_reply",
+	FlowLinkTotp: "link_totp",
 }
 
 func (f FlowState) String() string {
@@ -91,6 +93,7 @@ type DialoguePayload struct {
 	PendingRegEmail    *string `json:"pending_reg_email,omitempty"`
 	PendingRegPwdHash  *string `json:"pending_reg_pwd_hash,omitempty"`
 	PendingRegOTPHash  *string `json:"pending_reg_otp_hash,omitempty"`
+	LinkTOTPStep       *int64  `json:"link_totp_step,omitempty"`
 
 	SupportTicketID *uint `json:"support_ticket_id,omitempty"` // тикет, на который админ пишет ответ
 }
@@ -155,10 +158,13 @@ func SetPassword(ctx context.Context, db *gorm.DB, userID, bcryptHash string) er
 		Updates(map[string]any{"password_hash": bcryptHash, "tokens_valid_after": now, "updated_at": now}).Error
 }
 
-// SetTOTPLastStep фиксирует номер последнего принятого TOTP-шага (анти-replay кода).
-func SetTOTPLastStep(ctx context.Context, db *gorm.DB, userID string, step int64) error {
-	return db.WithContext(ctx).Model(&models.User{}).Where("id = ?", userID).
-		Update("totp_last_step", step).Error
+// ConsumeTOTPStep атомарно фиксирует новый TOTP-шаг. Условие выполняется в БД,
+// поэтому два параллельных запроса с одним кодом не могут оба пройти replay-гейт.
+func ConsumeTOTPStep(ctx context.Context, db *gorm.DB, userID string, step int64) (bool, error) {
+	result := db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ? AND totp_last_step < ?", userID, step).
+		Update("totp_last_step", step)
+	return result.RowsAffected == 1, result.Error
 }
 
 // CountRecentFailedLogins считает неуспешные попытки входа для логина с момента since.
@@ -533,12 +539,12 @@ func CloseSupportTicket(ctx context.Context, db *gorm.DB, id uint) (bool, error)
 
 // UserStats — сводные счётчики для админ-панели бота.
 type UserStats struct {
-	Total     int64
-	Linked    int64
-	TotpOn    int64
-	Banned    int64
-	NewWeek   int64
-	PwdReqs   int64
+	Total   int64
+	Linked  int64
+	TotpOn  int64
+	Banned  int64
+	NewWeek int64
+	PwdReqs int64
 }
 
 func FetchUserStats(ctx context.Context, db *gorm.DB) (UserStats, error) {

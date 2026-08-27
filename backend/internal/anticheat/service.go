@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -37,6 +39,10 @@ type SessionVerifier interface {
 	LauncherSustainedAfter(nonce string, t time.Time) bool
 }
 
+type sessionIdentityVerifier interface {
+	SessionOwnerByNonce(nonce string) (uuid, login string, ok bool)
+}
+
 // Service — бизнес-логика античита: handshake-init/confirm, запись детектов, выдача
 // блэклиста, управление банами. Подпись launch-token делегируется TokenSigner.
 type Service struct {
@@ -50,6 +56,7 @@ type Service struct {
 	kickSeverity int
 	notifier     Notifier
 	now          func() time.Time
+	entropy      io.Reader
 
 	authlibPath        string // путь к authlib-injector.jar (для SHA-манифеста)
 	requireAttestation bool   // true — confirm без валидного proof отклоняется
@@ -87,6 +94,7 @@ func NewService(db *gorm.DB, secret string, autoBan bool, verifier SessionVerifi
 		agentPath:      agentPath,
 		kickSeverity:   7,
 		now:            time.Now,
+		entropy:        rand.Reader,
 		recent:         make(map[string]time.Time),
 		shaEntries:     make(map[string]shaEntry),
 		heartbeats:     make(map[string]time.Time),
@@ -195,6 +203,9 @@ func (s *Service) Confirm(token string, proof ConfirmProof) error {
 	if err != nil {
 		return err
 	}
+	if err := s.verifyClaimsIdentity(claims); err != nil {
+		return err
+	}
 	proofErr := s.verifyProof(claims, proof)
 	if proofErr != nil && s.requireAttestation {
 		return proofErr // жёсткий режим: без валидного proof не верифицируем сессию
@@ -266,6 +277,23 @@ func (s *Service) touchHeartbeat(nonce, login string) {
 		s.hbLogins[nonce] = login
 	}
 	s.hbMu.Unlock()
+}
+
+// p5LeaseRemaining binds the game-server lease to the last real agent heartbeat.
+// Returning a decreasing duration prevents the P5 poll itself from extending a
+// session after every client-side reporter has stopped.
+func (s *Service) p5LeaseRemaining(nonce string, now time.Time) (time.Duration, bool) {
+	s.hbMu.Lock()
+	last, ok := s.heartbeats[nonce]
+	s.hbMu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	remaining := last.Add(p5MaxLeaseAge).Sub(now)
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
 }
 
 // Heartbeat обрабатывает пинг агента: обновляет живость и сообщает, нужно ли кикнуть
@@ -689,11 +717,8 @@ type InitResult struct {
 	Allowed     bool   `json:"allowed"`
 	Reason      string `json:"reason,omitempty"`
 	LaunchToken string `json:"launchToken,omitempty"`
-	// ScreenshotToken — токен скриншот-эндпоинтов. Остаётся в процессе лаунчера,
-	// в JVM не передаётся (см. LaunchClaims.Aud).
-	ScreenshotToken string `json:"screenshotToken,omitempty"`
-	Nonce           string `json:"nonce,omitempty"`
-	Challenge       string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
+	Nonce       string `json:"nonce,omitempty"`
+	Challenge   string `json:"challenge,omitempty"` // агент возвращает его в confirm-proof
 	// CaptureSecret — ключ подписи скриншотов (hex). Лаунчер кладёт его в файл рядом с
 	// нативным агентом и в JVM НЕ передаёт: нативка стирает файл до старта Java-кода,
 	// поэтому подписать кадр может только она (см. capture.go).
@@ -740,6 +765,18 @@ func (s *Service) InitHandshakeWithVersion(ctx context.Context, userUUID, login,
 	if banned, reason := s.accountBanned(ctx, userUUID, now); banned {
 		return InitResult{Allowed: false, Reason: reason}, nil
 	}
+	nonce, err := randomHex(s.entropy, 16)
+	if err != nil {
+		return InitResult{}, fmt.Errorf("generate launch nonce: %w", err)
+	}
+	challenge, err := randomHex(s.entropy, 16)
+	if err != nil {
+		return InitResult{}, fmt.Errorf("generate launch challenge: %w", err)
+	}
+	captureSecret, err := randomHex(s.entropy, 32)
+	if err != nil {
+		return InitResult{}, fmt.Errorf("generate capture secret: %w", err)
+	}
 	if hwidHash != "" {
 		if banned, reason := s.hwidBanned(ctx, hwidHash, comps, now); banned {
 			return InitResult{Allowed: false, Reason: reason}, nil
@@ -756,8 +793,6 @@ func (s *Service) InitHandshakeWithVersion(ctx context.Context, userUUID, login,
 		}
 	}
 
-	nonce := randomHex(16)
-	challenge := randomHex(16)
 	claims := LaunchClaims{
 		UUID:            userUUID,
 		Login:           login,
@@ -772,26 +807,16 @@ func (s *Service) InitHandshakeWithVersion(ctx context.Context, userUUID, login,
 	if err != nil {
 		return InitResult{}, err
 	}
-	// Второй токен — только для скриншот-эндпоинтов. Лаунчер держит его в памяти
-	// своего процесса и НЕ передаёт в JVM, поэтому мод внутри игры (у которого есть
-	// -Dac.token) не может ни узнать о запросе скриншота, ни залить свой кадр.
-	claims.Aud = audScreenshot
-	shotToken, err := s.signer.Sign(claims)
-	if err != nil {
-		return InitResult{}, err
-	}
 	// Секрет подписи кадров: уходит лаунчеру и нативному агенту, в JVM не попадает.
-	captureSecret := randomHex(32)
 	if raw, err := hex.DecodeString(captureSecret); err == nil {
 		s.rememberCaptureSecret(nonce, raw)
 	}
 	return InitResult{
-		Allowed:         true,
-		LaunchToken:     token,
-		ScreenshotToken: shotToken,
-		Nonce:           nonce,
-		Challenge:       challenge,
-		CaptureSecret:   captureSecret,
+		Allowed:       true,
+		LaunchToken:   token,
+		Nonce:         nonce,
+		Challenge:     challenge,
+		CaptureSecret: captureSecret,
 	}, nil
 }
 
@@ -808,18 +833,6 @@ func (s *Service) VerifyToken(token string) (LaunchClaims, error) {
 // kick → токен снова недействителен. Confirm остаётся на строгом VerifyToken:
 // короткое окно — анти-replay-свойство attestation-handshake.
 func (s *Service) VerifySessionToken(token string) (LaunchClaims, error) {
-	claims, err := s.verifySessionAud(token, "")
-	return claims, err
-}
-
-// VerifyScreenshotToken — то же, но принимает ТОЛЬКО токен с aud=shot (процесс
-// лаунчера). Launch-token из JVM здесь не проходит: иначе мод, читающий
-// -Dac.token, опрашивает /screenshot/pending и заливает подготовленный кадр.
-func (s *Service) VerifyScreenshotToken(token string) (LaunchClaims, error) {
-	return s.verifySessionAud(token, audScreenshot)
-}
-
-func (s *Service) verifySessionAud(token, aud string) (LaunchClaims, error) {
 	claims, err := s.signer.Verify(token, s.now())
 	if errors.Is(err, ErrTokenExpired) && s.verifier != nil && s.verifier.IsActiveByNonce(claims.Nonce) {
 		err = nil
@@ -827,10 +840,28 @@ func (s *Service) verifySessionAud(token, aud string) (LaunchClaims, error) {
 	if err != nil {
 		return claims, err
 	}
-	if claims.Aud != aud {
-		return claims, ErrTokenAudience
+	if err := s.verifyClaimsIdentity(claims); err != nil {
+		return claims, err
 	}
 	return claims, nil
+}
+
+func (s *Service) verifyClaimsIdentity(claims LaunchClaims) error {
+	identities, ok := s.verifier.(sessionIdentityVerifier)
+	if !ok {
+		return nil
+	}
+	uuid, login, found := identities.SessionOwnerByNonce(claims.Nonce)
+	if !found {
+		return errors.New("session identity not found")
+	}
+	normalizeUUID := func(value string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "-", ""))
+	}
+	if normalizeUUID(uuid) != normalizeUUID(claims.UUID) || !strings.EqualFold(strings.TrimSpace(login), strings.TrimSpace(claims.Login)) {
+		return errors.New("session identity mismatch")
+	}
+	return nil
 }
 
 // RecordDetection пишет обнаружение, аутентифицированное launch-token, и возвращает
@@ -1315,10 +1346,10 @@ func banReason(prefix, reason string) string {
 	return prefix + ": " + reason
 }
 
-func randomHex(n int) string {
+func randomHex(reader io.Reader, n int) (string, error) {
 	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return hex.EncodeToString([]byte(time.Now().String()))[:n*2]
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(buf)
+	return hex.EncodeToString(buf), nil
 }

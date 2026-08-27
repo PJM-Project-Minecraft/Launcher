@@ -20,6 +20,11 @@ import (
 // обновления (см. stream_profile_events в src-tauri).
 const releaseEvent = "launcher-release"
 
+// MaxReleaseUploadBodySize is intentionally large only for authenticated
+// launcher binary multipart uploads. fasthttp spools file parts above its
+// in-memory threshold to temporary files while enforcing this total ceiling.
+const MaxReleaseUploadBodySize = 512 * 1024 * 1024
+
 type Handler struct {
 	service Service
 	broker  *events.Broker
@@ -125,10 +130,11 @@ func (h Handler) list(c fiber.Ctx) error {
 }
 
 func (h Handler) create(c fiber.Ctx) error {
-	form, err := c.MultipartForm()
+	form, err := c.RequestCtx().Request.MultipartFormWithLimit(MaxReleaseUploadBodySize)
 	if err != nil {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректная multipart-форма"})
 	}
+	defer c.RequestCtx().Request.RemoveMultipartFormFiles()
 
 	req := CreateRequest{
 		Version:   formValue(form, "version"),

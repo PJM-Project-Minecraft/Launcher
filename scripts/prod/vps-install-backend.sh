@@ -119,13 +119,23 @@ random_secret() {
 mkdir -p "$BACKEND_DIR/bin" "$BACKEND_DIR/data" "$BACKEND_DIR/storage/profiles"
 
 JWT_SECRET="$(random_secret)"
+ANTICHEAT_SECRET="$(random_secret)"
+GAME_API_SECRET="$(random_secret)"
+SITE_ORDER_SECRET="$(random_secret)"
 if [[ -f "$ENV_FILE" ]]; then
   BACKUP="$ENV_FILE.$(date +%Y%m%d-%H%M%S).bak"
   cp "$ENV_FILE" "$BACKUP"
   echo "[backend] Existing env backed up to $BACKUP"
-  if grep -q '^JWT_SECRET=' "$BACKUP"; then
-    JWT_SECRET="$(grep '^JWT_SECRET=' "$BACKUP" | tail -n1 | cut -d= -f2-)"
-  fi
+  for secret_name in JWT_SECRET ANTICHEAT_SECRET GAME_API_SECRET SITE_ORDER_SECRET; do
+    if grep -q "^${secret_name}=" "$BACKUP"; then
+      printf -v "$secret_name" '%s' "$(grep "^${secret_name}=" "$BACKUP" | tail -n1 | cut -d= -f2-)"
+    fi
+  done
+fi
+
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  echo "ERROR: production install requires DATABASE_URL for PostgreSQL." >&2
+  exit 1
 fi
 
 cat > "$ENV_FILE" <<EOF
@@ -134,6 +144,9 @@ SERVER_ADDR=$LISTEN_ADDR
 PUBLIC_BASE_URL=${PUBLIC_URL%/}
 AUTH_PROVIDER_URL=$AUTH_PROVIDER_URL
 JWT_SECRET=$JWT_SECRET
+ANTICHEAT_SECRET=$ANTICHEAT_SECRET
+GAME_API_SECRET=$GAME_API_SECRET
+SITE_ORDER_SECRET=$SITE_ORDER_SECRET
 ALLOWED_ORIGINS=${PUBLIC_URL%/},http://127.0.0.1:3000,http://localhost:3000
 ADMIN_LOGINS=$ADMIN_LOGINS
 PROFILE_STORAGE_ROOT=$PROFILE_STORAGE_ROOT
@@ -141,9 +154,8 @@ YGGDRASIL_KEY_PATH=data/yggdrasil_key.pem
 YGGDRASIL_SERVER_NAME=Project Minecraft
 AUTHLIB_INJECTOR_PATH=$AUTHLIB_INJECTOR_PATH
 
-# Optional PostgreSQL. Leave empty to use local SQLite at data/launcher.db.
-DATABASE_URL=${DATABASE_URL:-}
-SQLITE_PATH=data/launcher.db
+# Production is PostgreSQL-only; Config.Validate rejects a SQLite fallback.
+DATABASE_URL=$DATABASE_URL
 EOF
 chmod 600 "$ENV_FILE"
 

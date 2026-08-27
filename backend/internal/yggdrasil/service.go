@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"strings"
@@ -27,6 +28,7 @@ type Service struct {
 	baseURL      string
 	serverName   string
 	injectorPath string
+	entropy      io.Reader
 }
 
 func NewService(db *gorm.DB, keys *KeyPair, baseURL, serverName, injectorPath string) *Service {
@@ -37,6 +39,7 @@ func NewService(db *gorm.DB, keys *KeyPair, baseURL, serverName, injectorPath st
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		serverName:   serverName,
 		injectorPath: injectorPath,
+		entropy:      rand.Reader,
 	}
 }
 
@@ -59,16 +62,24 @@ type Property struct {
 // IssueSession выпускает новую игровую сессию для пользователя лаунчера. nonce
 // связывает её с launch-token античита (handshake/init); пустой nonce допустим
 // (сессия не пройдёт verified-гейт на join без последующего confirm).
-func (s *Service) IssueSession(user models.User, nonce string) Session {
+func (s *Service) IssueSession(user models.User, nonce string) (Session, error) {
+	accessToken, err := randomToken(s.entropy)
+	if err != nil {
+		return Session{}, fmt.Errorf("generate access token: %w", err)
+	}
+	clientToken, err := randomToken(s.entropy)
+	if err != nil {
+		return Session{}, fmt.Errorf("generate client token: %w", err)
+	}
 	sess := Session{
-		AccessToken: randomToken(),
-		ClientToken: randomToken(),
+		AccessToken: accessToken,
+		ClientToken: clientToken,
 		UUID:        NormalizeUUID(user.ProviderUUID, user.Login),
 		Name:        user.Login,
 		Nonce:       nonce,
 	}
 	s.store.PutSession(sess)
-	return sess
+	return sess, nil
 }
 
 func (s *Service) Store() *Store { return s.store }
@@ -208,16 +219,10 @@ func OfflineUUID(name string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func randomToken() string {
+func randomToken(reader io.Reader) (string, error) {
 	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		// rand.Read практически не падает; на всякий случай — детерминированный fallback.
-		return hex.EncodeToString(md5sum(buf))
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(buf)
-}
-
-func md5sum(data []byte) []byte {
-	sum := md5.Sum(data)
-	return sum[:]
+	return hex.EncodeToString(buf), nil
 }

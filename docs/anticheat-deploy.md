@@ -8,6 +8,16 @@
 `git reset --hard origin/main` → `docker compose up -d --build`). **`backend/data/` в git
 НЕ входит** — бинарники едут отдельно через `scp`.
 
+> Актуальная модель доверия (2026-08-26): клиентский proof и P5 подтверждают
+> присутствие протокола, но не доказывают, что на контролируемом игроком компьютере
+> исполняется одобренный бинарник. P5 теперь выдаёт nonce-bound connection lease:
+> в enforce-режиме игровой сервер обновляет `(UUID, login, nonce)` каждые 30 секунд,
+> а backend ограничивает deadline последним реальным heartbeat агента. Именно это
+> подключение отключается не позднее 180 секунд после последнего heartbeat даже при
+> полном обрыве backend. Скриншоты — только
+> `native_signed`, всегда помечены `trust=client_untrusted`; это телеметрия, не
+> криптографическое доказательство состояния экрана.
+
 ---
 
 ## 1. Что РЕАЛИЗОВАНО
@@ -28,19 +38,17 @@
 
 ## 2. Что НЕ РЕАЛИЗОВАНО
 
-### 2.1. P5 — независимый серверный детект (NeoForge 1.21.1 мод) — НЕ начат
+### 2.1. P5 — серверный handshake и connection lease
 
-Новый компонент `anticheat-neoforge/`. **Самое сильное** средство против полностью
-обойдённого клиента (патченый лаунчер / runtime-JVMTI-ghost-клиент, который «молчит»):
-
-- **In-game agent-handshake** (главное): мод по кастомному plugin-channel гоняет
-  challenge↔response с живым Java-агентом во время игры; нет валидного ответа за N тиков →
-  kick. Привязывает присутствие агента к реальному игровому соединению, а не к доверию лаунчеру.
-  Закрывает остаточную дыру P3 (клиентский proof не доказывает исполнение на 100%).
-- Протокол-детекты независимо от клиента: MC-265322 sign-translation probe, sign-timeout,
-  аномалии brand/plugin-channels.
-- Базовый поведенческий минимум (rotation при locked-pos, позиция в твёрдом блоке, yaw/pitch >180°/тик).
-- Репорт детектов в `/api/anticheat/detect` отдельным server-to-server секретом (`ANTICHEAT_SERVER_SECRET`).
+Компонент `anticheat-neoforge/` реализован. Входной challenge проверяется backend по
+живой Verified Yggdrasil-сессии и возвращает её nonce. Затем сервер вызывает
+`POST /api/anticheat/p5/lease`: renewal проходит только при совпадении UUID, login и
+nonce с серверной сессией и отсутствии отзыва. Сетевая ошибка временно fail-open, но
+deadline не продлевает; сервер повторяет verify и при восстановлении связи активирует
+тот же probation lease. Reconnect сразу заменяет lease, поэтому даже поздний HTTP-ответ
+старого соединения не может вытеснить новое. В report-only локальные lease/deadline не
+создаются. `ANTICHEAT_P5_ENFORCE` и `ANTICHEAT_P5_SECRET` должны совпадать в env backend
+и игрового сервера.
 
 ### 2.2. P4 follow-up — превентивные minhook-хуки (Windows-only)
 
@@ -66,8 +74,9 @@
 - **HWID спуфится** (machine-id/реестр/MAC) — баны отсеивают ленивых, не целевых.
 - **In-memory `Store`** не переживает рестарт backend и не масштабируется на реплики
   (sessions/nonce/heartbeats в памяти одного процесса). Для multi-replica нужен Redis.
-- **Attestation P3** не доказывает исполнение агента на 100% (клиент контролирует proof) —
-  реальный замок это P5 (in-game handshake).
+- **Attestation P3 и P5** не доказывают исполнение одобренного бинарника на 100%:
+  клиент контролирует proof. P5 добавляет server-authoritative presence/liveness lease,
+  но аппаратная attestation остаётся отдельной будущей задачей.
 
 ---
 
@@ -83,6 +92,8 @@
 | `ANTICHEAT_AGENT_PATH` | `data/anticheat-agent.jar` | Путь к agent.jar (для раздачи + манифеста). |
 | `ANTICHEAT_NATIVE_LINUX` | `data/libanticheat.so` | Путь к нативке Linux. |
 | `ANTICHEAT_NATIVE_WIN` | `data/anticheat.dll` | Путь к нативке Windows. |
+| `ANTICHEAT_P5_SECRET` | — | 64 lowercase hex, отдельный server-to-server секрет P5; тот же в env игрового сервера. |
+| `ANTICHEAT_P5_ENFORCE` | `false` | `true` включает verify + connection lease; без 64-hex `ANTICHEAT_P5_SECRET` production backend не стартует. То же значение обязательно задать игровому серверу. При `false` режим строго report-only и lease-киков нет. |
 
 Сгенерировать секрет: `openssl rand -hex 32`.
 
@@ -203,6 +214,17 @@ docker compose up -d server
 
 До включения смотри логи `attestation would fail (transition mode)` — это будущие отказы;
 их не должно остаться у легитимных игроков перед включением флага.
+
+### 5.6. Обязательный порядок перехода на lease-P5
+
+1. Сначала выкатить backend с `/api/anticheat/p5/lease`; старый серверный мод продолжит
+   использовать `/p5/revoked`.
+2. Собрать и установить новый `anticheat-neoforge` server jar, затем новый client jar
+   включить в mandatory-сборку.
+3. Проверить в логах сервера успешные `/p5/lease` и отсутствие ложных expiry минимум
+   на одном полном игровом сеансе и на сценарии reconnect.
+4. Только после этого удалять совместимость со старым `/p5/revoked`. При откате мода
+   endpoint пока остаётся доступен.
 
 ---
 

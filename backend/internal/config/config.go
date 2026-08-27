@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -187,6 +188,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if c.AppEnv == "production" {
+		if c.AnticheatP5Enforce && c.AnticheatP5Secret == "" {
+			return errors.New("ANTICHEAT_P5_ENFORCE=true требует ANTICHEAT_P5_SECRET")
+		}
 		deliverySeed, deliverySeedErr := hex.DecodeString(c.DeliveryManifestSigningKey)
 		if deliverySeedErr != nil || len(deliverySeed) != 32 || strings.ToLower(c.DeliveryManifestSigningKey) != c.DeliveryManifestSigningKey {
 			return errors.New("APP_ENV=production требует DELIVERY_MANIFEST_SIGNING_KEY: 32-byte Ed25519 seed в hex")
@@ -223,6 +227,31 @@ func (c Config) ValidateBot() error {
 func (c Config) validateCommon() error {
 	if c.AppEnv != "production" {
 		return nil
+	}
+	secrets := []struct {
+		name  string
+		value string
+	}{
+		{"JWT_SECRET", c.JWTSecret},
+		{"ANTICHEAT_SECRET", c.AnticheatSecret},
+		{"GAME_API_SECRET", c.GameAPISecret},
+		{"SITE_ORDER_SECRET", c.SiteOrderSecret},
+	}
+	if c.AnticheatP5Secret != "" {
+		secrets = append(secrets, struct {
+			name  string
+			value string
+		}{"ANTICHEAT_P5_SECRET", c.AnticheatP5Secret})
+	}
+	seen := make(map[string]string, len(secrets))
+	for _, secret := range secrets {
+		if err := validateProductionSecret(secret.name, secret.value); err != nil {
+			return err
+		}
+		if previous, ok := seen[secret.value]; ok {
+			return fmt.Errorf("%s должен отличаться от %s", secret.name, previous)
+		}
+		seen[secret.value] = secret.name
 	}
 	if devSecrets[c.JWTSecret] {
 		return errors.New("APP_ENV=production требует настоящий JWT_SECRET (сейчас дев-заглушка)")
@@ -262,6 +291,27 @@ func (c Config) validateCommon() error {
 	// что в проде даёт split-brain аккаунтов/банов между репликами и потерю данных.
 	if c.DatabaseURL == "" {
 		return errors.New("APP_ENV=production требует DATABASE_URL (Postgres): тихий SQLite-fallback запрещён")
+	}
+	return nil
+}
+
+func validateProductionSecret(name, value string) error {
+	if len(value) != 64 || value != strings.TrimSpace(value) || value != strings.ToLower(value) {
+		return fmt.Errorf("APP_ENV=production требует %s: ровно 32 случайных байта в lowercase hex", name)
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != 32 {
+		return fmt.Errorf("APP_ENV=production требует %s: ровно 32 случайных байта в lowercase hex", name)
+	}
+	allSame := true
+	for i := 1; i < len(value); i++ {
+		if value[i] != value[0] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		return fmt.Errorf("APP_ENV=production требует %s: значение не похоже на случайный секрет", name)
 	}
 	return nil
 }

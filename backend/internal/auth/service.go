@@ -120,7 +120,7 @@ func (s Service) UserFromToken(ctx context.Context, tokenValue string) (models.U
 
 	claims := jwt.MapClaims{}
 	token, err := jwt.ParseWithClaims(tokenValue, claims, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if token.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
 		return s.jwtSecret, nil

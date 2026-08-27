@@ -8,6 +8,60 @@ import (
 
 const testDeliverySigningKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+func strongTestSecrets() (string, string, string, string) {
+	return strings.Repeat("01", 32), strings.Repeat("2a", 32), strings.Repeat("4b", 32), strings.Repeat("6c", 32)
+}
+
+func productionConfigWithStrongSecrets() Config {
+	jwtSecret, anticheatSecret, gameSecret, siteSecret := strongTestSecrets()
+	return Config{
+		AppEnv:                     "production",
+		JWTSecret:                  jwtSecret,
+		AnticheatSecret:            anticheatSecret,
+		GameAPISecret:              gameSecret,
+		SiteOrderSecret:            siteSecret,
+		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
+		DeliveryManifestSigningKey: testDeliverySigningKey,
+	}
+}
+
+func TestValidateProductionSecretsRequireCanonical256BitHex(t *testing.T) {
+	valid := productionConfigWithStrongSecrets()
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("strong production secrets rejected: %v", err)
+	}
+
+	tests := map[string]func(*Config){
+		"short":          func(c *Config) { c.JWTSecret = strings.Repeat("01", 31) + "0" },
+		"uppercase":      func(c *Config) { c.AnticheatSecret = strings.ToUpper(c.AnticheatSecret) },
+		"non hex":        func(c *Config) { c.GameAPISecret = strings.Repeat("gh", 32) },
+		"whitespace":     func(c *Config) { c.SiteOrderSecret = " " + c.SiteOrderSecret[:63] },
+		"single nibble":  func(c *Config) { c.JWTSecret = strings.Repeat("a", 64) },
+		"pairwise reuse": func(c *Config) { c.SiteOrderSecret = c.GameAPISecret },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := valid
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("unsafe production secret configuration accepted")
+			}
+		})
+	}
+}
+
+func TestValidateP5EnforcementRequiresSecretInProduction(t *testing.T) {
+	cfg := productionConfigWithStrongSecrets()
+	cfg.AnticheatP5Enforce = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ANTICHEAT_P5_SECRET") {
+		t.Fatalf("enforcement without P5 secret accepted: %v", err)
+	}
+	cfg.AnticheatP5Secret = strings.Repeat("8d", 32)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid enforced P5 config rejected: %v", err)
+	}
+}
+
 func TestValidateRejectsDevSecretsInProduction(t *testing.T) {
 	cfg := Config{AppEnv: "production", JWTSecret: "dev-only-change-me"}
 	if err := cfg.Validate(); err == nil {
@@ -63,30 +117,15 @@ func TestValidateDeliveryCDNConfiguration(t *testing.T) {
 }
 
 func TestValidateAllowsRealSecretInProduction(t *testing.T) {
-	cfg := Config{
-		AppEnv:                     "production",
-		JWTSecret:                  "a-real-32-char-random-secret-value",
-		AnticheatSecret:            "a-distinct-anticheat-secret-value",
-		GameAPISecret:              "a-distinct-game-api-secret-value",
-		SiteOrderSecret:            "a-distinct-site-order-secret-value",
-		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
-		DeliveryManifestSigningKey: testDeliverySigningKey,
-	}
+	cfg := productionConfigWithStrongSecrets()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("production с нормальными секретами должен проходить: %v", err)
 	}
 }
 
 func TestValidateRejectsEmptyDatabaseURLInProduction(t *testing.T) {
-	cfg := Config{
-		AppEnv:                     "production",
-		JWTSecret:                  "a-real-32-char-random-secret-value",
-		AnticheatSecret:            "a-distinct-anticheat-secret-value",
-		GameAPISecret:              "a-distinct-game-api-secret-value",
-		SiteOrderSecret:            "a-distinct-site-order-secret-value",
-		DeliveryManifestSigningKey: testDeliverySigningKey,
-		// DatabaseURL пуст → тихий SQLite-fallback, запрещён в проде.
-	}
+	cfg := productionConfigWithStrongSecrets()
+	cfg.DatabaseURL = "" // Пустой URL → тихий SQLite-fallback, запрещён в проде.
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("production без DATABASE_URL должен отклоняться (SQLite-fallback запрещён)")
 	}
@@ -118,8 +157,8 @@ func TestGameAPISecretFromEnv(t *testing.T) {
 }
 
 func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
-	jwt := "a-real-32-char-random-secret-value"
-	base := Config{AppEnv: "production", JWTSecret: jwt, DeliveryManifestSigningKey: testDeliverySigningKey}
+	base := productionConfigWithStrongSecrets()
+	jwt := base.JWTSecret
 
 	cases := map[string]string{
 		"деривированный из JWT": "anticheat:" + jwt,
@@ -136,15 +175,8 @@ func TestValidateRejectsWeakAnticheatSecret(t *testing.T) {
 }
 
 func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
-	jwt := "a-real-32-char-random-secret-value"
-	base := Config{
-		AppEnv:                     "production",
-		JWTSecret:                  jwt,
-		AnticheatSecret:            "a-distinct-anticheat-secret-value",
-		SiteOrderSecret:            "a-distinct-site-order-secret-value",
-		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
-		DeliveryManifestSigningKey: testDeliverySigningKey,
-	}
+	base := productionConfigWithStrongSecrets()
+	jwt := base.JWTSecret
 
 	cases := map[string]string{
 		"деривированный из JWT": "game:" + jwt,
@@ -161,15 +193,8 @@ func TestValidateRejectsWeakGameAPISecret(t *testing.T) {
 }
 
 func TestValidateRejectsWeakSiteOrderSecret(t *testing.T) {
-	jwt := "a-real-32-char-random-secret-value"
-	base := Config{
-		AppEnv:                     "production",
-		JWTSecret:                  jwt,
-		AnticheatSecret:            "a-distinct-anticheat-secret-value",
-		GameAPISecret:              "a-distinct-game-api-secret-value",
-		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
-		DeliveryManifestSigningKey: testDeliverySigningKey,
-	}
+	base := productionConfigWithStrongSecrets()
+	jwt := base.JWTSecret
 
 	for name, secret := range map[string]string{
 		"пуст":            "",
@@ -202,31 +227,17 @@ func TestV1BridgeRequiresAndHonorsCutoff(t *testing.T) {
 }
 
 func TestProductionRejectsMalformedDeliverySigningKey(t *testing.T) {
-	cfg := Config{
-		AppEnv:                     "production",
-		JWTSecret:                  "a-real-jwt-secret-value",
-		AnticheatSecret:            "a-distinct-anticheat-secret-value",
-		GameAPISecret:              "a-distinct-game-api-secret-value",
-		SiteOrderSecret:            "a-distinct-site-secret-value",
-		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
-		DeliveryManifestSigningKey: strings.Repeat("z", 64),
-	}
+	cfg := productionConfigWithStrongSecrets()
+	cfg.DeliveryManifestSigningKey = strings.Repeat("z", 64)
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DELIVERY_MANIFEST_SIGNING_KEY") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
 
 func TestBotValidationDoesNotRequireDeliverySigningMaterial(t *testing.T) {
-	cfg := Config{
-		AppEnv:                     "production",
-		JWTSecret:                  "a-real-jwt-secret-value",
-		AnticheatSecret:            "a-distinct-anticheat-secret-value",
-		GameAPISecret:              "a-distinct-game-api-secret-value",
-		SiteOrderSecret:            "a-distinct-site-secret-value",
-		DatabaseURL:                "postgres://user:pass@127.0.0.1:5432/launcher?sslmode=disable",
-		DeliveryV1Bridge:           true,
-		DeliveryManifestSigningKey: "not-a-key",
-	}
+	cfg := productionConfigWithStrongSecrets()
+	cfg.DeliveryV1Bridge = true
+	cfg.DeliveryManifestSigningKey = "not-a-key"
 	if err := cfg.ValidateBot(); err != nil {
 		t.Fatalf("bot must not require delivery signing configuration: %v", err)
 	}

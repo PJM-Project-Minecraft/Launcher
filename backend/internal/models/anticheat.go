@@ -73,15 +73,18 @@ type Screenshot struct {
 	Nonce    string `gorm:"size:64;index" json:"nonce"` // игровая сессия на момент запроса
 	// Status: pending (запрос создан, ждёт лаунчер) | capturing (лаунчер взял в работу)
 	// | done (скриншот загружен) | failed (ошибка/таймаут).
-	Status      string     `gorm:"size:16;not null;default:pending;index" json:"status"`
-	RequestedBy string     `gorm:"size:64" json:"requestedBy"` // login админа
-	FileName    string     `gorm:"size:255" json:"fileName"`   // имя файла в storage
-	Width       int        `json:"width"`
-	Height      int        `json:"height"`
-	Size        int64      `json:"size"`                  // байты JPEG
-	Error       string     `gorm:"size:255" json:"error"` // причина, если failed
-	CreatedAt   time.Time  `gorm:"index" json:"createdAt"`
-	CapturedAt  *time.Time `json:"capturedAt,omitempty"` // когда лаунчер загрузил
+	Status         string     `gorm:"size:16;not null;default:pending;index" json:"status"`
+	Trust          string     `gorm:"size:32;not null;default:client_untrusted" json:"trust"`
+	CaptureChannel string     `gorm:"size:32;not null;default:native_signed" json:"captureChannel"`
+	CaptureSource  string     `gorm:"size:32" json:"captureSource"`
+	RequestedBy    string     `gorm:"size:64" json:"requestedBy"` // login админа
+	FileName       string     `gorm:"size:255" json:"fileName"`   // имя файла в storage
+	Width          int        `json:"width"`
+	Height         int        `json:"height"`
+	Size           int64      `json:"size"`                  // байты JPEG
+	Error          string     `gorm:"size:255" json:"error"` // причина, если failed
+	CreatedAt      time.Time  `gorm:"index" json:"createdAt"`
+	CapturedAt     *time.Time `json:"capturedAt,omitempty"` // когда лаунчер загрузил
 }
 
 // CheatSignature — запись блэклиста, по которой лаунчер и агенты ищут читы.

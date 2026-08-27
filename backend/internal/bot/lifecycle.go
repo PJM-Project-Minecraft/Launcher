@@ -96,6 +96,8 @@ func (s *Service) HandleText(c tele.Context) error {
 	case repo.FlowLinkPassword:
 		_, err := s.handleLinkPassword(chatID, msgID, sender, payload, text)
 		return err
+	case repo.FlowLinkTotp:
+		return s.handleLinkTOTP(chatID, payload, text)
 	case repo.FlowLinkOtp:
 		return s.handleLinkOTP(chatID, sender, payload, strings.TrimSpace(text))
 	case repo.FlowRegUsername:

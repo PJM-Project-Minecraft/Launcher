@@ -69,13 +69,15 @@ func (s *ScreenshotService) RequestScreenshot(ctx context.Context, userUUID, log
 		return models.Screenshot{}, errors.New("userUuid и nonce обязательны")
 	}
 	rec := models.Screenshot{
-		ID:          uuid.NewString(),
-		UserUUID:    userUUID,
-		Login:       login,
-		Nonce:       nonce,
-		Status:      "pending",
-		RequestedBy: adminLogin,
-		CreatedAt:   s.now(),
+		ID:             uuid.NewString(),
+		UserUUID:       userUUID,
+		Login:          login,
+		Nonce:          nonce,
+		Status:         "pending",
+		Trust:          "client_untrusted",
+		CaptureChannel: "native_signed",
+		RequestedBy:    adminLogin,
+		CreatedAt:      s.now(),
 	}
 	if err := s.db.WithContext(ctx).Create(&rec).Error; err != nil {
 		return models.Screenshot{}, err
@@ -109,7 +111,7 @@ func (s *ScreenshotService) PendingScreenshot(ctx context.Context, nonce string)
 
 // CompleteScreenshot сохраняет загруженный лаунчером JPEG: пишет файл в storageRoot
 // и помечает запись done. Меняет статус на failed при ошибке записи.
-func (s *ScreenshotService) CompleteScreenshot(ctx context.Context, id string, data []byte, width, height int) error {
+func (s *ScreenshotService) CompleteScreenshot(ctx context.Context, id string, data []byte, width, height int, source string) error {
 	if len(data) == 0 {
 		return errors.New("пустой скриншот")
 	}
@@ -139,13 +141,14 @@ func (s *ScreenshotService) CompleteScreenshot(ctx context.Context, id string, d
 	}
 	return s.db.WithContext(ctx).Model(&models.Screenshot{}).Where("id = ?", id).
 		Updates(map[string]any{
-			"status":      "done",
-			"file_name":   fileName,
-			"width":       width,
-			"height":      height,
-			"size":        int64(len(data)),
-			"captured_at": now,
-			"error":       "",
+			"status":         "done",
+			"file_name":      fileName,
+			"width":          width,
+			"height":         height,
+			"size":           int64(len(data)),
+			"captured_at":    now,
+			"capture_source": source,
+			"error":          "",
 		}).Error
 }
 

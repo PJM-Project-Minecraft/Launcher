@@ -9,6 +9,41 @@ import (
 	"launcher-backend/internal/models"
 )
 
+type identityVerifier struct {
+	*fakeVerifier
+	owners map[string][2]string
+}
+
+func (f *identityVerifier) SessionOwnerByNonce(nonce string) (string, string, bool) {
+	owner, ok := f.owners[nonce]
+	return owner[0], owner[1], ok
+}
+
+func TestSignedClaimsCannotBorrowAnotherPlayersNonce(t *testing.T) {
+	nonce := "attacker-live-nonce"
+	verifier := &identityVerifier{
+		fakeVerifier: &fakeVerifier{verified: map[string]bool{}},
+		owners:       map[string][2]string{nonce: {"attacker-uuid", "Attacker"}},
+	}
+	svc := NewService(newTestDB(t), "secret", false, verifier, "")
+	token, err := svc.signer.Sign(LaunchClaims{
+		UUID: "victim-uuid", Login: "Victim", Nonce: nonce,
+		Expires: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := svc.Confirm(token, ConfirmProof{}); err == nil {
+		t.Fatal("confirm accepted signed victim claims over attacker nonce")
+	}
+	if verifier.verified[nonce] {
+		t.Fatal("mismatched claims reached verification side effect")
+	}
+	if _, err := svc.VerifySessionToken(token); err == nil {
+		t.Fatal("session endpoint accepted signed victim claims over attacker nonce")
+	}
+}
+
 // byUser отбирает детекты одного игрока: тестовая БД в пакете общая (file::memory:
 // cache=shared), поэтому глобальные списки содержат записи соседних тестов.
 func byUser(rows []models.Detection, uuid string) []models.Detection {

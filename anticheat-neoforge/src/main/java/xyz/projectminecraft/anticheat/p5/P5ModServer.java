@@ -28,6 +28,7 @@ public final class P5ModServer {
     public P5ModServer(IEventBus modBus) {
         modBus.addListener(P5ModServer::registerPayloads);
         NeoForge.EVENT_BUS.addListener(P5ModServer::onPlayerJoin);
+        NeoForge.EVENT_BUS.addListener(P5ModServer::onPlayerLogout);
         NeoForge.EVENT_BUS.addListener(P5ModServer::onServerStarted);
         NeoForge.EVENT_BUS.addListener(P5ModServer::onServerStopping);
     }
@@ -45,7 +46,8 @@ public final class P5ModServer {
     /** Опрос отзывов доступа: бэкенд решает, кого кикнуть, сервер исполняет. */
     private static void onServerStarted(ServerStartedEvent event) {
         if (P5Config.active()) {
-            LOG.info("[P5] активен: вход-хэндшейк + опрос отзывов каждые 25с, бэкенд {}", P5Config.API);
+            LOG.info("[P5] активен: enforce={}, вход-хэндшейк + lease каждые 30с, grace 180с, бэкенд {}",
+                    P5Config.ENFORCE, P5Config.API);
         } else {
             LOG.warn("[P5] ВЫКЛЮЧЕН: пустой ANTICHEAT_P5_SECRET в env сервера — защита не работает");
         }
@@ -59,6 +61,12 @@ public final class P5ModServer {
     private static void onPlayerJoin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             P5ServerHandler.onPlayerJoin(player);
+        }
+    }
+
+    private static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            P5RevokePoller.remove(player);
         }
     }
 }

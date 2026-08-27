@@ -27,10 +27,13 @@ func TestNormalizeUUID(t *testing.T) {
 
 func TestJoinFlowAllowsLauncherPlayer(t *testing.T) {
 	svc := newTestService()
-	sess := svc.IssueSession(models.User{
+	sess, err := svc.IssueSession(models.User{
 		Login:        "Liko",
 		ProviderUUID: "11111111-2222-3333-4444-555555555555",
 	}, "")
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
 
 	// Клиент вызывает join валидным токеном.
 	got, ok := svc.Store().Session(sess.AccessToken)
@@ -77,7 +80,10 @@ func TestInvalidTokenHasNoSession(t *testing.T) {
 
 func TestSessionStartsUnverified(t *testing.T) {
 	svc := newTestService()
-	sess := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-1")
+	sess, err := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-1")
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
 	got, _ := svc.Store().Session(sess.AccessToken)
 	if got.Verified {
 		t.Fatal("новая сессия не должна быть Verified до confirm")
@@ -86,7 +92,10 @@ func TestSessionStartsUnverified(t *testing.T) {
 
 func TestMarkVerifiedByNonce(t *testing.T) {
 	svc := newTestService()
-	sess := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-2")
+	sess, err := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-2")
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
 
 	if !svc.Store().MarkVerifiedByNonce("nonce-2") {
 		t.Fatal("confirm по корректному nonce должен пройти")
@@ -124,7 +133,10 @@ func TestMarkVerifiedUnknownNonce(t *testing.T) {
 // «Недействительная сессия». TouchByNonce продлевает сессию по nonce из heartbeat.
 func TestTouchByNonceExtendsSession(t *testing.T) {
 	svc := newTestService()
-	sess := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-touch")
+	sess, err := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-touch")
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
 	store := svc.Store()
 
 	// Симулируем сессию на грани истечения (15-мин TTL почти вышел).
@@ -153,7 +165,10 @@ func TestTouchByNonceUnknownOrExpired(t *testing.T) {
 	}
 
 	// Уже истёкшую сессию TouchByNonce не должен воскрешать.
-	sess := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-exp")
+	sess, err := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-exp")
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
 	store := svc.Store()
 	store.mu.Lock()
 	s := store.sessions[sess.AccessToken]

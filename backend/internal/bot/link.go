@@ -3,7 +3,10 @@ package bot
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"launcher-backend/internal/auth"
+	"launcher-backend/internal/models"
 	"launcher-backend/internal/repo"
 
 	"golang.org/x/crypto/bcrypt"
@@ -68,16 +71,12 @@ func (s *Service) handleLinkPassword(chatID int64, messageID int, sender *tele.U
 		return repo.EmptyPayload(), nil
 	}
 
-	// Тот же per-account замок, что и на входе в лаунчер: без него привязка через бота
-	// давала неограниченный онлайн-перебор пароля (и bcrypt-флуд) в обход лимита.
-	// На этой ветке auth_log НЕ пишем — иначе лок никогда не истечёт.
-	if repo.LoginLocked(s.ctx(), s.DB, user.Login) {
-		_ = s.notifyWarn(chatID, "Слишком много неудачных попыток. Попробуйте позже.")
-		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
-		return repo.EmptyPayload(), nil
-	}
-
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(pw)) != nil {
+		if repo.LoginLocked(s.ctx(), s.DB, user.Login) {
+			_ = s.notifyWarn(chatID, "Слишком много неудачных попыток. Попробуйте позже.")
+			_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+			return repo.EmptyPayload(), nil
+		}
 		ui := user.ID
 		_ = repo.InsertAuthLog(s.ctx(), s.DB, &ui, user.Login, "telegram-bot-link", false, strPtr("bad_password"))
 		_ = s.notifyWarn(chatID, "Не нашли такую учётку или пароль не подошёл.\nПроверьте раскладку и Caps Lock. Можно снова указать другой ник/логин/почту — я верну вас к первому шагу.")
@@ -85,6 +84,51 @@ func (s *Service) handleLinkPassword(chatID int64, messageID int, sender *tele.U
 		_ = repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowLinkLogin, &ep)
 		return ep, nil
 	}
+
+	ui := user.ID
+	if user.TOTPEnabled && user.TOTPSecret != "" {
+		dp := repo.DialoguePayload{OtpUserID: &ui}
+		if err := repo.SaveDialogue(s.ctx(), s.DB, chatID, repo.FlowLinkTotp, &dp); err != nil {
+			return repo.EmptyPayload(), err
+		}
+		_ = s.notifyHTML(chatID, s.msgWithCancelHint(
+			"<b>Шаг 3</b>: введите текущий 6-значный код из приложения-аутентификатора."), keyboardDismiss())
+		return dp, nil
+	}
+
+	return s.issueLinkChatOTP(chatID, payload, user)
+}
+
+func (s *Service) handleLinkTOTP(chatID int64, payload repo.DialoguePayload, code string) error {
+	if payload.OtpUserID == nil {
+		return fmt.Errorf("нет user id для TOTP")
+	}
+	user, err := repo.FindUserByID(s.ctx(), s.DB, *payload.OtpUserID)
+	if err != nil {
+		return err
+	}
+	if user == nil || !user.TOTPEnabled || user.TOTPSecret == "" {
+		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+		return s.notifyWarn(chatID, "Настройки 2FA изменились. Начните привязку заново.")
+	}
+	ok, step := auth.ValidateTOTPWithStep(user.TOTPSecret, strings.ReplaceAll(strings.TrimSpace(code), " ", ""), time.Now().UTC())
+	if ok {
+		ok, err = repo.ConsumeTOTPStep(s.ctx(), s.DB, user.ID, step)
+		if err != nil {
+			return err
+		}
+	}
+	if !ok {
+		return s.notifyWarn(chatID, "Неверный или уже использованный код двухфакторной аутентификации.")
+	}
+	payload.LinkTOTPStep = &step
+	if _, err := s.issueLinkChatOTP(chatID, payload, user); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) issueLinkChatOTP(chatID int64, payload repo.DialoguePayload, user *models.User) (repo.DialoguePayload, error) {
 
 	code, err := otpPlain()
 	if err != nil {
@@ -111,11 +155,29 @@ func (s *Service) handleLinkPassword(chatID int64, messageID int, sender *tele.U
 	return dp, nil
 }
 
+func linkStepUpSatisfied(user *models.User, consumedStep *int64) bool {
+	if user == nil {
+		return false
+	}
+	if !user.TOTPEnabled || user.TOTPSecret == "" {
+		return true
+	}
+	return consumedStep != nil && *consumedStep == user.TOTPLastStep
+}
+
 func (s *Service) handleLinkOTP(chatID int64, sender *tele.User, payload repo.DialoguePayload, code string) error {
 	if payload.OtpUserID == nil {
 		return fmt.Errorf("нет user id для OTP")
 	}
 	uid := *payload.OtpUserID
+	user, err := repo.FindUserByID(s.ctx(), s.DB, uid)
+	if err != nil {
+		return err
+	}
+	if !linkStepUpSatisfied(user, payload.LinkTOTPStep) {
+		_ = repo.ClearDialogue(s.ctx(), s.DB, chatID)
+		return s.notifyWarn(chatID, "Настройки 2FA изменились или подтверждение устарело. Начните привязку заново.")
+	}
 	ok, err := s.consumeOTPCheck(chatID, uid, purposeLink, code)
 	if err != nil {
 		return err

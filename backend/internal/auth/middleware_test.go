@@ -10,6 +10,7 @@ import (
 	"launcher-backend/internal/models"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -95,5 +96,20 @@ func TestRequireAuthRejectsBanned(t *testing.T) {
 	}
 	if got := requireAuthStatus(t, s, ""); got != http.StatusUnauthorized {
 		t.Errorf("нет токена: got %d, want 401", got)
+	}
+}
+
+func TestUserFromTokenRejectsHS384(t *testing.T) {
+	s := newAuthTestService(t)
+	user := makeUser(t, s, models.User{})
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS384, jwt.MapClaims{
+		"sub": user.ID,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString(s.jwtSecret)
+	if err != nil {
+		t.Fatalf("sign HS384 token: %v", err)
+	}
+	if _, err := s.UserFromToken(t.Context(), token); err == nil {
+		t.Fatal("HS384 token must be rejected; launcher tokens are pinned to HS256")
 	}
 }

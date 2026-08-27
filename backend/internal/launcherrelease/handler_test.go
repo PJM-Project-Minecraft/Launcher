@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"mime/multipart"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -119,6 +121,46 @@ func TestCreateRejectsBadVersion(t *testing.T) {
 	}
 	if res.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+}
+
+func TestReleaseUploadStreamsBeyondDefaultJSONBudget(t *testing.T) {
+	service := newTestService(t)
+	app := fiber.New(fiber.Config{
+		BodyLimit:                    1024,
+		StreamRequestBody:            true,
+		DisablePreParseMultipartForm: true,
+	})
+	auth := func(c fiber.Ctx) error {
+		c.Locals("current-user", models.User{Login: "testadmin", Role: "admin"})
+		return c.Next()
+	}
+	NewHandler(service, nil).RegisterRoutes(app, auth)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("version", "0.2.1")
+	part, _ := writer.CreateFormFile("linux-x64", "launcher")
+	_, _ = part.Write(bytes.Repeat([]byte("x"), 2048))
+	_ = writer.Close()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer app.Shutdown()
+	go func() { _ = app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/api/admin/releases/", body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("http.Do: %v", err)
+	}
+	if res.StatusCode != 201 {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("status=%d body=%s", res.StatusCode, raw)
 	}
 }
 

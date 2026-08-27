@@ -101,7 +101,10 @@ func (h Handler) launcherSession(c fiber.Ctx) error {
 	}
 	var req launcherSessionRequest
 	_ = c.Bind().Body(&req)
-	sess := h.service.IssueSession(user, req.Nonce)
+	sess, err := h.service.IssueSession(user, req.Nonce)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(yggError{Error: "ServiceUnavailable", ErrorMessage: "Не удалось создать игровую сессию"})
+	}
 	return c.JSON(fiber.Map{
 		"accessToken": sess.AccessToken,
 		"clientToken": sess.ClientToken,
@@ -160,7 +163,10 @@ func (h Handler) refresh(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return forbidden(c, "Некорректный запрос")
 	}
-	newToken := randomToken()
+	newToken, err := randomToken(h.service.entropy)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(yggError{Error: "ServiceUnavailable", ErrorMessage: "Не удалось обновить игровую сессию"})
+	}
 	sess, ok := h.service.Store().ReplaceToken(req.AccessToken, newToken)
 	if !ok {
 		return forbidden(c, "Недействительный токен")

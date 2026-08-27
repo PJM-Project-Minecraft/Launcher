@@ -115,6 +115,7 @@ func (h Handler) RegisterRoutes(app *fiber.App, authMiddleware fiber.Handler) {
 	// общий секрет ANTICHEAT_P5_SECRET в заголовке X-AC-P5-Secret (server-to-server, не JWT;
 	// per-route, как остальные не-JWT роуты этой группы).
 	group.Post("/p5/verify", h.p5Verify)
+	group.Post("/p5/lease", h.p5Lease)
 	// P5-опрос: игровой сервер спрашивает, кого из онлайна кикнуть (отзыв доступа —
 	// молчание агента, detect-kick). Исполняет кик игровой сервер, не агент в JVM игрока.
 	group.Post("/p5/revoked", h.p5Revoked)
@@ -739,21 +740,11 @@ func (h Handler) screenshotImage(c fiber.Ctx) error {
 	return c.SendFile(path)
 }
 
-// screenshotClaims принимает токен любого из двух каналов съёмки:
-//   - shot-token процесса лаунчера (старая схема: кадр снимал сам лаунчер);
-//   - launch-token из JVM (новая: снимает нативный агент, а Java-агент только несёт
-//     кадр на бэкенд). Второй возврат — true, если запрос пришёл из JVM: такому
-//     аплоаду обязательна подпись нативки, иначе кадр мог подменить мод в той же JVM.
-//
-// Каналы не пересекаются: лаунчер новой версии съёмку не ведёт (нативка получила ключ),
-// старый лаунчер ключа не кладёт → Java-агент в этот канал не лезет.
-func (h Handler) screenshotClaims(c fiber.Ctx) (LaunchClaims, bool, error) {
-	tok := launchTokenFromHeader(c)
-	if claims, err := h.service.VerifyScreenshotToken(tok); err == nil {
-		return claims, false, nil
-	}
-	claims, err := h.service.VerifySessionToken(tok)
-	return claims, true, err
+// screenshotClaims accepts only the active session token. The removed
+// screenshot-token channel allowed unsigned launcher-provided JPEGs; completion
+// now always requires the native pixel HMAC below.
+func (h Handler) screenshotClaims(c fiber.Ctx) (LaunchClaims, error) {
+	return h.service.VerifySessionToken(launchTokenFromHeader(c))
 }
 
 // screenshotPending — клиент опрашивает: есть ли pending-запрос скриншота для
@@ -762,7 +753,7 @@ func (h Handler) screenshotPending(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNoContent).Send(nil)
 	}
-	claims, _, err := h.screenshotClaims(c)
+	claims, err := h.screenshotClaims(c)
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -802,7 +793,7 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, fromJVM, err := h.screenshotClaims(c)
+	claims, err := h.screenshotClaims(c)
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -826,26 +817,18 @@ func (h Handler) screenshotUpload(c fiber.Ctx) error {
 	if err != nil || len(data) == 0 {
 		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Некорректные данные скриншота"})
 	}
-	if fromJVM {
-		// Кадр прошёл через JVM, где мог быть подменён модом. Доверяем только тому, что
-		// подписала нативка: сверяем HMAC пикселей и сами перекодируем PNG → JPEG.
-		jpegData, verr := h.service.VerifiedCaptureJPEG(
-			claims.Nonce, id, req.Width, req.Height, data, req.Signature)
-		if verr != nil {
-			// Не сошлась подпись = либо битая передача, либо подмена кадра. И то и другое
-			// админ должен увидеть как провал, а не как «чистый» скриншот.
-			slog.Warn("anticheat: скриншот с неверной подписью", "login", claims.Login,
-				"uuid", claims.UUID, "id", id, "error", verr)
-			_ = h.screenshots.FailScreenshot(c.Context(), id, "подпись кадра не сошлась")
-			return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Подпись кадра не сошлась"})
-		}
-		data = jpegData
-	} else if len(data) < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF {
-		// Старый канал (лаунчер грузит JPEG сам): не сохраняем произвольные байты,
-		// которые потом отдаются дашборду как image/jpeg.
-		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Ожидается JPEG"})
+	// Кадр прошёл через JVM, где мог быть подменён модом. Принимаем только то, что
+	// подписала нативка: сверяем HMAC пикселей и сами перекодируем PNG → JPEG.
+	jpegData, verr := h.service.VerifiedCaptureJPEG(
+		claims.Nonce, id, req.Width, req.Height, data, req.Signature)
+	if verr != nil {
+		slog.Warn("anticheat: скриншот с неверной подписью", "login", claims.Login,
+			"uuid", claims.UUID, "id", id, "error", verr)
+		_ = h.screenshots.FailScreenshot(c.Context(), id, "подпись кадра не сошлась")
+		return c.Status(http.StatusBadRequest).JSON(ErrorResponse{Message: "Подпись кадра не сошлась"})
 	}
-	if err := h.screenshots.CompleteScreenshot(c.Context(), id, data, req.Width, req.Height); err != nil {
+	data = jpegData
+	if err := h.screenshots.CompleteScreenshot(c.Context(), id, data, req.Width, req.Height, captureSource(req.Source)); err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrorResponse{Message: "Не удалось сохранить скриншот"})
 	}
 	slog.Info("anticheat: скриншот принят", "login", claims.Login, "id", id,
@@ -864,7 +847,7 @@ func (h Handler) screenshotFail(c fiber.Ctx) error {
 	if h.screenshots == nil {
 		return c.Status(http.StatusNotFound).JSON(ErrorResponse{Message: "Скриншоты выключены"})
 	}
-	claims, _, err := h.screenshotClaims(c)
+	claims, err := h.screenshotClaims(c)
 	if err != nil {
 		return c.Status(http.StatusUnauthorized).JSON(ErrorResponse{Message: "Недействительный токен сессии"})
 	}
@@ -884,7 +867,7 @@ func (h Handler) screenshotFail(c fiber.Ctx) error {
 // app-wide 512МБ до потолка base64-JPEG (~12МБ). Отвергает по Content-Length ДО
 // того, как Fiber забуферизует тело в память (защита от memory-DoS на ранней стадии).
 // Fiber v3 не имеет встроенного bodylimit-middleware — это ручная отсечка.
-const screenshotMaxBodySize = maxBase64Len + 2*1024*1024 // base64 + JSON-оверhead
+const ScreenshotMaxBodySize = maxBase64Len + 2*1024*1024 // base64 + JSON-оверhead
 
 // detectMaxBodySize — потолок тела /detect: держатель launch-token иначе мог бы слать
 // произвольно большой Details (пишется целиком в Raw) под app-wide 512МБ-лимитом.
@@ -922,7 +905,7 @@ func requestBodyLimit(maxBytes int, h fiber.Handler) fiber.Handler {
 }
 
 func screenshotUploadBodyLimit(h fiber.Handler) fiber.Handler {
-	return requestBodyLimit(screenshotMaxBodySize, h)
+	return requestBodyLimit(ScreenshotMaxBodySize, h)
 }
 
 // launchTokenFromHeader достаёт launch-token только из заголовка (НЕ из query —

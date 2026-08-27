@@ -633,7 +633,9 @@ struct LoginError {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct LauncherSettings {
-    #[serde(default)]
+    // Legacy read-only field: old settings files are accepted so they can be
+    // scrubbed, but bearer tokens are never serialized again.
+    #[serde(default, skip_serializing)]
     auth_token: Option<String>,
     #[serde(default)]
     last_user_uuid: Option<String>,
@@ -4636,21 +4638,18 @@ fn keyring_persists(token: &str) -> bool {
 fn save_token(token: &str) -> Result<(), String> {
     let keyring_ok = keyring_persists(token);
 
-    // JWT в settings.json (плейнтекст, права по umask) кладём ТОЛЬКО как fallback,
-    // когда keyring недоступен. При рабочем keyring поле очищаем — иначе токен всегда
-    // лежал бы открыто рядом, и keyring не давал бы защиты (кража = просто чтение файла).
-    let fallback_token = (!keyring_ok).then(|| token.to_string());
-    let settings_result = update_settings(|settings| settings.auth_token = fallback_token);
-
-    if keyring_ok || settings_result.is_ok() {
-        return Ok(());
-    }
-    Err(settings_result
-        .err()
-        .unwrap_or_else(|| "Не удалось сохранить сессию.".to_string()))
+    // Always scrub legacy plaintext. If keyring is unavailable the live
+    // SessionData still owns the token for this process, but no durable fallback
+    // is created on disk.
+    update_settings(|settings| settings.auth_token = None)?;
+    let _memory_only = !keyring_ok;
+    Ok(())
 }
 
 fn read_token() -> Result<String, String> {
+    // Loading settings also migrates any legacy plaintext token out of the
+    // active/new/old atomic settings set before keyring restoration is attempted.
+    let _ = load_settings()?;
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
         if let Ok(token) = entry.get_password() {
             if !token.trim().is_empty() {
@@ -4659,11 +4658,7 @@ fn read_token() -> Result<String, String> {
         }
     }
 
-    let settings = load_settings()?;
-    settings
-        .auth_token
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| "Сохранённая сессия не найдена.".to_string())
+    Err("Сохранённая сессия не найдена.".to_string())
 }
 
 fn delete_token() -> Result<(), String> {
@@ -4713,10 +4708,13 @@ fn load_settings_unlocked() -> Result<LauncherSettings, String> {
     }
     let data =
         fs::read_to_string(&path).map_err(|_| "Не удалось прочитать settings.json.".to_string())?;
-    let settings =
+    let mut settings: LauncherSettings =
         serde_json::from_str(&data).map_err(|_| "settings.json повреждён.".to_string())?;
     let _ = fs::remove_file(pending);
     let _ = fs::remove_file(backup);
+    if settings.auth_token.take().is_some() {
+        save_settings_unlocked(&settings)?;
+    }
     Ok(settings)
 }
 
@@ -5454,6 +5452,20 @@ mod tests {
             !keyring_persists("test-token"),
             "заглушку keyring нельзя считать рабочим хранилищем — иначе токен теряется"
         );
+    }
+
+    #[test]
+    fn legacy_plaintext_token_is_never_serialized() {
+        let mut settings = LauncherSettings::default();
+        settings.auth_token = Some("legacy-bearer-token".to_string());
+        settings.memory_gb = 7;
+
+        let serialized = serde_json::to_string(&settings).expect("serialize settings");
+        assert!(!serialized.contains("legacy-bearer-token"));
+        assert!(!serialized.contains("authToken"));
+        let restored: LauncherSettings =
+            serde_json::from_str(&serialized).expect("restore settings");
+        assert_eq!(restored.memory_gb, 7);
     }
 
     // Проверка окружения, а не кода: живо ли системное хранилище на этой машине.

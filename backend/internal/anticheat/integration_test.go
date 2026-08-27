@@ -204,6 +204,13 @@ func TestBlacklistETagAndRulesHTTP(t *testing.T) {
 		LaunchToken string `json:"launchToken"`
 	}
 	doJSON(t, app, "POST", "/api/anticheat/handshake/init", jwtToken, `{"hwidHash":"146d851b7a8a91a9866ab475ad657fb41ee8ef1c251654df283f526f9190ac99"}`, http.StatusOK, &initRes)
+	claims, err := svc.VerifyToken(initRes.LaunchToken)
+	if err != nil {
+		t.Fatalf("verify init token: %v", err)
+	}
+	if _, err := ygg.IssueSession(user, claims.Nonce); err != nil {
+		t.Fatalf("issue yggdrasil session: %v", err)
+	}
 	reqR := httptest.NewRequest("GET", "/api/anticheat/rules", nil)
 	reqR.Header.Set("X-Launch-Token", initRes.LaunchToken)
 	respR, _ := app.Test(reqR, fiber.TestConfig{Timeout: 5 * time.Second})
@@ -270,7 +277,6 @@ func TestScreenshotPollSurvivesLaunchTokenTTL(t *testing.T) {
 	// «Долго в игре»: тот же nonce, но токен уже просрочен (выдан 10 минут назад).
 	past := time.Now().Add(-10 * time.Minute)
 	expiredToken, err := NewTokenSigner(acSecret).Sign(LaunchClaims{
-		Aud:      audScreenshot, // скриншот-роуты принимают только токен процесса лаунчера
 		UUID:     user.ProviderUUID,
 		Login:    user.Login,
 		HwidHash: "hw-s",

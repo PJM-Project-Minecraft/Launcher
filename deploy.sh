@@ -35,8 +35,13 @@ git push origin "${BRANCH}"
 cyan "→ [2/3] Обновление кода на VPS..."
 ssh "${VPS}" "cd ${DIR} && git fetch -q origin && git reset --hard origin/${BRANCH}"
 
-cyan "→ [3/3] Пересборка и перезапуск контейнеров на VPS..."
-ssh "${VPS}" "cd ${DIR} && docker compose up -d --build --remove-orphans"
+cyan "→ [3/3] Проверка effective Compose и перезапуск контейнеров на VPS..."
+ssh "${VPS}" "cd ${DIR} && \
+  test -f .env && \
+  test -f docker-compose.override.yml && \
+  docker compose --env-file .env -f docker-compose.yml -f docker-compose.override.yml config --format json | \
+    python3 scripts/prod/compose-security-preflight.py && \
+  docker compose --env-file .env -f docker-compose.yml -f docker-compose.override.yml up -d --build --remove-orphans"
 
 green "✓ Выкачено в прод."
 echo "  Логи:    ssh ${VPS} 'cd ${DIR} && docker compose logs -f --tail=50'"

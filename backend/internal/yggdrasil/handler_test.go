@@ -16,7 +16,9 @@ import (
 // запущена) и не воскрешает неизвестную/истёкшую (404).
 func TestKeepaliveEndpoint(t *testing.T) {
 	svc := newTestService()
-	svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-ka")
+	if _, err := svc.IssueSession(models.User{Login: "Liko", ProviderUUID: "u"}, "nonce-ka"); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
 
 	app := fiber.New()
 	// keepalive требует владельца сессии: nonce приходит из тела, и без привязки к
@@ -61,7 +63,9 @@ func TestKeepaliveEndpoint(t *testing.T) {
 	}
 
 	// Чужой nonce: сессия жива, но принадлежит другому игроку — продлевать нельзя.
-	svc.IssueSession(models.User{Login: "Victim", ProviderUUID: "v"}, "nonce-victim")
+	if _, err := svc.IssueSession(models.User{Login: "Victim", ProviderUUID: "v"}, "nonce-victim"); err != nil {
+		t.Fatalf("issue victim session: %v", err)
+	}
 	if code := post(`{"nonce":"nonce-victim"}`); code != http.StatusNotFound {
 		t.Fatalf("чужой nonce: ожидался 404, получен %d", code)
 	}

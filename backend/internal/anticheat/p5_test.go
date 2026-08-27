@@ -3,18 +3,56 @@ package anticheat
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"launcher-backend/internal/yggdrasil"
 )
 
 type fakeSessions struct {
-	byName map[string][]yggdrasil.Session
+	byName  map[string][]yggdrasil.Session
+	byNonce map[string]yggdrasil.Session
 }
 
-func (f fakeSessions) ActiveSessions() []yggdrasil.OnlineSession       { return nil }
-func (f fakeSessions) SessionByNonce(string) (yggdrasil.Session, bool) { return yggdrasil.Session{}, false }
+func (f fakeSessions) ActiveSessions() []yggdrasil.OnlineSession { return nil }
+func (f fakeSessions) SessionByNonce(nonce string) (yggdrasil.Session, bool) {
+	sess, ok := f.byNonce[nonce]
+	return sess, ok
+}
 func (f fakeSessions) VerifiedSessionsByName(name string) []yggdrasil.Session {
 	return f.byName[name]
+}
+
+func TestP5LeaseBindsNonceAndServerIdentity(t *testing.T) {
+	sess := yggdrasil.Session{UUID: "11111111222233334444555555555555", Name: "Liko", Nonce: "nonce-live", Verified: true}
+	now := time.Unix(1_700_000_000, 0)
+	svc := NewService(newTestDB(t), "secret", false, nil, "")
+	svc.now = func() time.Time { return now }
+	svc.touchHeartbeat(sess.Nonce, sess.Name)
+	h := Handler{service: svc, sessions: fakeSessions{byNonce: map[string]yggdrasil.Session{"nonce-live": sess}}}
+
+	valid := h.p5LeaseStatus(p5LeaseConnection{PlayerUUID: sess.UUID, PlayerName: "liko", Nonce: sess.Nonce})
+	if !valid.Valid || valid.LeaseRemainingMillis != 180_000 {
+		t.Fatalf("live matching session did not renew lease: %+v", valid)
+	}
+	now = now.Add(30 * time.Second)
+	decreasing := h.p5LeaseStatus(p5LeaseConnection{PlayerUUID: sess.UUID, PlayerName: sess.Name, Nonce: sess.Nonce})
+	if !decreasing.Valid || decreasing.LeaseRemainingMillis != 150_000 {
+		t.Fatalf("lease poll extended reporter deadline instead of decreasing it: %+v", decreasing)
+	}
+	for name, connection := range map[string]p5LeaseConnection{
+		"borrowed nonce": {PlayerUUID: "victim-uuid", PlayerName: "Victim", Nonce: sess.Nonce},
+		"missing nonce":  {PlayerUUID: sess.UUID, PlayerName: sess.Name, Nonce: "missing"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := h.p5LeaseStatus(connection); got.Valid {
+				t.Fatalf("invalid connection renewed lease: %+v", got)
+			}
+		})
+	}
+	now = now.Add(151 * time.Second)
+	if got := h.p5LeaseStatus(p5LeaseConnection{PlayerUUID: sess.UUID, PlayerName: sess.Name, Nonce: sess.Nonce}); got.Valid || got.Reason != "reporters_stale" {
+		t.Fatalf("stale reporter renewed lease: %+v", got)
+	}
 }
 
 func TestP5Check(t *testing.T) {

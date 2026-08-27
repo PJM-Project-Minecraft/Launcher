@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -46,53 +47,142 @@ type p5Request struct {
 func (h Handler) p5Verify(c fiber.Ctx) error {
 	if h.p5.secret == "" {
 		// P5 выключен — не мешаем серверу (мод трактует это как «не кикать»).
-		return c.JSON(fiber.Map{"allow": true, "reason": "p5_disabled"})
+		return c.JSON(fiber.Map{"allow": true, "reason": "p5_disabled", "enforce": false})
 	}
 	if subtle.ConstantTimeCompare([]byte(c.Get("X-AC-P5-Secret")), []byte(h.p5.secret)) != 1 {
 		return c.SendStatus(http.StatusUnauthorized)
 	}
 	var req p5Request
 	if err := c.Bind().Body(&req); err != nil || req.PlayerName == "" || req.Challenge == "" {
-		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"allow": !h.p5.enforce, "reason": "bad_request"})
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"allow": !h.p5.enforce, "reason": "bad_request", "enforce": h.p5.enforce})
 	}
 
-	reason, ok := h.p5Check(req.PlayerName, req.Challenge, req.Proof)
+	reason, nonce, ok := h.p5CheckNonce(req.PlayerName, req.Challenge, req.Proof)
 	if ok {
-		return c.JSON(fiber.Map{"allow": true})
+		remaining, fresh := h.service.p5LeaseRemaining(nonce, h.service.now())
+		if fresh {
+			return c.JSON(fiber.Map{
+				"allow": true, "nonce": nonce, "enforce": h.p5.enforce,
+				"leaseRemainingMillis": remaining.Milliseconds(),
+			})
+		}
+		reason = "reporters_stale"
 	}
 	// Расхождение. Репорт-онли — пускаем, но фиксируем на Error (массовое срабатывание в
 	// логах = признак обхода, операторы должны это видеть до включения enforce). Enforce — кик.
 	slog.Error("anticheat P5: proof mismatch", "player", req.PlayerName, "reason", reason, "enforce", h.p5.enforce)
 	if h.p5.enforce {
-		return c.JSON(fiber.Map{"allow": false, "reason": reason})
+		return c.JSON(fiber.Map{"allow": false, "reason": reason, "enforce": true})
 	}
-	return c.JSON(fiber.Map{"allow": true, "reason": reason, "reportOnly": true})
+	return c.JSON(fiber.Map{"allow": true, "reason": reason, "reportOnly": true, "enforce": false})
 }
 
 // p5Check возвращает (reason, ok). ok=true только при валидном proof активной
 // Verified-сессии игрока. Сверяем со ВСЕМИ живыми сессиями ника: после обрыва у игрока
 // какое-то время живут две (см. VerifiedSessionsByName), и выбор случайной кикал честных.
 func (h Handler) p5Check(name, challenge, proof string) (string, bool) {
+	reason, _, ok := h.p5CheckNonce(name, challenge, proof)
+	return reason, ok
+}
+
+func (h Handler) p5CheckNonce(name, challenge, proof string) (string, string, bool) {
 	if h.sessions == nil {
-		return "no_provider", false
+		return "no_provider", "", false
 	}
 	sessions := h.sessions.VerifiedSessionsByName(name)
 	if len(sessions) == 0 {
-		return "no_verified_session", false
+		return "no_verified_session", "", false
 	}
 	got := strings.ToLower(strings.TrimSpace(proof))
 	if got == "" {
 		// Мод шлёт пустой proof, когда клиент не ответил на challenge за отведённое окно.
 		// Отдельная причина, а не bad_proof: «не успел» (слабый канал, загрузка мира) и
 		// «ответил неверно» (клиент без мода) требуют разных решений оператора.
-		return "no_response", false
+		return "no_response", "", false
 	}
 	for _, sess := range sessions {
 		if subtle.ConstantTimeCompare([]byte(got), []byte(p5Proof(challenge, sess.AccessToken))) == 1 {
-			return "", true
+			return "", sess.Nonce, true
 		}
 	}
-	return "bad_proof", false
+	return "bad_proof", "", false
+}
+
+const p5MaxLeaseAge = 180 * time.Second
+
+type p5LeaseConnection struct {
+	PlayerUUID string `json:"playerUuid"`
+	PlayerName string `json:"playerName"`
+	Nonce      string `json:"nonce"`
+}
+
+type p5LeaseRequest struct {
+	Connections []p5LeaseConnection `json:"connections"`
+}
+
+type p5LeaseResult struct {
+	Nonce                string `json:"nonce"`
+	Valid                bool   `json:"valid"`
+	LeaseRemainingMillis int64  `json:"leaseRemainingMillis,omitempty"`
+	Reason               string `json:"reason,omitempty"`
+}
+
+func (h Handler) p5LeaseStatus(connection p5LeaseConnection) p5LeaseResult {
+	result := p5LeaseResult{Nonce: connection.Nonce}
+	if h.sessions == nil || connection.Nonce == "" {
+		result.Reason = "no_session"
+		return result
+	}
+	sess, ok := h.sessions.SessionByNonce(connection.Nonce)
+	if !ok || !sess.Verified {
+		result.Reason = "inactive_session"
+		return result
+	}
+	normalizeUUID := func(value string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "-", ""))
+	}
+	if normalizeUUID(sess.UUID) != normalizeUUID(connection.PlayerUUID) ||
+		!strings.EqualFold(strings.TrimSpace(sess.Name), strings.TrimSpace(connection.PlayerName)) {
+		result.Reason = "identity_mismatch"
+		return result
+	}
+	if h.service != nil && len(h.service.RevokedAmong([]string{sess.Name})) > 0 {
+		result.Reason = "access_revoked"
+		return result
+	}
+	if h.service == nil {
+		result.Reason = "no_service"
+		return result
+	}
+	remaining, ok := h.service.p5LeaseRemaining(connection.Nonce, h.service.now())
+	if !ok {
+		result.Reason = "reporters_stale"
+		return result
+	}
+	result.Valid = true
+	result.LeaseRemainingMillis = remaining.Milliseconds()
+	return result
+}
+
+func (h Handler) p5Lease(c fiber.Ctx) error {
+	if h.p5.secret == "" {
+		return c.JSON(fiber.Map{"leases": []p5LeaseResult{}, "reason": "p5_disabled"})
+	}
+	if subtle.ConstantTimeCompare([]byte(c.Get("X-AC-P5-Secret")), []byte(h.p5.secret)) != 1 {
+		return c.SendStatus(http.StatusUnauthorized)
+	}
+	var req p5LeaseRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"leases": []p5LeaseResult{}})
+	}
+	if len(req.Connections) > maxP5Players {
+		req.Connections = req.Connections[:maxP5Players]
+	}
+	results := make([]p5LeaseResult, 0, len(req.Connections))
+	for _, connection := range req.Connections {
+		results = append(results, h.p5LeaseStatus(connection))
+	}
+	return c.JSON(fiber.Map{"leases": results, "serverTimeUnix": time.Now().UTC().Unix()})
 }
 
 // p5Proof — HMAC-SHA256(challenge) на ключе accessToken, hex. Одинаково считают мод и бэкенд.

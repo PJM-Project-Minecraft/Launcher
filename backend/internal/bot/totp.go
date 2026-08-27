@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"time"
 
+	"launcher-backend/internal/auth"
 	"launcher-backend/internal/models"
 	"launcher-backend/internal/repo"
 	"launcher-backend/internal/telegram"
@@ -111,7 +113,14 @@ func (s *Service) handleTotpConfirm(chatID int64, messageID int, telegramUID int
 	if len(code) != 6 {
 		return s.notifyWarn(chatID, "Нужен код из <b>6 цифр</b> без пробелов (как показывает приложение-аутентификатор прямо сейчас).")
 	}
-	if !totp.Validate(code, u.TOTPSecret) {
+	ok, step := auth.ValidateTOTPWithStep(u.TOTPSecret, code, time.Now().UTC())
+	if ok {
+		ok, err = repo.ConsumeTOTPStep(s.ctx(), s.DB, u.ID, step)
+		if err != nil {
+			return err
+		}
+	}
+	if !ok {
 		return s.notifyWarn(chatID, "Код не подошёл. Убедитесь, что время на телефоне включено автоматически, и введите <b>текущий</b> код из приложения.")
 	}
 	if messageID > 0 {
@@ -213,7 +222,14 @@ func (s *Service) handleTotpDisableOTP(chatID int64, messageID int, telegramUID 
 	if len(code) != 6 {
 		return s.notifyWarn(chatID, "Нужен код из <b>6 цифр</b> без пробелов (как показывает приложение-аутентификатор прямо сейчас).")
 	}
-	if !totp.Validate(code, u.TOTPSecret) {
+	ok, step := auth.ValidateTOTPWithStep(u.TOTPSecret, code, time.Now().UTC())
+	if ok {
+		ok, err = repo.ConsumeTOTPStep(s.ctx(), s.DB, u.ID, step)
+		if err != nil {
+			return err
+		}
+	}
+	if !ok {
 		return s.notifyWarn(chatID, "Код из приложения не совпал. Введите новый код с экрана authenticator (он обновляется каждые ~30 с).")
 	}
 	if messageID > 0 {

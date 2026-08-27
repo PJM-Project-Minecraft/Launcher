@@ -71,9 +71,22 @@ func main() {
 		// попытку (а также произвольную строку в PolicyConsent.IP и IP игровой сессии).
 		EnableIPValidation: true,
 		TrustProxyConfig:   trustCfg,
-		// Лимит тела запроса: загрузка бинарников релизов лаунчера через админку.
-		BodyLimit: 512 * 1024 * 1024,
+		// JSON по умолчанию ограничен 1 MiB. Большие тела запускают handler в
+		// streaming-режиме; только release multipart имеет отдельный 512 MiB parser.
+		BodyLimit:                    1 * 1024 * 1024,
+		StreamRequestBody:            true,
+		DisablePreParseMultipartForm: true,
 	})
+	app.Use(middleware.BodyBudget(
+		1*1024*1024,
+		map[string]int{"/api/anticheat/screenshot/": anticheat.ScreenshotMaxBodySize},
+		map[string]struct{}{
+			"/api/admin/releases":              {},
+			"/api/admin/releases/":             {},
+			"/api/v2/admin/launcher-releases":  {},
+			"/api/v2/admin/launcher-releases/": {},
+		},
+	))
 	app.Use(middleware.CORS(cfg.AllowedOrigins))
 	app.Use(middleware.ManifestCompression())
 
