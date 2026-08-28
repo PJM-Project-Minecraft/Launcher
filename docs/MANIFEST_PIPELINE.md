@@ -50,7 +50,7 @@ Delivery v2 — единый контур доставки профилей Mine
 
 Статус находится в `delivery_jobs`, а WEB читает его через
 `GET /api/v2/admin/delivery/jobs`. Ошибка публикации сохраняется и generation
-переименовывается в `.failed`; успешная — в `.published`.
+переименовывается в `.failed`; успешная удаляется после импорта в CAS.
 Привязка generation к release применяется в той же DB-транзакции, поэтому
 restart между commit и rename лишь завершает job, а не создаёт второй release.
 

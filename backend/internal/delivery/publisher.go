@@ -182,7 +182,9 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 		return
 	}
 	if job.Status == "succeeded" {
-		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))
+		if err := os.RemoveAll(processing); err != nil {
+			slog.Error("delivery v2 consumed generation cleanup failed", "profile", profileID, "generation", generation, "error", err)
+		}
 		return
 	}
 	if job.Status == "failed" {
@@ -194,7 +196,9 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 		if err := w.updateJob(&job, map[string]any{"status": "succeeded", "phase": "done", "message": "Immutable release активирован", "progress": 1.0, "ended_at": &ended}); err != nil {
 			return
 		}
-		_ = os.Rename(processing, filepath.Join(filepath.Dir(processing), generation+".published"))
+		if err := os.RemoveAll(processing); err != nil {
+			slog.Error("delivery v2 consumed generation cleanup failed", "profile", profileID, "generation", generation, "error", err)
+		}
 		if w.broker != nil {
 			w.broker.Publish(profileReleaseEvent)
 		}
@@ -226,8 +230,9 @@ func (w *Watcher) claimAndPublish(profileID, generation, source string) {
 		slog.Error("delivery v2 job finalize failed", "profile", profileID, "generation", generation, "error", err)
 		return
 	}
-	consumed := filepath.Join(filepath.Dir(processing), generation+".published")
-	_ = os.Rename(processing, consumed)
+	if err := os.RemoveAll(processing); err != nil {
+		slog.Error("delivery v2 consumed generation cleanup failed", "profile", profileID, "generation", generation, "error", err)
+	}
 	if w.broker != nil {
 		w.broker.Publish(profileReleaseEvent)
 	}

@@ -539,7 +539,7 @@ func TestReadyRenameIsTheOnlyPublicationSignal(t *testing.T) {
 	}
 }
 
-func TestProcessingRecoveryFinalizesCommittedGenerationWithoutRepublish(t *testing.T) {
+func TestProcessingRecoveryRemovesConsumedGenerationWithoutRepublish(t *testing.T) {
 	service, db := testService(t)
 	profile := models.Profile{ID: newID(), Name: "Test", Slug: "test", Loader: "fabric", GameVersion: "1.21.1", JavaVersion: 21, IsActive: true}
 	if err := db.Create(&profile).Error; err != nil {
@@ -581,8 +581,10 @@ func TestProcessingRecoveryFinalizesCommittedGenerationWithoutRepublish(t *testi
 	if job.Status != "succeeded" || job.ReleaseID == nil {
 		t.Fatalf("recovered job = %+v", job)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(upload), generation+".published")); err != nil {
-		t.Fatalf("published generation missing: %v", err)
+	for _, path := range []string{processing, filepath.Join(filepath.Dir(upload), generation+".published")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("consumed generation remains at %s: %v", path, err)
+		}
 	}
 	profileActivationSeen := false
 	for {
